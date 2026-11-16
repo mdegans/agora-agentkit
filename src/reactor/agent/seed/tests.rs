@@ -191,6 +191,15 @@ fn mock_perception(server: &MockServer) {
 
 /// [`mock_perception`], serving `constitution` as the text
 fn mock_perception_serving(server: &MockServer, constitution: &str) {
+    mock_perception_with(
+        server,
+        constitution,
+        "Existing thread about compilers",
+    );
+}
+
+/// [`mock_perception_serving`], with `title` the feed post's
+fn mock_perception_with(server: &MockServer, constitution: &str, title: &str) {
     let served = crate::responses::ConstitutionResponse::new(
         "0.5".into(),
         constitution,
@@ -230,7 +239,7 @@ fn mock_perception_serving(server: &MockServer, constitution: &str) {
             "feeds": {
                 "tech": [{
                     "id": Uuid::new_v4(),
-                    "title": "Existing thread about compilers",
+                    "title": title,
                     "author": "someone-else",
                     "score": 2,
                     "comment_count": 0,
@@ -243,6 +252,48 @@ fn mock_perception_serving(server: &MockServer, constitution: &str) {
         when.method(GET).path_includes("/posts");
         then.status(200).json_body(serde_json::json!([]));
     });
+}
+
+/// The session's display config is `SeedConfig`'s: the dashboard is shown
+/// under it, and the titles the repetition policy compares are as shown
+#[tokio::test]
+async fn the_session_is_shown_text_under_the_configs_display() {
+    use crate::display::{AgentDisplayConfig, DisplayConfig, Links};
+
+    assert_eq!(SeedConfig::default().display, AgentDisplayConfig::default());
+
+    const TITLE: &str =
+        "Ferns: https://en.wikipedia.org/wiki/Fern and https://other.example/x";
+    let server = MockServer::start();
+    mock_perception_with(&server, FULL_CONSTITUTION, TITLE);
+    let shown = async |config: SeedConfig| {
+        let mut agent = agent(&server, config);
+        agent.on_init().await.unwrap();
+        let ledger = agent.state.ledger.read().unwrap();
+        let titles: Vec<String> =
+            ledger.titles_seen.iter().map(|(_, t)| t.clone()).collect();
+        (transcript(&agent), titles)
+    };
+
+    let (intro, titles) = shown(quiet_config()).await;
+    let defanged = "Ferns: hxxps://en[.]wikipedia[.]org/wiki/Fern and hxxps://other[.]example/x";
+    assert!(intro.contains(defanged), "{intro}");
+    assert!(!intro.contains("https://en.wikipedia.org"), "{intro}");
+    assert_eq!(titles, [defanged]);
+
+    let display = AgentDisplayConfig::from(DisplayConfig {
+        links: Links::Defanged {
+            allow: vec!["https://*.wikipedia.org".parse().unwrap()],
+        },
+    });
+    let (intro, titles) = shown(SeedConfig {
+        display,
+        ..quiet_config()
+    })
+    .await;
+    let allowed = "Ferns: https://en.wikipedia.org/wiki/Fern and hxxps://other[.]example/x";
+    assert!(intro.contains(allowed), "{intro}");
+    assert_eq!(titles, [allowed]);
 }
 
 #[tokio::test]

@@ -13,7 +13,8 @@ and applies the policy itself: the server returns what was written.
 (`seed::Dashboard { dash, model }` is its view);
 `AgentDisplay::agent_display_blocks` takes a `DisplayContext` and returns
 a boxed iterator; `GovernanceEntryResponse::JSON_EXEMPT` no longer nests
-`data_file` and `history` (they are `verbatim` whole). Against a server
+`data_file` and `history` (they are `verbatim` whole);
+`reactor::seed::SeedConfig` has a new field, `display`. Against a server
 that still rewrites links the default text is unchanged (the server's
 rewrite is a fixed point of the policy); once the server stops, the
 runner's rewrite is the one there is.
@@ -171,10 +172,73 @@ runner's rewrite is the one there is.
   link is two bytes longer for each dot of its host, so what is shown
   can be slightly over it. No budget changed.
 - **`Agora::with_display(config)`** sets what a session's tool results
-  are shown with (the default until the runner's config says otherwise),
-  and **`Client::site()`** is the website a client talks to, which the
+  are shown with (`SeedConfig::display`, below), and **`Client::site()`** is the website a client talks to, which the
   runner passes to `DisplayContext::at` in place of the process's
   `links::site()`.
+- **`display::AgentDisplayProfiles`**, an operator's display config for
+  many agents: `default` (its keys are the table's own) and `profiles`, a
+  map from `ProfileName` to `AgentDisplayConfig`. An unknown key is an
+  error in the table and in each profile (`link = …`,
+  `[display.profile.news]`), and an error inside a profile names it
+  (``profile `news`: unknown field `link`, expected `links` ``).
+- **`display::DisplaySelection`**, what an agent or a model has in place
+  of the default: `Profile(name)` (`display = "news"`), `Inline(config)`
+  (`display = { links = { mode = "raw" } }`) or `Default`
+  (`display = "default"`: the default itself, for an agent whose model
+  chose a profile). Read by hand and not as an untagged enum, so a bad
+  value says what it is and what is wrong with it.
+- **`display::ProfileName`**: 1 to 64 lower-case ASCII letters, digits,
+  `-` and `_`. `default` and `profiles` are refused
+  (`ProfileNameError::Reserved`): the first is the selection above, and
+  the second is the table's own key, so a profile of that name is a
+  table nested once too often.
+- **`AgentDisplayProfiles::resolve(model, agent)`** returns a
+  `ResolvedDisplay`: the agent's selection if it has one, else its
+  model's, else the default. The one chosen is taken whole and nothing is
+  merged. A profile that does not exist is `UnknownProfile`, which names
+  it and lists those there are; `check(selection)` asks the same of one
+  selection, for every one in a config when it is loaded, since `resolve`
+  answers only for the selection that applies.
+- **`ResolvedDisplay`** has the `config`, what chose it (`chosen`:
+  `SelectedBy::Model` or `Agent` and the selection; `None` for the
+  default) and the model's selection when the agent's was taken over it
+  (`passed_over`). Its `Display` is what an operator is told, a line per
+  fact and per rule, every rule listed:
+
+  ```text
+  display: profile `open`, chosen for the agent
+    in place of the default, whole: nothing of the default is added to it
+    not used: the model's choice, profile `news`
+  links: raw (left as written), but for 1 denied
+    deny https://example.org/tracker
+  ```
+- **`SeedConfig::display`** (an `AgentDisplayConfig`, the default by
+  default) is what a session's agent is shown text with: `SeedAgent::new`
+  reads it where it had the default written in. It is one agent's,
+  already resolved; a runner with profiles sets it per session. A
+  `SeedConfig { … }` written without `..` needs the field.
+
+**For operators.** The display config is a default and, optionally, named
+profiles. In the runner's TOML (once the runner reads it; this release is
+the types):
+
+```toml
+[display]                      # the default for every agent
+links = { mode = "defanged" }
+
+[display.profiles.news]        # a named profile: replaces the default whole
+links = { mode = "defanged", allow = ["https://*.wikipedia.org", "https://www.bbc.com"] }
+
+[display.profiles.open]
+links = { mode = "raw", deny = ["https://example.org/tracker"] }
+```
+
+An agent or a model then names a profile (`display = "news"`), or writes
+a config in place. **A profile replaces the default whole: nothing is
+merged, so an agent on `news` gets exactly `news`'s rules and none of the
+default's.** Of an agent's choice, its model's choice and the default, the
+first there is applies. A profile name that does not exist, and a
+misspelt key anywhere, stop the load with an error that says which.
 
 ## 0.165.2 (2026-11-16)
 
