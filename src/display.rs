@@ -87,12 +87,21 @@ fn strict_common<'de, D: serde::Deserializer<'de>>(
 /// In both modes a page URL of Agora's site is written as its `agora://`
 /// link, and a page of the site with no link is treated as any other URL.
 ///
-/// Every URL start is judged on its own, one inside another's path or query
-/// included: `https://allowed.example/?u=https://other.example` keeps its
-/// first URL and has its second defanged.
+/// Every URL start is judged on its own, one inside another URL included,
+/// and a URL with another inside it is never left as written: in
+/// `https://allowed.example/?u=https://other.example` both are defanged,
+/// and in `https://other.example/?u=https://allowed.example` the second is
+/// kept. So what is left as written is exactly what was checked.
+///
+/// What holds of the result, whatever the text:
+///
+/// - **`defanged` with no `allow` rule** (the default): it has no `http://`
+///   and no `https://` in it, in any letter case.
+/// - **`raw` with `deny` rules**: no `http://` or `https://` URL in it, read
+///   from its scheme to its end as written, is one a rule denies.
 ///
 /// A URL is never left as written on the strength of a rule it cannot be
-/// checked against. One longer than [`MAX_URL_BYTES`], one that does not
+/// checked against. One with another inside it, one longer than [`MAX_URL_BYTES`], one that does not
 /// parse, and one with a backslash or a control character (which parsers
 /// read differently) match no `allow` rule, and are defanged under `raw`
 /// whenever there is a `deny` rule.
@@ -139,9 +148,10 @@ impl Links {
     /// `text` under this policy, with page URLs of `site` as their links.
     /// Borrowed when nothing changes.
     ///
-    /// `http://` and `https://` become `hxxp://` and `hxxps://` and the dots
-    /// of the authority `[.]`; a schemeless `www.` host gets the dots. The
-    /// path and query are copied.
+    /// `http://` and `https://`, in any case and wherever they are written
+    /// (`xhttp://`, `a:https://`), become `hxxp://` and `hxxps://` and the
+    /// dots of the authority `[.]`; a schemeless `www.` host at the start
+    /// of a word gets the dots. The path and query are copied.
     ///
     /// Time is linear in `text`: one pass, and each URL start reads at most
     /// [`MAX_URL_BYTES`] ahead and is parsed at most once for the site and
@@ -158,21 +168,10 @@ impl Links {
         let mut copied = 0; // everything before this offset is already in `out`
 
         while i < bytes.len() {
-            let (scheme_len, https) = if at_word_boundary(bytes, i)
-                && matches_at(bytes, i, b"http")
+            let (scheme_len, https) = if let Some(scheme) = scheme_at(bytes, i)
             {
-                if matches_at(bytes, i + 4, b"s://") {
-                    (8, true)
-                } else if matches_at(bytes, i + 4, b"://") {
-                    (7, false)
-                } else {
-                    i += 1;
-                    continue;
-                }
-            } else if at_word_boundary(bytes, i)
-                && matches_at(bytes, i, b"www.")
-                && bytes.get(i + 4).copied().is_some_and(is_authority_byte)
-            {
+                scheme
+            } else if www_at(bytes, i) {
                 (0, false)
             } else {
                 i += 1;
@@ -184,24 +183,23 @@ impl Links {
                 scheme_len > 0 && on_site_host(bytes, i + scheme_len, s)
             }) && let Some(end) = url_end(bytes, i)
                 && let Ok(link) = AgoraLink::parse_at(&text[i..end], Some(site))
+                    .map(|link| link.to_string())
+                // (links percent-encode a URL they carry; were one ever
+                // written whole, the page would be any other URL)
+                && !has_scheme(link.as_bytes())
             {
                 let buf = out.get_or_insert_with(|| {
                     String::with_capacity(text.len() + 16)
                 });
                 buf.push_str(&text[copied..i]);
-                buf.push_str(&link.to_string());
+                buf.push_str(&link);
                 copied = end;
                 i = end;
                 continue;
             }
 
-            // Left as written: on past its authority, whose `www.` is not
-            // a second URL
-            if self.leaves(text, i, scheme_len == 0) {
-                i += scheme_len.max(1);
-                while i < bytes.len() && is_authority_byte(bytes[i]) {
-                    i += 1;
-                }
+            if let Some(after) = self.leaves(text, i, scheme_len) {
+                i = after;
                 continue;
             }
 
@@ -214,14 +212,13 @@ impl Links {
 
             // The dots of the rest of the authority (for a `www.` start,
             // its own included)
-            let mut j = i + scheme_len;
-            while j < bytes.len() && is_authority_byte(bytes[j]) {
-                if bytes[j] == b'.' {
+            let j = authority_end(bytes, i + scheme_len);
+            for b in &bytes[i + scheme_len..j] {
+                if *b == b'.' {
                     buf.push_str("[.]");
                 } else {
-                    buf.push(bytes[j] as char);
+                    buf.push(*b as char);
                 }
-                j += 1;
             }
             copied = j;
             i = j.max(i + 1);
@@ -236,37 +233,99 @@ impl Links {
         }
     }
 
-    /// Whether the URL written at `start` is left as written
-    fn leaves(&self, text: &str, start: usize, schemeless: bool) -> bool {
+    /// Where to go on from when the URL written at `start` is left as
+    /// written: its end, so nothing in it is rewritten after it was checked
+    fn leaves(
+        &self,
+        text: &str,
+        start: usize,
+        scheme_len: usize,
+    ) -> Option<usize> {
         match self {
             Self::Defanged { allow } => {
-                !allow.is_empty()
-                    && !schemeless
-                    && written_url(text, start, false)
-                        .is_some_and(|url| allow.iter().any(|r| r.allows(&url)))
+                if allow.is_empty() || scheme_len == 0 {
+                    return None;
+                }
+                let (url, end) = written_url(text, start, scheme_len)?;
+                allow.iter().any(|r| r.allows(&url)).then_some(end)
+            }
+            // Nothing to check against, and nothing is ever defanged
+            Self::Raw { deny } if deny.is_empty() => {
+                Some(start + scheme_len.max(1))
             }
             Self::Raw { deny } => {
-                deny.is_empty()
-                    || written_url(text, start, schemeless)
-                        .is_some_and(|url| !deny.iter().any(|r| r.denies(&url)))
+                let (url, end) = written_url(text, start, scheme_len)?;
+                (!deny.iter().any(|r| r.denies(&url))).then_some(end)
             }
         }
     }
 }
 
 /// The URL written at `start`, parsed (`http://` put before a schemeless
-/// one), unless it is too long or parsers would not agree on it
-fn written_url(text: &str, start: usize, schemeless: bool) -> Option<Url> {
-    let end = url_end(text.as_bytes(), start)?;
+/// one), and its end. `None` when it is too long, has another URL start
+/// inside it, or is one parsers would not agree on
+fn written_url(
+    text: &str,
+    start: usize,
+    scheme_len: usize,
+) -> Option<(Url, usize)> {
+    let bytes = text.as_bytes();
+    let end = url_end(bytes, start)?;
     let written = &text[start..end];
     if written.bytes().any(|b| b == b'\\' || b.is_ascii_control()) {
         return None;
     }
-    if schemeless {
-        Url::parse(&["http://", written].concat()).ok()
-    } else {
-        Url::parse(written).ok()
+    let authority = authority_end(bytes, start + scheme_len);
+    if (authority..end)
+        .any(|i| scheme_at(bytes, i).is_some() || www_at(bytes, i))
+    {
+        return None;
     }
+    let url = if scheme_len == 0 {
+        Url::parse(&["http://", written].concat())
+    } else {
+        Url::parse(written)
+    };
+    Some((url.ok()?, end))
+}
+
+/// `http://` or `https://` at `i`, in any case: its length, and whether it
+/// is `https`. A start wherever it is written
+fn scheme_at(bytes: &[u8], i: usize) -> Option<(usize, bool)> {
+    if !matches_at(bytes, i, b"http") {
+        None
+    } else if matches_at(bytes, i + 4, b"s://") {
+        Some((8, true))
+    } else if matches_at(bytes, i + 4, b"://") {
+        Some((7, false))
+    } else {
+        None
+    }
+}
+
+fn has_scheme(bytes: &[u8]) -> bool {
+    (0..bytes.len()).any(|i| scheme_at(bytes, i).is_some())
+}
+
+/// A schemeless `www.` host at `i`, at the start of a word
+fn www_at(bytes: &[u8], i: usize) -> bool {
+    at_word_boundary(bytes, i)
+        && matches_at(bytes, i, b"www.")
+        && bytes.get(i + 4).copied().is_some_and(is_authority_byte)
+}
+
+/// The end of the authority that starts at `from`: the first byte that
+/// cannot be in one, or the start of another URL (`a:https://…`), which
+/// is then seen as one
+fn authority_end(bytes: &[u8], from: usize) -> usize {
+    let mut end = from;
+    while end < bytes.len()
+        && is_authority_byte(bytes[end])
+        && scheme_at(bytes, end).is_none()
+    {
+        end += 1;
+    }
+    end
 }
 
 /// Whether `b` can be in a URL's authority. The first byte that cannot ends
@@ -285,9 +344,9 @@ fn matches_at(bytes: &[u8], i: usize, pat: &[u8]) -> bool {
             .all(|(a, b)| a.eq_ignore_ascii_case(b))
 }
 
-/// Whether a URL can start at `i`: not after a letter, a digit or a dot, so
-/// the `www.` of `foo.www.bar` is not a start. Neither is the `http` of
-/// `xhttp://`, which is left as written
+/// Whether a schemeless `www.` host can start at `i`: not after a letter,
+/// a digit or a dot, so `awww.example.com` and the `www.` of `foo.www.bar`
+/// are prose. A scheme needs no boundary ([`scheme_at`])
 fn at_word_boundary(bytes: &[u8], i: usize) -> bool {
     i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'.')
 }

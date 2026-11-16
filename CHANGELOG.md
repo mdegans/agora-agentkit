@@ -36,8 +36,17 @@ module: `display`.
   backslash or a control character match no `allow` rule, and are defanged
   under `raw` whenever there is a `deny` rule. A schemeless `www.` host
   matches no `allow` rule, and is checked against `deny` rules as
-  `http://`. A URL inside another's path or query is judged on its own, so
-  an allowed URL can have a defanged one in its query.
+  `http://`. A URL inside another is judged on its own, and a URL with
+  another inside it is never left as written.
+- **The scanner closes two holes the server's had**, and differs from the
+  server's output on such text only. `http://` and `https://` are a URL
+  start wherever they are written, in any case (`xhttp://example.com`,
+  `1https://…` and `so.https://…` were left as written), and a URL after
+  another's `:` or `@` is no longer taken for its authority
+  (`https://a:https://evil.example/x` kept its second URL whole). So
+  under the default policy the result has no `http://` or `https://` in
+  it, in any case; under `raw`, no URL left in it is one a `deny` rule
+  matches. A schemeless `www.` host still has to start a word.
 - **`display::DisplayConfig`** (`links`) and **`AgentDisplayConfig`**,
   which flattens it (`links()`, `AsRef<DisplayConfig>`). An unknown key in
   either, or in `links`, is an error.

@@ -136,22 +136,233 @@ fn a_url_inside_a_url_is_defanged_too() {
     );
 }
 
-/// Pinned, not endorsed (the server's scanner did the same): a URL straight
-/// after a letter, a digit or a dot is not a start, and one after another's
-/// `:` is taken for its authority, so each stays in the text as written
+/// A scheme is a start wherever it is written, and one inside another
+/// URL's authority is not taken for part of it. The server's scanner left
+/// each of these fetchable as written
 #[test]
-fn urls_the_scanner_does_not_see() {
-    for text in [
-        "xhttp://example.com",
-        "1https://example.com",
-        "so.https://example.com",
+fn a_scheme_is_a_start_anywhere() {
+    for (text, want) in [
+        ("xhttp://example.com", "xhxxp://example[.]com"),
+        ("1https://example.com", "1hxxps://example[.]com"),
+        ("so.https://example.com", "so.hxxps://example[.]com"),
+        ("XhTtP://Example.com", "Xhxxp://Example[.]com"),
+        (
+            "https://a:https://evil.example/x",
+            "hxxps://a:hxxps://evil[.]example/x",
+        ),
+        (
+            "https://a.b@http://evil.example/x",
+            "hxxps://a[.]b@hxxp://evil[.]example/x",
+        ),
+        ("https://https://x.y", "hxxps://hxxps://x[.]y"),
+        ("httphttp://x.y", "httphxxp://x[.]y"),
     ] {
-        assert!(matches!(defang(text), Cow::Borrowed(_)), "{text}");
+        assert_eq!(defang(text), want);
     }
+    // A schemeless host still starts a word
+    for prose in ["awww.example.com", "swww.example.com", "a.www.example.com"] {
+        assert!(matches!(defang(prose), Cow::Borrowed(_)), "{prose}");
+    }
+}
+
+/// xorshift64: the same texts on every run
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> usize {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0 as usize
+    }
+}
+
+/// Texts made of the pieces URLs are made of, in no sensible order
+fn generated(count: usize) -> Vec<String> {
+    const PIECES: &[&str] = &[
+        "http://",
+        "https://",
+        "HTTPS://",
+        "hTtP://",
+        "http:/",
+        "http",
+        "s://",
+        "://",
+        "www.",
+        "WWW.",
+        "a",
+        "x",
+        "evil.example",
+        "ok.example",
+        "en.ok.example",
+        "subliminal.technology",
+        "/agora/post/7ad26ccd",
+        "/agora/search?q=",
+        "/agora/protocol",
+        "/agora/",
+        "/x",
+        "/..",
+        "/",
+        ":",
+        ":8443",
+        "@",
+        "?",
+        "?u=",
+        "#",
+        "&",
+        "=",
+        ".",
+        "..",
+        ",",
+        "_",
+        "*",
+        " ",
+        "\n",
+        "(",
+        ")",
+        "[",
+        "]",
+        "<",
+        ">",
+        "\\",
+        "ü",
+        "中",
+        "%2F",
+        "%2e",
+        "\u{1}",
+        "u:p@",
+        "[::1]",
+        "127.0.0.1",
+    ];
+    let mut rng = Rng(0x9E37_79B9_7F4A_7C15);
+    (0..count)
+        .map(|_| {
+            (0..1 + rng.next() % 12)
+                .map(|_| PIECES[rng.next() % PIECES.len()])
+                .collect()
+        })
+        .collect()
+}
+
+const ADVERSARIAL: &[&str] = &[
+    "https://a:https://evil.example/x",
+    "https://a:8443:http://evil.example/x",
+    "https://https://evil.example/x",
+    "http://https://http://evil.example/x",
+    "https://u:https://evil.example/x@ok.example/",
+    "https://https://ok.example@evil.example/",
+    "https://ok.example/a/https://evil.example/x",
+    "https://ok.example/a/https://evil.example/x/../../../../y",
+    "https://ok.example/?u=https://evil.example/x&v=http://evil.example",
+    "https://ok.example/#https://evil.example/x",
+    "https://ok.example\\@https://evil.example/x",
+    "HTTPS://EVIL.EXAMPLE/x and hTtP://evil.example/x and httpS://Evil.Example",
+    "xhttp://evil.example 1https://evil.example so.https://evil.example",
+    "httphttp://evil.example/x",
+    "https://www.https://evil.example/x",
+    "www.ok.example/https://evil.example/x",
+    "https://subliminal.technology/agora/search?q=https://evil.example/x",
+    "https://subliminal.technology/agora/post/7ad26ccd#https://evil.example/x",
+    "https://subliminal.technology/agora/post/7ad26ccd?u=http://evil.example/x",
+    "https://subliminal.technology:https://evil.example/x",
+    "http://subliminal.technology/agora/protocolhttps://evil.example/x",
+    "[x](https://evil.example/x)<https://evil.example/x>\"http://evil.example\"",
+    "https://exämple.https://evil.example/x",
+    "https://\u{1}https://evil.example/x",
+];
+
+/// Under the default policy nothing `http://` or `https://` is left, in
+/// any case, whatever the text and whatever the site
+#[test]
+fn the_default_leaves_no_scheme() {
+    let sites = [
+        None,
+        Some(site()),
+        Some(url("https://subliminal.technology/agora")),
+    ];
+    let texts = generated(20_000);
+    for text in ADVERSARIAL
+        .iter()
+        .copied()
+        .chain(texts.iter().map(String::as_str))
+    {
+        for site in &sites {
+            let out = Links::default().rewrite(text, site.as_ref());
+            assert!(
+                !has_scheme(out.as_bytes()),
+                "{text:?} at {site:?} gave {out:?}"
+            );
+        }
+    }
+    // The site's pages are still links: one that carries a URL has it
+    // percent-encoded, and a page with no link is defanged with what is in it
     assert_eq!(
-        defang("https://a:https://evil.example/x"),
-        "hxxps://a:https://evil.example/x"
+        Links::default().rewrite(
+            "https://subliminal.technology/agora/search?q=https://evil.example/x",
+            Some(&site())
+        ),
+        "agora://search?q=https%3A%2F%2Fevil.example%2Fx"
     );
+    assert_eq!(
+        Links::default().rewrite(
+            "https://subliminal.technology/agora/post/7ad26ccd?u=http://evil.example/x \
+             xhttps://subliminal.technology/agora/protocol",
+            Some(&site())
+        ),
+        "hxxps://subliminal[.]technology/agora/post/7ad26ccd?u=hxxp://evil[.]example/x \
+         xagora://protocol"
+    );
+}
+
+/// Under `raw`, no URL left in the result is one a deny rule matches, read
+/// from its scheme to its end as written
+#[test]
+fn raw_leaves_no_denied_url() {
+    let links = deny(&[
+        "https://evil.example",
+        "https://ok.example/x",
+        "https://*.ok.example",
+        "http://a:8443",
+        "http://127.0.0.1",
+    ]);
+    let Links::Raw { deny: rules } = &links else {
+        unreachable!()
+    };
+    let sites = [None, Some(site())];
+    let texts = generated(20_000);
+    let mut left = 0;
+    for text in ADVERSARIAL
+        .iter()
+        .copied()
+        .chain(texts.iter().map(String::as_str))
+    {
+        for site in &sites {
+            let out = links.rewrite(text, site.as_ref());
+            let bytes = out.as_bytes();
+            for at in
+                (0..bytes.len()).filter(|i| scheme_at(bytes, *i).is_some())
+            {
+                // As any reader would take it, nested URL and all
+                let end = url_end(bytes, at).unwrap_or(bytes.len());
+                let Ok(found) = Url::parse(&out[at..end]) else {
+                    continue;
+                };
+                left += 1;
+                assert!(
+                    !rules.iter().any(|r| r.denies(&found)),
+                    "{text:?} gave {out:?}, where {found} is denied"
+                );
+            }
+        }
+    }
+    assert!(left > 1_000, "the texts left {left} URLs: too few to tell");
+    // No denied host in any adversarial text survives with a scheme
+    for text in ADVERSARIAL {
+        let out = links.rewrite(text, None).to_ascii_lowercase();
+        for scheme in ["http://", "https://"] {
+            assert!(!out.contains(&[scheme, "evil.example"].concat()), "{out}");
+        }
+    }
 }
 
 /// This site's page URLs are their links, which an agent can follow;
@@ -380,10 +591,24 @@ fn what_an_allow_rule_never_leaves() {
             "hxxps://example[.]org\\@evil.example/",
         ),
         ("https://example.org/\u{1}", "hxxps://example[.]org/\u{1}"),
-        // A URL inside an allowed one is judged on its own
+        // A URL with another inside it, a schemeless one too: both are
+        // judged, and the outer is not left to be read up to the inner
         (
             "https://example.org/?u=https://evil.example/x",
-            "https://example.org/?u=hxxps://evil[.]example/x",
+            "hxxps://example[.]org/?u=hxxps://evil[.]example/x",
+        ),
+        (
+            "https://example.org/a/www.evil.example",
+            "hxxps://example[.]org/a/www[.]evil[.]example",
+        ),
+        // The inner one alone, when it is the allowed one
+        (
+            "https://evil.example/?u=https://example.org/x",
+            "hxxps://evil[.]example/?u=https://example.org/x",
+        ),
+        (
+            "xhttps://example.org.evil.example",
+            "xhxxps://example[.]org[.]evil[.]example",
         ),
     ] {
         assert_eq!(links.rewrite(text, None), want);
@@ -438,11 +663,32 @@ fn what_a_deny_rule_does_not_let_by() {
             "hxxps://evil[.]example/y/../x",
         ),
         ("https://evil.example:443/x", "hxxps://evil[.]example:443/x"),
-        // Inside a URL that is not denied
+        // Inside a URL that is not denied, which is then not left either:
+        // what is left is what was checked, not a URL to be read up to
+        // the `[` of the one inside it
         (
             "https://ok.example/?u=https://evil.example/x",
-            "https://ok.example/?u=hxxps://evil[.]example/x",
+            "hxxps://ok[.]example/?u=hxxps://evil[.]example/x",
         ),
+        // (`/x/https:/…/../../../../y` is `/y`, and so is the inner path)
+        (
+            "https://evil.example/x/https://evil.example/x/../../../../y",
+            "hxxps://evil[.]example/x/https://evil.example/x/../../../../y",
+        ),
+        (
+            "https://evil.example/y/https://evil.example/x/../../../../y",
+            "hxxps://evil[.]example/y/https://evil.example/x/../../../../y",
+        ),
+        (
+            "https://a:https://evil.example/x",
+            "hxxps://a:hxxps://evil[.]example/x",
+        ),
+        (
+            "https://http://evil.example/x",
+            "hxxps://hxxp://evil[.]example/x",
+        ),
+        ("xhttps://evil.example/x", "xhxxps://evil[.]example/x"),
+        ("HTTPS://EVIL.EXAMPLE/x", "hxxps://EVIL[.]EXAMPLE/x"),
         // Not checkable: a backslash, no host, a bad port
         (
             "https://ok.example\\@evil.example/x",
