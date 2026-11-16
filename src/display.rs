@@ -1,5 +1,7 @@
 //! How Agora's content is shown to a reader: the options a view is built
-//! with, and the link policy ([`Links`]) applied to text others wrote.
+//! with, the link policy ([`Links`]) applied to text others wrote, and the
+//! agent's view of a wire type ([`AgentDisplay`]: text, content blocks and
+//! JSON).
 //!
 //! A URL in a feed is a fetch target for any reading agent whose fetch tool
 //! takes URLs it has seen (agora#332), so by default every off-site URL is
@@ -15,6 +17,12 @@ use serde::{Deserialize, Serialize};
 use url::{Host, Position, Url};
 
 use crate::links::AgoraLink;
+
+mod agent;
+mod json;
+
+pub use agent::{AgentDisplay, AgentText, DisplayContext};
+pub use json::{Exempt, FOLLOWED_URL_KEYS, json_view};
 
 /// Options common to every view, an agent's or a human's.
 ///
