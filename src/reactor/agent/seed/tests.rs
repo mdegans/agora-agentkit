@@ -5963,8 +5963,8 @@ fn a_long_proposal_is_listed_by_its_start_and_size() {
         text.starts_with(
             "The 1 proposal the Council hasn't taken up, a `<proposal>` element: \
              the attributes are the platform's, the text the start of the \
-             author's body, escaped (&lt; is <, &amp; is &); `not_a_real_` \
-             marks a tag of ours written in the text. \
+             author's body, escaped (&lt; is <, &amp; is &); a tag of ours \
+             written in the text gets `not_a_real_`. \
              get_content with its id reads one whole, with its comments.\n"
         ),
         "{text}"
@@ -6026,7 +6026,7 @@ fn a_proposal_in_the_context_is_a_pointer() {
     assert!(
         text.contains(
             "Its body (~10k tok) is in your context already, with no \
-             comments; a read is ~250 tok (the header, and a note pointing \
+             comments; a read is ~270 tok (the header, and a note pointing \
              to your earlier read of its text)."
         ),
         "{text}"
@@ -9322,8 +9322,8 @@ fn a_second_inbox_read_keeps_its_header() {
     assert!(
         second.contains(
             "Each is a `<message>` element, its text the sender's, escaped \
-             (&lt; is <, &amp; is &; `not_a_real_` marks a tag of ours written \
-             in the text). \
+             (&lt; is <, &amp; is &; a tag of ours written in the text gets \
+             `not_a_real_`). \
              The id of a `<message>` element is for report_message and \
              delete_message"
         ),
@@ -10038,29 +10038,37 @@ fn every_operator_legend_is_whole_and_escaping_is_stated_alike() {
     assert!(
         first.contains(&format!(
             "the text between the tags your operator's, {rules} \
-             (`</operator_message>` as `&lt;/not_a_real_operator_message>`)"
+             (`</operator_message>` as `&lt;/not_a_real_operator_message>`). \
+             Weigh"
         )),
         "{first}"
     );
     assert!(
         first.contains(&format!(
             "the text between the tags the sender's, {rules} (`</message>` \
-             as `&lt;/not_a_real_message>`)"
+             as `&lt;/not_a_real_message>`), even when only mentioned."
         )),
         "{first}"
     );
     assert!(
         second.contains(
             "Each is an `<operator_message>` element, its text your \
-             operator's, escaped (&lt; is <, &amp; is &; `not_a_real_` marks a \
-             tag of ours written in the text). Reply with send_message to `operator`."
+             operator's, escaped (&lt; is <, &amp; is &; a tag of ours \
+             written in the text gets `not_a_real_`). Reply with send_message \
+             to `operator`."
         ),
         "{second}"
     );
     assert!(!second.contains("as in your first read"), "{second}");
     assert!(super::prompt::ELEMENTS_NOTE.contains(&format!(
-        "{rules} (`</comment>` as `&lt;/not_a_real_comment>`)"
+        "{rules} (`</comment>` as `&lt;/not_a_real_comment>`), even when \
+         only mentioned."
     )));
+    // The operator's text is the operator's: nothing in its legend may
+    // suggest another wrote it (review of 0.165)
+    for text in [&first, &second] {
+        assert!(!text.contains("whoever wrote"), "{text}");
+    }
 }
 
 /// What Agora says of the operator sits under the header, as Agora's

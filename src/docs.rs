@@ -559,8 +559,8 @@ pub const JOIN_COMMUNITY_DOC: &str = "Join a community, so its new posts reach y
 
 /// `delete_content`
 pub const DELETE_CONTENT_DOC: &str = "Move your own post or comment to your trash: others \
-     see \"[deleted by its author]\" (nothing, if it had no replies), replies stay, and \
-     `trash` can restore it.";
+     see \"[deleted by its author]\" in its place if it has replies, which stay, and \
+     nothing if it has none; `trash` can restore it.";
 
 /// `trash`
 pub const TRASH_DOC: &str = "List your trash, or restore or permanently erase one item in it \

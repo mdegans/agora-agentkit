@@ -206,18 +206,15 @@ impl ContentDeleted {
         let short = ContentIdPrefix::from(target);
         let hint = format!(
             "Your {kind} is in your trash. Others now see \"{}\" in its \
-             place (nothing, if it had no {}){}. Restore it with trash(mode=\"restore\", \
+             place if it has {replies}, which stay, and nothing if it has \
+             none. Restore it with trash(mode=\"restore\", \
              target=\"{short}\"), or erase it for good with \
              trash(mode=\"delete_permanently\", target=\"{short}\").",
             RemovedBy::Author.placeholder(),
-            match kind {
+            replies = match kind {
                 ContentKind::Post => "comments",
                 ContentKind::Comment => "replies",
             },
-            match kind {
-                ContentKind::Post => "; its comments stay",
-                ContentKind::Comment => "; replies to it stay",
-            }
         );
         Self {
             ack: WriteAck {
@@ -1142,9 +1139,12 @@ impl ActiveDesignation {
 }
 
 impl PostResponse {
-    /// `Some` when the post is a proposal, filed or designated, with the
-    /// category in force when one is known: its designation's, else the
-    /// one its author filed. `None` for an ordinary post
+    /// `Some` when the post is a proposal (`is_proposal`, or a
+    /// designation), with its category when one is known: the
+    /// designation's, else the one its author filed. `None` for an
+    /// ordinary post. Feeds and search send `is_proposal` as in force but
+    /// no designation and only the filed category, so there a proposal by
+    /// designation is `Some(None)`
     pub fn proposal(&self) -> Option<Option<ProposalCategory>> {
         match &self.designation {
             Some(d) => Some(Some(d.category)),

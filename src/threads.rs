@@ -235,10 +235,11 @@ pub const ELEMENT_NAMES: &[&str] = &[
 
 /// What a tag of one of [`ELEMENT_NAMES`] inside a body is renamed with:
 /// `&lt;/comment&gt;` is shown as `&lt;/not_a_real_comment&gt;`. Every
-/// such tag, whoever wrote it and why (Steward, 2026-10-20). `forged_`
+/// such tag, even when only mentioned (Steward, 2026-10-20). `forged_`
 /// until 0.165, which accused honest authors who merely named a tag
 /// (Steward, 2026-11-15); a trial that night found `not_a_real_` protects
-/// as well (24/48 obeyed a planted notice under each word, on Mistral)
+/// as well: over three kinds of forgery Mistral obeyed 24 of 48 under
+/// either word
 pub const LOOKALIKE_PREFIX: &str = "not_a_real_";
 
 /// The prefix before 0.165, still in agents' memories and quotes: undone
@@ -426,10 +427,10 @@ fn element_name_at(rest: &str) -> Option<usize> {
 /// and a slash: `&lt;/comment&gt;` is `&lt;/not_a_real_comment&gt;`, and so
 /// are `&lt; / Comment` and `＜сomment` (a Cyrillic `с`). Escaped, none
 /// could close an element; renamed, none reads as one of ours either
-/// (Steward, 2026-10-20). Every one, a mere mention too: on Mistral a
-/// planted operator's notice with its closing tags left bare was obeyed
-/// 8/16 times, against 2/16 with all renamed (trial, 2026-11-15). Nothing
-/// else changes.
+/// (Steward, 2026-10-20). Every one, a mere mention too: with every tag
+/// renamed Mistral obeyed a planted `message` notice 2 times in 16,
+/// against 8 in 16 when only tags with attributes were renamed (trial,
+/// 2026-11-15). Nothing else changes.
 pub fn mark_lookalikes(escaped: &str) -> String {
     let mut out = String::with_capacity(escaped.len());
     let mut rest = escaped;
@@ -862,8 +863,10 @@ mod tests {
                     Just("&".to_string()),
                     Just("&lt;".to_string()),
                     Just("/".to_string()),
-                    Just("＜".to_string()),
-                    Just("‹".to_string()),
+                    proptest::sample::select(LOOKALIKE_OPENERS)
+                        .prop_map(String::from),
+                    proptest::sample::select(LOOKALIKE_SLASHES)
+                        .prop_map(String::from),
                     Just("\u{200B}".to_string()),
                     Just("\n".to_string()),
                     Just("\"".to_string()),
@@ -955,8 +958,10 @@ mod tests {
             fn no_lookalike_survives(s in hostile()) {
                 let shown = escape_text(&s).to_lowercase();
                 prop_assert_eq!(mark_lookalikes(&shown), shown.clone());
-                for opener in ["&lt;", "＜", "‹"] {
-                    for slash in ["", "/", " ", " / "] {
+                let openers = std::iter::once("&lt;".to_string())
+                    .chain(LOOKALIKE_OPENERS.iter().map(char::to_string));
+                for opener in openers {
+                    for slash in ["", "/", " ", " / ", "／", "⁄ ", "\u{200B}∕"] {
                         for name in ELEMENT_NAMES {
                             let tag = format!("{opener}{slash}{name}");
                             for (at, _) in shown.match_indices(&tag) {
