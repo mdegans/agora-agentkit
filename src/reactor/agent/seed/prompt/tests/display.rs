@@ -10,6 +10,7 @@ use url::Url;
 
 use super::*;
 use crate::display::AgentJson;
+use crate::display::oracle;
 use crate::responses::{
     ContentResponse, DocumentResponse, GitContentResponse, InboxResponse,
 };
@@ -18,9 +19,10 @@ fn site() -> Url {
     Url::parse("https://subliminal.technology").unwrap()
 }
 
-/// What the old server did to a field it rewrote
+/// What the old server did to a field it rewrote: its scanner, as of its
+/// removal ([`oracle::old_server`])
 fn old_server(text: &str) -> String {
-    Links::default().rewrite(text, Some(&site())).into_owned()
+    oracle::old_server(text, Some(&site())).into_owned()
 }
 
 /// An author's text with each kind of link: an off-site URL followed by
@@ -33,8 +35,8 @@ const LINKS: &str = "https://example.com/a?x=1&y=<2> then www.example.org/p \
 const DEFANGED: &str = "hxxps://example[.]com/a";
 
 /// `f` on every value at `path` in `value`: keys by name, `*` for each
-/// item of an array or entry of a map. A key an object lacks is added
-/// (an `Option` left out when `None`)
+/// item of an array or entry of a map, a number for one item. A key an
+/// object lacks is added (an `Option` left out when `None`)
 fn at(value: &mut Value, path: &[&str], f: &mut dyn FnMut(&mut Value)) {
     let Some((first, rest)) = path.split_first() else {
         f(value);
@@ -51,6 +53,10 @@ fn at(value: &mut Value, path: &[&str], f: &mut dyn FnMut(&mut Value)) {
                 at(item, rest, f);
             }
         }
+        Value::Array(items) => {
+            let index: usize = first.parse().expect("`*` or an index");
+            at(&mut items[index], rest, f);
+        }
         Value::Object(map) => {
             at(map.entry(*first).or_insert(Value::Null), rest, f);
         }
@@ -65,12 +71,21 @@ fn raw_and_rewritten<T: Serialize + DeserializeOwned>(
     fixture: &T,
     fields: &[&str],
 ) -> (T, T) {
+    filled_and_rewritten(fixture, fields, LINKS)
+}
+
+/// [`raw_and_rewritten`] with `fill` for [`LINKS`]
+fn filled_and_rewritten<T: Serialize + DeserializeOwned>(
+    fixture: &T,
+    fields: &[&str],
+    fill: &str,
+) -> (T, T) {
     let mut raw = serde_json::to_value(fixture).unwrap();
     for field in fields {
         let path: Vec<&str> = field.split('/').collect();
         let mut hits = 0;
         at(&mut raw, &path, &mut |v| {
-            *v = Value::String(format!("{LINKS} ({field})"));
+            *v = Value::String(format!("{fill} ({field})"));
             hits += 1;
         });
         assert!(hits > 0, "the fixture has no `{field}`");
@@ -103,12 +118,8 @@ fn parity<T: Serialize + DeserializeOwned>(
     fields: &[&str],
     render: impl Fn(&T, DisplayContext<'_>) -> String,
 ) -> String {
-    let (raw, rewritten) = raw_and_rewritten(fixture, fields);
-    let config = AgentDisplayConfig::default();
-    let site = site();
-    let new = render(&raw, DisplayContext::at(&config, Some(&site)));
-    let old = render(&rewritten, as_written());
-    assert_eq!(new, old);
+    let (raw, _) = raw_and_rewritten(fixture, fields);
+    let new = parity_filled(fixture, fields, LINKS, &render);
     // Every field was shown, and none of it kept a link
     assert!(
         new.matches(DEFANGED).count() >= fields.len(),
@@ -147,6 +158,22 @@ fn the_old_servers_rewrite_is_a_fixed_point() {
     assert_eq!(raw.rewrite(&once, Some(&site())), once);
     assert_eq!(as_written().links(&once), once);
     assert_eq!(as_written().links(LINKS), LINKS);
+}
+
+/// [`parity`]'s equality alone, with `fill` written into `fields`
+fn parity_filled<T: Serialize + DeserializeOwned>(
+    fixture: &T,
+    fields: &[&str],
+    fill: &str,
+    render: impl Fn(&T, DisplayContext<'_>) -> String,
+) -> String {
+    let (raw, rewritten) = filled_and_rewritten(fixture, fields, fill);
+    let config = AgentDisplayConfig::default();
+    let site = site();
+    let new = render(&raw, DisplayContext::at(&config, Some(&site)));
+    let old = render(&rewritten, as_written());
+    assert_eq!(new, old);
+    new
 }
 
 // ── What the old server rewrote: the same text as before ────────────────
@@ -361,6 +388,185 @@ fn an_agents_post_listing_is_what_it_was() {
         &["*/title"],
         |posts, cx| format_recent_activity(posts, 5, cx),
     );
+}
+
+/// A field the runner cuts, with a URL across the cut: the policy runs
+/// before the cut, as the server's rewrite did, so the cut lands where it
+/// did (in the defanged text)
+#[test]
+fn a_url_across_a_cut_is_what_it_was() {
+    // A reply's preview is cut to 100 characters, a post title to 60
+    let fill =
+        ["x".repeat(80), " https://example.com/abcdefghijkl".into()].concat();
+    let shown = parity_filled(
+        &full_dashboard(),
+        &[
+            "unread_post_replies/*/replies/*/preview",
+            "unread_comment_replies/*/preview",
+            "my_activity/*/post_title",
+        ],
+        &fill,
+        dashboard_text,
+    );
+    // Cut inside the defanged URL, as the server's text was
+    assert!(
+        shown.contains(&[&"x".repeat(80), " hxxps://e"].concat()),
+        "{shown}"
+    );
+    assert!(!shown.contains("https://"), "{shown}");
+}
+
+/// A comment chain whose root post is cut by the server
+/// (`root_omitted_chars`), a deleted comment's placeholder among others,
+/// and a read shown a second time (pointers to what is in the context)
+#[test]
+fn a_cut_root_a_placeholder_and_a_second_read_are_what_they_were() {
+    let chain = CommentChainResponse {
+        post_id: crate::fixtures::post().id,
+        post_title: Some("A title".into()),
+        root: Some(crate::fixtures::post()),
+        omitted_ancestors: 2,
+        root_omitted_chars: 1_000,
+        chain: vec![crate::fixtures::comment()],
+        in_your_trash: None,
+    };
+    parity(
+        &chain,
+        &["post_title", "root/title", "root/body", "chain/*/body"],
+        |chain, cx| {
+            CommentChain {
+                chain,
+                viewer_name: &viewer(),
+                once: &ShownOnce::default(),
+            }
+            .agent_display(cx)
+            .to_string()
+        },
+    );
+
+    let mut read = post_read();
+    let mut gone = crate::fixtures::comment();
+    gone.id = CommentId::from(uuid::Uuid::from_u128(77));
+    gone.body = RemovedBy::Author.placeholder().into();
+    gone.deleted_at = Some("2026-11-01T00:00:00Z".parse().unwrap());
+    gone.removed_by = Some(RemovedBy::Author);
+    read.comments.push(gone);
+    // Read twice in one session: the second is pointers, the same both
+    // ways but for their `size`, which counts the text as stored (the
+    // server's was defanged, a few bytes longer)
+    let twice = |read: &PostWithCommentsResponse, cx: DisplayContext<'_>| {
+        let once = ShownOnce::default();
+        let view = Post {
+            post: read,
+            viewer_name: &viewer(),
+            index: None,
+            once: &once,
+        };
+        let first = view.agent_display(cx).to_string();
+        let again = view.agent_display(cx).to_string();
+        let sizeless = again
+            .split(" size=\"")
+            .enumerate()
+            .map(|(i, part)| match i {
+                0 => part,
+                _ => part.split_once('"').map_or(part, |(_, rest)| rest),
+            })
+            .collect::<String>();
+        [first, sizeless].join("\n--- again ---\n")
+    };
+    let shown = parity(
+        &read,
+        &[
+            "post/title",
+            "post/body",
+            "comments/0/body",
+            "thread_summary",
+        ],
+        twice,
+    );
+    assert!(
+        shown.contains(RemovedBy::Author.placeholder()),
+        "the placeholder is shown: {shown}"
+    );
+    let again = shown.split("--- again ---").nth(1).unwrap();
+    assert!(again.contains(" shown=\""), "{again}");
+}
+
+/// Where the runner's policy deliberately differs from the server's
+/// scanner, side by side: the server's output, then the runner's. The
+/// parity fixtures above avoid these
+#[test]
+fn where_the_runner_differs_from_the_server() {
+    let site = site();
+    for (text, server, runner) in [
+        // A scheme is a start wherever it is written (layer 1)
+        (
+            "xhttp://example.com",
+            "xhttp://example.com",
+            "xhxxp://example[.]com",
+        ),
+        (
+            "so.https://example.com",
+            "so.https://example.com",
+            "so.hxxps://example[.]com",
+        ),
+        ("httphttp://x.y", "httphttp://x.y", "httphxxp://x[.]y"),
+        // A URL after another's `:` or `@` is one of its own (layer 1)
+        (
+            "https://a:https://evil.example/x",
+            "hxxps://a:https://evil.example/x",
+            "hxxps://a:hxxps://evil[.]example/x",
+        ),
+        (
+            "https://a.b@http://evil.example/x",
+            "hxxps://a[.]b@http://evil.example/x",
+            "hxxps://a[.]b@hxxp://evil[.]example/x",
+        ),
+        // Every spelling a parser reads as `http` or `https` (layer 5)
+        (
+            "https:evil.example/x",
+            "https:evil.example/x",
+            "hxxps:evil[.]example/x",
+        ),
+        (
+            "ht\ttps://evil.example/x",
+            "ht\ttps://evil.example/x",
+            "hx\txps://evil[.]example/x",
+        ),
+        // A site page before a space that is not ASCII is its link: the
+        // server read the space into it, and the page was not found
+        (
+            "https://subliminal.technology/agora/protocol\u{a0}next",
+            "hxxps://subliminal[.]technology/agora/protocol\u{a0}next",
+            "agora://protocol\u{a0}next",
+        ),
+        (
+            "https://subliminal.technology/agora/post/7ad26ccd\u{2028}x",
+            "hxxps://subliminal[.]technology/agora/post/7ad26ccd\u{2028}x",
+            "agora://post/7ad26ccd\u{2028}x",
+        ),
+    ] {
+        assert_eq!(oracle::old_server(text, Some(&site)), server, "{text:?}");
+        assert_eq!(
+            Links::default().rewrite(text, Some(&site)),
+            runner,
+            "{text:?}"
+        );
+    }
+    // Every spelling: the runner leaves none fetchable, and where the
+    // server did, the two differ (`https:///x` and `https://\nx` the
+    // server defanged too)
+    let mut differ = 0;
+    for spelling in oracle::SPELLINGS {
+        let server = oracle::old_server(spelling, Some(&site));
+        let runner = Links::default().rewrite(spelling, Some(&site));
+        assert_eq!(oracle::fetchable(&runner), None, "{spelling:?}");
+        if oracle::fetchable(&server).is_some() {
+            assert_ne!(server, runner, "{spelling:?}");
+            differ += 1;
+        }
+    }
+    assert_eq!(differ, oracle::SPELLINGS.len() - 3);
 }
 
 // ── What the server never covered: the Steward's decisions ──────────────

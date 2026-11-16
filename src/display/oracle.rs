@@ -142,6 +142,46 @@ pub fn fetchable(text: &str) -> Option<Url> {
     readings(text, Reader::Dropping).find_map(|reading| fetched(&reading))
 }
 
+/// Spellings of a scheme that a URL parser reads as `http` or `https`
+/// (each is `evil.example` to it), which the server's scanner did not see
+pub const SPELLINGS: &[&str] = &[
+    "https:/evil.example/x",
+    "https:evil.example/x",
+    "https:\\\\evil.example/x",
+    "http:/\\evil.example",
+    "http:\\/evil.example",
+    "https:///evil.example/x",
+    "ht\ttps://evil.example/x",
+    "h\nt\rt\tp\ns\n:\n/\n/evil.example/x",
+    "https\r\n://evil.example/x",
+    "https:\n//evil.example/x",
+    "https://\nevil.example/x",
+    "https:/\t/\nevil.example/x",
+    // What the runner's view makes a line break of, and trims before one
+    "https:   \nevil.example/x",
+    "https: \u{a0} \r\n//evil.example/x",
+    "ht\u{2028}tps://evil.example/x",
+    "http\u{b}s:\u{c}evil.example/x",
+    "https\u{1c}:\u{85}/\u{2029}/evil.example",
+    "https:// \nevil.example/x",
+    "HTTPS:EVIL.EXAMPLE",
+    "hTtP:\\evil.example",
+    "xhttps:evil.example/x",
+    "http::@evil.example/x",
+    "http:u:p@evil.example/x",
+    "http:\".evil.example/x",
+    "http:'@evil.example/x",
+    "http:(evil.example)",
+    "http:%65vil.example",
+    "http:[::1]/x",
+    "http:[::]/x",
+    "http:2130706433/x",
+    "https:\u{fc}ber.example/x",
+    "https://a:https:evil.example/x",
+    "https://ok.example/x/http:evil.example",
+    "www.ok.example/https:evil.example",
+];
+
 // ── agora-server's scanner, `crates/agora-server/src/urls.rs` as of its
 // removal (agora `5b606ca1^`), copied as it was: an oracle, not to be
 // fixed. Only `rewrite_at` with `defang` set, what every agent was served,

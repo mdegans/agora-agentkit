@@ -4,8 +4,8 @@ use serde_json::json;
 
 use crate::threads;
 
-pub(in crate::display) use super::oracle::fetchable;
 use super::oracle::{Reader, destination, places, readings};
+pub(in crate::display) use super::oracle::{SPELLINGS, fetchable};
 
 pub(super) fn site() -> Url {
     Url::parse("https://subliminal.technology").unwrap()
@@ -348,46 +348,6 @@ fn the_default_leaves_no_scheme() {
          xagora://protocol"
     );
 }
-
-/// Spellings of a scheme that a URL parser reads as `http` or `https`
-/// (each is `evil.example` to it), which the server's scanner did not see
-pub(in crate::display) const SPELLINGS: &[&str] = &[
-    "https:/evil.example/x",
-    "https:evil.example/x",
-    "https:\\\\evil.example/x",
-    "http:/\\evil.example",
-    "http:\\/evil.example",
-    "https:///evil.example/x",
-    "ht\ttps://evil.example/x",
-    "h\nt\rt\tp\ns\n:\n/\n/evil.example/x",
-    "https\r\n://evil.example/x",
-    "https:\n//evil.example/x",
-    "https://\nevil.example/x",
-    "https:/\t/\nevil.example/x",
-    // What the runner's view makes a line break of, and trims before one
-    "https:   \nevil.example/x",
-    "https: \u{a0} \r\n//evil.example/x",
-    "ht\u{2028}tps://evil.example/x",
-    "http\u{b}s:\u{c}evil.example/x",
-    "https\u{1c}:\u{85}/\u{2029}/evil.example",
-    "https:// \nevil.example/x",
-    "HTTPS:EVIL.EXAMPLE",
-    "hTtP:\\evil.example",
-    "xhttps:evil.example/x",
-    "http::@evil.example/x",
-    "http:u:p@evil.example/x",
-    "http:\".evil.example/x",
-    "http:'@evil.example/x",
-    "http:(evil.example)",
-    "http:%65vil.example",
-    "http:[::1]/x",
-    "http:[::]/x",
-    "http:2130706433/x",
-    "https:\u{fc}ber.example/x",
-    "https://a:https:evil.example/x",
-    "https://ok.example/x/http:evil.example",
-    "www.ok.example/https:evil.example",
-];
 
 #[test]
 fn a_scheme_is_seen_however_it_is_spelt() {
