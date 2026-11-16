@@ -91,8 +91,9 @@ impl<C: AsRef<DisplayConfig>> DisplayContext<'_, C> {
 /// budget) is implemented on a small struct that borrows the value and
 /// carries the rest, not put in the config.
 ///
-/// The provided methods take anything that is a [`DisplayContext`]: a
-/// `&AgentDisplayConfig` is one, on this process's site.
+/// Usable as a trait object, for the text and the blocks alike: a mixed
+/// list of views is a `Vec<Box<dyn AgentDisplay>>`, and a `&T` or a
+/// `Box<T>` shows what its `T` does, a `dyn AgentDisplay` included.
 pub trait AgentDisplay {
     /// Write the text an agent reads
     fn fmt_agent(
@@ -108,8 +109,22 @@ pub trait AgentDisplay {
         Exempt::NONE
     }
 
+    /// The content blocks an agent is shown: one text block of the text,
+    /// unless a type has more to show (an image, a document).
+    ///
+    /// It takes the context itself, not anything that is one, so that a
+    /// trait object has it: `(&config).into()` for a bare config
+    fn agent_display_blocks<'a>(
+        &'a self,
+        cx: DisplayContext<'a>,
+    ) -> Box<dyn Iterator<Item = Block> + 'a> {
+        let text = AgentText::new(self, cx).to_string();
+        Box::new(std::iter::once(Block::text(text)))
+    }
+
     /// The text as a [`Display`](fmt::Display):
-    /// `format!("{}", post.agent_display(&config))`
+    /// `format!("{}", post.agent_display(&config))`. A `dyn AgentDisplay`
+    /// has [`agent_text`](trait.AgentDisplay.html#method.agent_text)
     fn agent_display<'a>(
         &'a self,
         cx: impl Into<DisplayContext<'a>>,
@@ -118,19 +133,6 @@ pub trait AgentDisplay {
         Self: Sized,
     {
         AgentText::new(self, cx)
-    }
-
-    /// The content blocks an agent is shown: one text block of
-    /// [`agent_display`](Self::agent_display), unless a type has more to
-    /// show (an image, a document)
-    fn agent_display_blocks<'a>(
-        &'a self,
-        cx: impl Into<DisplayContext<'a>>,
-    ) -> impl Iterator<Item = Block>
-    where
-        Self: Sized,
-    {
-        std::iter::once(Block::text(self.agent_display(cx).to_string()))
     }
 
     /// The JSON an agent is shown: the value's own, through [`json_view`]
@@ -148,6 +150,17 @@ pub trait AgentDisplay {
     }
 }
 
+impl<'t> dyn AgentDisplay + 't {
+    /// [`AgentDisplay::agent_display`] of a trait object, which cannot
+    /// have that method (it names the type it is of)
+    pub fn agent_text<'a>(
+        &'a self,
+        cx: impl Into<DisplayContext<'a>>,
+    ) -> AgentText<'a, Self> {
+        AgentText::new(self, cx)
+    }
+}
+
 /// A value's [`AgentDisplay`] text as a [`Display`](fmt::Display)
 pub struct AgentText<'a, T: ?Sized> {
     value: &'a T,
@@ -155,8 +168,7 @@ pub struct AgentText<'a, T: ?Sized> {
 }
 
 impl<'a, T: AgentDisplay + ?Sized> AgentText<'a, T> {
-    /// What [`AgentDisplay::agent_display`] returns, for a `dyn
-    /// AgentDisplay` too
+    /// What [`AgentDisplay::agent_display`] returns
     pub fn new(value: &'a T, cx: impl Into<DisplayContext<'a>>) -> Self {
         Self {
             value,
@@ -173,7 +185,7 @@ impl<T: AgentDisplay + ?Sized> fmt::Display for AgentText<'_, T> {
 
 macro_rules! forward {
     ($($pointer:ty),*) => {$(
-        impl<T: AgentDisplay> AgentDisplay for $pointer {
+        impl<T: AgentDisplay + ?Sized> AgentDisplay for $pointer {
             fn fmt_agent(
                 &self,
                 f: &mut dyn fmt::Write,
@@ -188,8 +200,8 @@ macro_rules! forward {
 
             fn agent_display_blocks<'a>(
                 &'a self,
-                cx: impl Into<DisplayContext<'a>>,
-            ) -> impl Iterator<Item = Block> {
+                cx: DisplayContext<'a>,
+            ) -> Box<dyn Iterator<Item = Block> + 'a> {
                 (**self).agent_display_blocks(cx)
             }
         }

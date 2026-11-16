@@ -56,14 +56,20 @@ through, `AgentDisplay`. No wire type implements it yet.
   provided: `agent_display(cx)`, a `Display` (`AgentText`), so
   `format!("{}", post.agent_display(&config))`; `agent_display_blocks(cx)`,
   the content blocks (misanthropic's `Block`), one text block unless a
-  type has more to show, so `message.extend(post.agent_display_blocks(&config))`;
+  type has more to show, so `message.extend(post.agent_display_blocks(cx))`;
   and `agent_display_json(cx)`, for a `Serialize` type, the value's own
-  JSON under the link policy, or the serializer's error. Implemented for
-  `&T` and `Box<T>`. The three provided methods need a sized type; a
-  `dyn AgentDisplay` has `fmt_agent`, `json_exempt` and
-  `AgentText::new(value, cx)`. A rendering that needs more than the value
-  (a viewer, a byte budget) is a struct that borrows the value and
-  implements the trait.
+  JSON under the link policy, or the serializer's error. A rendering that
+  needs more than the value (a viewer, a byte budget) is a struct that
+  borrows the value and implements the trait.
+- **`AgentDisplay` is usable as a trait object, blocks included.**
+  `agent_display_blocks` takes a `DisplayContext` (not anything that is
+  one: `(&config).into()` for a bare config) and returns
+  `Box<dyn Iterator<Item = Block> + '_>`, so each view in a
+  `Vec<Box<dyn AgentDisplay>>` can be extended into one `Content`, and a
+  type can still override it. `agent_display` and `agent_display_json`
+  need a sized type; a `dyn AgentDisplay` has `agent_text(cx)`, the same
+  `Display`. Implemented for `&T` and `Box<T>` of any `T`, a
+  `dyn AgentDisplay` too, so a `Box<dyn AgentDisplay>` has all of it.
 - **`display::DisplayContext`**, what a view is rendered with: the config
   and the site whose page URLs become `agora://` links. The site is not
   an option, so it is beside the config. A `&AgentDisplayConfig` is a
