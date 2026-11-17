@@ -6,42 +6,54 @@ Releases before 0.72.0 are described in their commit messages and PRs.
 
 The link policy as the domain filters of Anthropic's web fetch and web
 search tools: `Links::fetch_domains` and `Links::search_domains`, each a
-`display::ToolDomains` holding the filter (`DomainFilter`: none,
-`allowed_domains`, `blocked_domains`, or no domain at all) and a note per
-rule it widens, narrows or leaves out (`DomainNote`, with the rule as
-written and a typed `DomainChange`). Anthropic runs both tools itself,
-and a link in a fetched page or a search result is followable on the
-next hop, so the tool's own list is the only gate there; the runner does
-not use these yet. Nothing breaks.
+`display::ToolDomains` holding the filter (`DomainFilter`: unfiltered,
+`allowed_domains`, `blocked_domains`, or `Withhold`) and a note per rule
+it widens or leaves out (`DomainNote`, with the rule as written and a
+typed `DomainChange`). Anthropic runs both tools itself, and a link in a
+fetched page or a search result is followable on the next hop, so the
+tool's own list is the only gate there. A runner uses
+`ToolDomains::offer`, a `ToolOffer` that is either `Withhold` or the
+`allowed_domains` / `blocked_domains` fields as misanthropic's `WebFetch`
+and `WebSearch` hold them. The runner does not use these yet. Nothing
+breaks.
 
-- **`defanged`, with rules.** Each rule's domain is allowed. A path or a
-  port is widened to the domain (web fetch matches on the domain alone),
-  and `*.example.org` is sent as `example.org`, which covers the apex too
-  unless another rule names it: a link shown followable that the tool
-  then refused would break what the rule is for. Web search takes a path
-  as a prefix, so there a path is sent (`en.wikipedia.org/wiki`) and
-  reported as widened to the paths that begin with it (`/wikix`): the
-  rule takes whole segments.
-- **`defanged`, with none** (the default): no filter. An empty allow list
+- **`defanged`, with rules.** Each rule's domain is allowed. Every entry
+  also reaches its subdomains, both schemes and any port; that is said
+  once. A path is widened to the domain (web fetch matches on the domain
+  alone), and so is a written port. `*.example.org` is sent as
+  `example.org`, and that entry always reaches `example.org` itself: the
+  rule is noted as widened unless another rule allows the whole of
+  `example.org` (no path, no port). Web search takes a path as a prefix,
+  so there a path is sent (`en.wikipedia.org/wiki`) and noted as widened
+  to the paths that begin with it (`/wikix`): the rule takes whole
+  segments.
+- **`defanged`, with none** (the default): unfiltered. An empty allow list
   says no link in what others wrote is shown followable, not what an
   agent may fetch; read as "fetch nothing" it would take the tools from
-  every agent on the default.
-- **`raw`.** Only a rule that denies a whole host is blocked by web
-  fetch; one with a path or a port is never widened (it would block pages
-  the rule leaves) and is not sent, unless a sent domain covers it. Web
-  search blocks a path as `domain/path/`, the pages under it and nothing
-  the rule leaves (`domain/path` would block `/blogger` under `/blog`);
-  the path itself stays the display's. `*.example.org` is not sent,
-  unless `example.org` is blocked by another rule.
+  every agent on the default. **Mind the cliff:** an allow list of only
+  rules that cannot be sent (`http://localhost`, an IP address) is
+  `Withhold`, offer no such tool, since "only these" must never become
+  "anything".
+- **`raw`.** Only a rule that denies a whole host is blocked, for either
+  tool. One with a path or a port is never widened (it would block pages
+  the rule leaves) and is not sent, unless a sent domain covers it; the
+  tool can still reach what it denies, and the display still defangs it.
+  `*.example.org` is not sent unless `example.org` is blocked by another
+  rule. A blocked entry also blocks the domain's subdomains, which
+  `LinkRule::denies` does not take for an exact host: accepted, and said.
+  Web search documents `domain/path/*` entries; they are not used until
+  their matching is verified.
 - **Never a 400.** An entry is only ASCII lower-case domain names of two
   labels or more (an internationalised name in its `xn--` form) and, for
-  web search, paths of letters, digits and `-._~`: an IP address, a
-  single label (`localhost`), an `_` or a path with a `%` is widened to
-  the domain or not sent, and said. An allow list none of whose rules can
-  be sent is `DomainFilter::NoDomain`: offer no such tool.
+  a web search allow rule, a path of letters, digits and `-._~`: an IP
+  address, a single label, an `_` is not sent, and a path with a `%` is
+  widened to the domain, each said.
 - **What the operator reads.** `ToolDomains`'s `Display` lists what is
-  sent, says once that every entry also covers its subdomains over http
-  and https, then a line per rule widened, narrowed or not sent.
+  sent, says once what every entry covers beyond its rule, then a line per
+  rule widened or not sent, with what follows from it.
+- `LinkRule` reads "takes only some paths" one way for `allows` and
+  `denies` and the projection alike (`allows_some_paths`,
+  `denies_some_paths`, private).
 
 ## 0.166.0 (2026-11-17)
 

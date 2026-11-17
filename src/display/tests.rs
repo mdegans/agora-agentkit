@@ -2021,7 +2021,6 @@ fn what_is_not_a_link_is_untouched() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
-
 // ── The policy as the server tools' domain filters ──────────────────────
 
 fn sent(domains: &ToolDomains) -> &[String] {
@@ -2031,7 +2030,7 @@ fn sent(domains: &ToolDomains) -> &[String] {
     }
 }
 
-/// `(rule, change)` per note, the rule as written
+/// `(rule, change)` per note, the rule as written, in the notes' order
 fn notes(domains: &ToolDomains) -> Vec<(String, DomainChange)> {
     domains
         .notes()
@@ -2047,22 +2046,74 @@ fn widened(entry: &str, by: &[Widening]) -> DomainChange {
     }
 }
 
+fn not_sent(why: NotSent) -> DomainChange {
+    DomainChange::NotSent(why)
+}
+
 fn strings(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
 }
 
-/// Anthropic's matching: the entry's domain or a subdomain of it, and for a
-/// web search entry with a path, a URL path that begins with it
-fn anthropic_matches(entry: &str, url: &Url) -> bool {
+fn both(links: &Links) -> [ToolDomains; 2] {
+    [links.fetch_domains(), links.search_domains()]
+}
+
+/// Anthropic's matching, written from its docs and not from the code under
+/// test: the entry's domain or a subdomain of it; for web search, a URL
+/// path that begins with the entry's path; for web fetch, an entry with a
+/// path matches nothing. A trailing dot on the URL's host is taken off: the
+/// docs do not say, and taking it off is what makes the entry cover the
+/// most (so the over-reach and over-block checks below are the stricter)
+fn reaches(tool: ServerTool, entry: &str, url: &Url) -> bool {
     let (domain, path) = entry.split_at(entry.find('/').unwrap_or(entry.len()));
+    if tool == ServerTool::WebFetch && !path.is_empty() {
+        return false;
+    }
     let Some(host) = url.host_str() else {
         return false;
     };
+    let host = host.strip_suffix('.').unwrap_or(host);
     let on_domain = host == domain
         || host
             .strip_suffix(domain)
             .is_some_and(|sub| sub.ends_with('.'));
     on_domain && url.path().starts_with(path)
+}
+
+/// The documented entry grammar, written separately from the code under
+/// test: no scheme, no `*` in the domain, a domain name of two LDH labels
+/// or more in lower-case ASCII, and for web fetch no path. A web search
+/// path is `/`-separated non-empty segments of unreserved characters
+fn in_grammar(tool: ServerTool, entry: &str) -> bool {
+    let (domain, path) = entry.split_at(entry.find('/').unwrap_or(entry.len()));
+    let labels: Vec<&str> = domain.split('.').collect();
+    let ldh = |l: &&str| {
+        !l.is_empty()
+            && l.len() <= 63
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+            && l.bytes().all(|b| {
+                b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'
+            })
+    };
+    let path_ok = match tool {
+        ServerTool::WebFetch => path.is_empty(),
+        ServerTool::WebSearch => {
+            path.is_empty()
+                || path.split('/').skip(1).all(|s| {
+                    !s.is_empty()
+                        && s.bytes().all(|b| {
+                            b.is_ascii_alphanumeric() || b"-._~".contains(&b)
+                        })
+                })
+        }
+    };
+    !entry.contains("://")
+        && !domain.contains('*')
+        && domain.len() <= 253
+        && labels.len() >= 2
+        && labels.iter().all(ldh)
+        && path_ok
 }
 
 #[test]
@@ -2120,27 +2171,77 @@ fn fetch_allow_widens_path_port_and_apex() {
     );
 }
 
+/// Notes are in the policy's order, not the entries' (which are sorted)
 #[test]
-fn a_wildcard_with_its_apex_ruled_is_not_widened() {
-    let links = allow(&["https://*.example.org", "https://example.org"]);
+fn notes_follow_the_policys_order() {
+    let links = allow(&[
+        "https://zz.example/a",
+        "http://localhost",
+        "https://aa.example:8443",
+        "https://127.0.0.1",
+    ]);
     let domains = links.fetch_domains();
-    assert_eq!(sent(&domains), strings(&["example.org"]));
-    assert_eq!(notes(&domains), []);
+    assert_eq!(sent(&domains), strings(&["aa.example", "zz.example"]));
+    let order: Vec<String> =
+        notes(&domains).into_iter().map(|(r, _)| r).collect();
+    assert_eq!(
+        order,
+        strings(&[
+            "https://zz.example/a",
+            "http://localhost",
+            "https://aa.example:8443",
+            "https://127.0.0.1",
+        ])
+    );
+}
+
+#[test]
+fn a_wildcard_with_its_whole_apex_ruled_is_not_noted() {
+    let links = allow(&["https://*.example.org", "https://example.org"]);
+    for domains in both(&links) {
+        assert_eq!(sent(&domains), strings(&["example.org"]));
+        assert_eq!(notes(&domains), []);
+    }
+}
+
+/// The entry for `*.example.org` reaches all of `example.org` itself; a
+/// rule for only part of the apex (a path, a port) does not cover that
+#[test]
+fn a_wildcard_beside_part_of_its_apex_is_noted() {
+    for apex in ["https://example.org/a", "https://example.org:8443"] {
+        let links = allow(&["https://*.example.org", apex]);
+        for domains in both(&links) {
+            let apex_note = domains
+                .notes()
+                .iter()
+                .find(|n| n.rule.to_string() == "https://*.example.org");
+            assert_eq!(
+                apex_note.map(|n| &n.change),
+                Some(&widened("example.org", &[Widening::Apex])),
+                "{apex}, {}",
+                domains.tool()
+            );
+        }
+    }
 }
 
 #[test]
 fn an_empty_allow_list_is_no_filter() {
-    for domains in [
-        Links::default().fetch_domains(),
-        Links::default().search_domains(),
-    ] {
+    for domains in both(&Links::default()) {
         assert_eq!(domains.filter(), &DomainFilter::Unfiltered);
         assert_eq!(notes(&domains), []);
+        assert_eq!(
+            domains.offer(),
+            ToolOffer::Offer {
+                allowed_domains: None,
+                blocked_domains: None
+            }
+        );
     }
     assert_eq!(
         Links::default().fetch_domains().to_string(),
-        "web fetch: no domain filter (no link is allowed; the tool is as \
-         configured)\n"
+        "web fetch: no allow rule: links to other sites are shown defanged; \
+         the tool is as configured\n"
     );
 }
 
@@ -2153,7 +2254,7 @@ fn hosts_no_tool_takes_are_not_sent() {
         "https://a_b.example.org",
         "https://bücher.example",
     ]);
-    for domains in [links.fetch_domains(), links.search_domains()] {
+    for domains in both(&links) {
         // The internationalised name is sent as the parse wrote it, ASCII
         assert_eq!(sent(&domains), strings(&["xn--bcher-kva.example"]));
         assert_eq!(
@@ -2161,47 +2262,69 @@ fn hosts_no_tool_takes_are_not_sent() {
             [
                 (
                     "https://127.0.0.1".to_string(),
-                    DomainChange::NotSent(NotSent::IpAddress)
+                    not_sent(NotSent::IpAddress)
                 ),
                 (
                     "http://[::1]:8080".to_string(),
-                    DomainChange::NotSent(NotSent::IpAddress)
+                    not_sent(NotSent::IpAddress)
                 ),
                 (
                     "http://localhost".to_string(),
-                    DomainChange::NotSent(NotSent::SingleLabel)
+                    not_sent(NotSent::SingleLabel)
                 ),
                 (
                     "https://a_b.example.org".to_string(),
-                    DomainChange::NotSent(NotSent::NotHostName)
+                    not_sent(NotSent::NotHostName)
                 ),
             ]
         );
-        for entry in sent(&domains) {
-            assert!(entry.is_ascii() && !entry.contains(['*', ':', '_']));
-        }
     }
 }
 
+/// The cliff: an empty allow list offers the tool unfiltered, but one of
+/// only unsendable rules withholds it
 #[test]
-fn allow_rules_none_of_which_can_be_sent_offer_no_tool() {
+fn allow_rules_none_of_which_can_be_sent_withhold_the_tool() {
     let links = allow(&["https://127.0.0.1", "http://localhost"]);
-    let domains = links.fetch_domains();
-    assert_eq!(domains.filter(), &DomainFilter::NoDomain);
-    assert_eq!(domains.notes().len(), 2);
+    for domains in both(&links) {
+        assert_eq!(domains.filter(), &DomainFilter::Withhold);
+        assert_eq!(domains.offer(), ToolOffer::Withhold);
+        assert_eq!(domains.notes().len(), 2);
+    }
     assert_eq!(
-        domains.to_string(),
-        "web fetch: nothing can be allowed (no allow rule can be sent), so \
-         offer no web fetch tool\n\
+        links.fetch_domains().to_string(),
+        "web fetch: withheld: no allow rule can be sent, and unfiltered it \
+         would reach anything\n\
          \x20 not sent: https://127.0.0.1: an IP address; the tool takes \
-         domain names (shown as written, not reached)\n\
+         domain names (shown as written; the tool will not reach it)\n\
          \x20 not sent: http://localhost: a single label; the tool takes \
-         domain names of two or more (shown as written, not reached)\n"
+         domain names of two or more (shown as written; the tool will not \
+         reach it)\n"
     );
 }
 
 #[test]
-fn fetch_deny_sends_only_whole_hosts() {
+fn the_offer_carries_the_list() {
+    let offer = allow(&["https://docs.rs/serde"]).search_domains().offer();
+    assert_eq!(
+        offer,
+        ToolOffer::Offer {
+            allowed_domains: Some(vec!["docs.rs/serde".into()]),
+            blocked_domains: None,
+        }
+    );
+    let offer = deny(&["https://evil.example"]).fetch_domains().offer();
+    assert_eq!(
+        offer,
+        ToolOffer::Offer {
+            allowed_domains: None,
+            blocked_domains: Some(vec!["evil.example".into()]),
+        }
+    );
+}
+
+#[test]
+fn deny_sends_only_whole_hosts() {
     let links = deny(&[
         "https://evil.example",
         "https://legit.example/evil",
@@ -2209,42 +2332,66 @@ fn fetch_deny_sends_only_whole_hosts() {
         "https://*.tracker.example",
         "https://evil.example/also",
         "http://*.sub.evil.example",
+        "https://legit.example/a%20b",
+        "https://*.tracker.example/x",
     ]);
-    let domains = links.fetch_domains();
-    assert_eq!(sent(&domains), strings(&["evil.example"]));
-    assert_eq!(
-        notes(&domains),
-        [
-            (
-                "https://legit.example/evil".to_string(),
-                DomainChange::NotSent(NotSent::DenyPath)
-            ),
-            (
-                "https://ports.example:8080".to_string(),
-                DomainChange::NotSent(NotSent::DenyPort)
-            ),
-            (
-                "https://*.tracker.example".to_string(),
-                DomainChange::NotSent(NotSent::DenyApex)
-            ),
-        ]
+    for domains in both(&links) {
+        assert_eq!(
+            sent(&domains),
+            strings(&["evil.example"]),
+            "{}",
+            domains.tool()
+        );
+        assert_eq!(
+            notes(&domains),
+            [
+                (
+                    "https://legit.example/evil".to_string(),
+                    not_sent(NotSent::DenyPath)
+                ),
+                (
+                    "https://ports.example:8080".to_string(),
+                    not_sent(NotSent::DenyPort)
+                ),
+                (
+                    "https://*.tracker.example".to_string(),
+                    not_sent(NotSent::DenyApex)
+                ),
+                (
+                    "https://legit.example/a%20b".to_string(),
+                    not_sent(NotSent::DenyPath)
+                ),
+                (
+                    "https://*.tracker.example/x".to_string(),
+                    not_sent(NotSent::DenyPath)
+                ),
+            ]
+        );
+    }
+    // The entry blocks a subdomain the rule does not deny (said in the
+    // report's line on subdomains)
+    assert!(
+        !rule("https://evil.example")
+            .denies(&url("https://blog.evil.example/"))
     );
 }
 
 #[test]
 fn raw_with_nothing_sendable_is_no_filter() {
+    let none = deny(&[]).fetch_domains();
+    assert_eq!(none.filter(), &DomainFilter::Unfiltered);
     assert_eq!(
-        deny(&[]).fetch_domains().filter(),
-        &DomainFilter::Unfiltered
+        none.to_string(),
+        "web fetch: no deny rule; the tool is as configured\n"
     );
-    let domains = deny(&["https://legit.example/evil"]).fetch_domains();
+    let domains = deny(&["https://legit.example/evil"]).search_domains();
     assert_eq!(domains.filter(), &DomainFilter::Unfiltered);
     assert_eq!(
         domains.to_string(),
-        "web fetch: no domain filter (no deny rule can be sent)\n\
+        "web search: no deny rule can be sent; the tool is as configured\n\
          \x20 not sent: https://legit.example/evil: it has a path, and \
-         blocking the domain would block its other pages too (still \
-         defanged when shown)\n"
+         blocking the domain would block its other pages too (the tool can \
+         still reach it; the display still defangs it)\n"
     );
 }
 
@@ -2295,54 +2442,9 @@ fn search_allow_sends_paths_as_prefixes() {
     let blog = rule("https://example.org/blog");
     assert!(blog.allows(&url("https://example.org/blog/1")));
     assert!(!blog.allows(&url("https://example.org/blogger")));
-    assert!(anthropic_matches(
-        "example.org/blog",
-        &url("https://example.org/blogger")
-    ));
-}
-
-#[test]
-fn search_deny_narrows_paths_and_never_blocks_more() {
-    let links = deny(&[
-        "https://evil.example",
-        "https://legit.example/evil",
-        "https://legit.example/a%20b",
-        "https://evil.example/also",
-        "https://ports.example:8080/x",
-        "https://*.tracker.example/x",
-    ]);
-    let domains = links.search_domains();
-    assert_eq!(
-        sent(&domains),
-        strings(&["evil.example", "legit.example/evil/"])
-    );
-    assert_eq!(
-        notes(&domains),
-        [
-            (
-                "https://legit.example/evil".to_string(),
-                DomainChange::Narrowed {
-                    entry: "legit.example/evil/".to_string()
-                }
-            ),
-            (
-                "https://legit.example/a%20b".to_string(),
-                DomainChange::NotSent(NotSent::DenyPathSpelling)
-            ),
-            (
-                "https://ports.example:8080/x".to_string(),
-                DomainChange::NotSent(NotSent::DenyPort)
-            ),
-            (
-                "https://*.tracker.example/x".to_string(),
-                DomainChange::NotSent(NotSent::DenyApex)
-            ),
-        ]
-    );
-    assert!(!anthropic_matches(
-        "legit.example/evil/",
-        &url("https://legit.example/evilness")
-    ));
+    let blogger = url("https://example.org/blogger");
+    assert!(reaches(ServerTool::WebSearch, "example.org/blog", &blogger));
+    assert!(!reaches(ServerTool::WebFetch, "example.org/blog", &blogger));
 }
 
 /// One example of each kind, as an operator reads it
@@ -2362,8 +2464,9 @@ fn the_report_reads_plainly() {
          \x20 en.wikipedia.org\n\
          \x20 example.net\n\
          \x20 example.org\n\
-         \x20 each with its subdomains, over http and https: web fetch \
-         matches on the domain alone\n\
+         \x20 each also reaches its subdomains, over http and https, on \
+         any port, and every path: web fetch matches on the domain \
+         alone\n\
          \x20 widened: https://en.wikipedia.org/wiki as en.wikipedia.org, \
          with every path\n\
          \x20 widened: https://*.example.org as example.org, with \
@@ -2371,7 +2474,7 @@ fn the_report_reads_plainly() {
          \x20 widened: https://example.net:8443 as example.net, with every \
          port\n\
          \x20 not sent: https://127.0.0.1: an IP address; the tool takes \
-         domain names (shown as written, not reached)\n"
+         domain names (shown as written; the tool will not reach it)\n"
     );
     assert_eq!(
         links.search_domains().to_string(),
@@ -2380,47 +2483,111 @@ fn the_report_reads_plainly() {
          \x20 en.wikipedia.org/wiki\n\
          \x20 example.net\n\
          \x20 example.org\n\
-         \x20 each with its subdomains, over http and https, and every \
-         path that begins with its own\n\
+         \x20 each also reaches its subdomains, over http and https, on \
+         any port, and every path that begins with its own\n\
          \x20 widened: https://en.wikipedia.org/wiki as \
-         en.wikipedia.org/wiki, with every path that begins /wiki (/wikix \
-         too)\n\
+         en.wikipedia.org/wiki, with every path that begins with /wiki \
+         (/wikix too)\n\
          \x20 widened: https://*.example.org as example.org, with \
          example.org itself\n\
          \x20 widened: https://example.net:8443 as example.net, with every \
          port\n\
          \x20 not sent: https://127.0.0.1: an IP address; the tool takes \
-         domain names (shown as written, not reached)\n"
+         domain names (shown as written; the tool will not reach it)\n"
     );
     assert_eq!(
         deny(&["https://evil.example", "https://legit.example/evil"])
             .search_domains()
             .to_string(),
-        "web search: blocked_domains, 2\n\
+        "web search: blocked_domains, 1\n\
          \x20 evil.example\n\
-         \x20 legit.example/evil/\n\
-         \x20 each with its subdomains, over http and https, and every \
-         path that begins with its own\n\
-         \x20 narrowed: https://legit.example/evil as legit.example/evil/, \
-         the pages under it; the path itself is still defanged when shown\n"
+         \x20 each also blocks its subdomains, over http and https, which \
+         the rule for it does not deny\n\
+         \x20 not sent: https://legit.example/evil: it has a path, and \
+         blocking the domain would block its other pages too (the tool can \
+         still reach it; the display still defangs it)\n"
     );
 }
 
-/// URLs to try rules on: hosts at, over and under the rules', schemes,
-/// ports and paths in and out of theirs
+/// Rules of every odd kind the parse lets through: whatever is emitted is
+/// in the documented grammar, for both tools, allowed and blocked
+#[test]
+fn every_entry_is_in_the_documented_grammar() {
+    let long_label = ["https://", &"a".repeat(64), ".example"].concat();
+    let long_name =
+        ["https://", &["abcdefghi."; 26].concat(), "example"].concat();
+    let written = [
+        "https://EXAMPLE.org.",
+        "https://bücher.example/straße",
+        "https://a_b.example.org",
+        "https://-bad.example.org",
+        "https://bad-.example.org",
+        "https://ex--ample.org",
+        "https://xn--bcher-kva.example",
+        "https://127.0.0.1/x",
+        "http://[::1]",
+        "http://localhost:8080",
+        "https://example.org/a%20b",
+        "https://example.org/~user/x.y",
+        "https://example.org//",
+        "https://example.org/a//b",
+        "https://example.org/a;b/c",
+        "https://example.org/A!$&'()+,=@:/x",
+        "https://*.co.example/path",
+        "https://example.org:443/a",
+        "https://1.example",
+        &long_label,
+        &long_name,
+    ];
+    let rules: Vec<LinkRule> =
+        written.iter().filter_map(|w| w.parse().ok()).collect();
+    assert!(rules.len() > 15, "{} parsed", rules.len());
+    for links in [
+        Links::Defanged {
+            allow: rules.clone(),
+        },
+        Links::Raw {
+            deny: rules.clone(),
+        },
+    ] {
+        for domains in both(&links) {
+            for entry in sent(&domains) {
+                assert!(
+                    in_grammar(domains.tool(), entry),
+                    "{}: {entry:?}",
+                    domains.tool()
+                );
+            }
+            // Every rule is sent as it is, or noted
+            let noted = domains.notes().len();
+            assert!(noted > 0 && noted <= rules.len());
+        }
+    }
+}
+
+/// URLs to try rules on: hosts at, over and under the rules' (with a
+/// trailing dot too), schemes, ports and paths in and out of theirs
 fn domain_probe_urls() -> Vec<Url> {
     let hosts = [
         "example.org",
+        "example.org.",
         "docs.example.org",
+        "docs.example.org.",
+        "x.docs.example.org",
         "a.b.example.org",
         "example.org.evil.net",
         "notexample.org",
         "en.wikipedia.org",
         "legit.example",
+        "legit.example.",
         "sub.legit.example",
     ];
     let paths = [
         "/",
+        "/a",
+        "/a/b",
+        "/ab",
+        "/zzz",
         "/wiki",
         "/wiki/",
         "/wiki/Rust",
@@ -2461,13 +2628,12 @@ fn every_allowed_url_is_reached_by_an_entry() {
     ];
     let urls = domain_probe_urls();
     for written in rules {
-        let links = allow(&[written]);
         let rule = rule(written);
-        for domains in [links.fetch_domains(), links.search_domains()] {
+        for domains in both(&allow(&[written])) {
             let entries = sent(&domains);
             for url in urls.iter().filter(|url| rule.allows(url)) {
                 assert!(
-                    entries.iter().any(|e| anthropic_matches(e, url)),
+                    entries.iter().any(|e| reaches(domains.tool(), e, url)),
                     "{written}: {url} allowed, but {} sends {entries:?}",
                     domains.tool()
                 );
@@ -2476,9 +2642,148 @@ fn every_allowed_url_is_reached_by_an_entry() {
     }
 }
 
-/// And never more blocked than the rules say, but for the subdomains an
-/// entry covers (said once in the report): on an entry's own domain,
-/// every URL it blocks a rule denies
+/// The entry one rule alone is sent as
+fn entry_of(rule: &LinkRule, tool: ServerTool) -> Option<String> {
+    let links = Links::Defanged {
+        allow: vec![rule.clone()],
+    };
+    let domains = match tool {
+        ServerTool::WebFetch => links.fetch_domains(),
+        ServerTool::WebSearch => links.search_domains(),
+    };
+    match domains.filter() {
+        DomainFilter::Allowed(list) => list.first().cloned(),
+        _ => None,
+    }
+}
+
+/// Whether `url`, which `entry` reaches and no rule allows, is said: on a
+/// subdomain of the entry's domain, over another scheme or on another port
+/// (said once, in the report's line), or reached by a rule's note for this
+/// entry (its path or apex)
+fn explained(
+    domains: &ToolDomains,
+    rules: &[LinkRule],
+    entry: &str,
+    url: &Url,
+) -> bool {
+    let domain = entry.split('/').next().unwrap_or(entry);
+    let host = url.host_str().unwrap_or_default();
+    if host.strip_suffix('.').unwrap_or(host) != domain {
+        return true;
+    }
+    // Allowed but for its scheme or port
+    for scheme in ["http", "https"] {
+        for port in [None, url.port()] {
+            let mut other = url.clone();
+            other.set_scheme(scheme).unwrap();
+            other.set_port(port).unwrap();
+            if rules.iter().any(|r| r.allows(&other)) {
+                return true;
+            }
+        }
+    }
+    rules.iter().any(|rule| {
+        if entry_of(rule, domains.tool()).as_deref() != Some(entry) {
+            return false;
+        }
+        let by: &[Widening] = domains
+            .notes()
+            .iter()
+            .find_map(|n| match &n.change {
+                DomainChange::Widened { by, .. } if n.rule == *rule => {
+                    Some(&by[..])
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        let host_ok = !rule.wildcard || by.contains(&Widening::Apex);
+        let path_ok = by.contains(&Widening::Path)
+            || by.contains(&Widening::PathPrefix)
+            || {
+                // The rule on its own host, with the URL's path
+                let mut probe = rule.url.clone();
+                if rule.wildcard {
+                    let sub = ["w.", domain].concat();
+                    probe.set_host(Some(&sub)).unwrap();
+                }
+                probe.set_path(url.path());
+                rule.allows(&probe)
+            };
+        host_ok && path_ok
+    })
+}
+
+/// Over two and three rules on one host and on a parent and a child
+/// domain: every URL an entry reaches and no rule allows is said in the
+/// report. (It failed on a wildcard beside a path rule for its apex,
+/// whose apex note was dropped.)
+#[test]
+fn every_url_reached_beyond_the_rules_is_said() {
+    let mut pool = Vec::new();
+    for host in ["example.org", "docs.example.org"] {
+        for shape in [
+            ["https://", host].concat(),
+            ["http://", host, "/a"].concat(),
+            ["https://*.", host].concat(),
+            ["https://*.", host, "/a"].concat(),
+            ["https://", host, ":8443"].concat(),
+            ["https://", host, "/a/b"].concat(),
+        ] {
+            pool.push(rule(&shape));
+        }
+    }
+    let mut sets: Vec<Vec<LinkRule>> = Vec::new();
+    for i in 0..pool.len() {
+        for j in i + 1..pool.len() {
+            sets.push(vec![pool[i].clone(), pool[j].clone()]);
+            for k in j + 1..pool.len() {
+                sets.push(vec![
+                    pool[i].clone(),
+                    pool[j].clone(),
+                    pool[k].clone(),
+                ]);
+            }
+        }
+    }
+    let urls = domain_probe_urls();
+    let mut failures = Vec::new();
+    for rules in &sets {
+        let links = Links::Defanged {
+            allow: rules.clone(),
+        };
+        for domains in both(&links) {
+            for entry in sent(&domains) {
+                for url in urls
+                    .iter()
+                    .filter(|url| reaches(domains.tool(), entry, url))
+                {
+                    if !rules.iter().any(|r| r.allows(url))
+                        && !explained(&domains, rules, entry, url)
+                    {
+                        let rules: Vec<String> =
+                            rules.iter().map(|r| r.to_string()).collect();
+                        failures.push(format!(
+                            "{}: {rules:?} sends {entry}, which reaches {url}, unsaid",
+                            domains.tool()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} unsaid, e.g.\n{}",
+        failures.len(),
+        failures[..failures.len().min(10)].join("\n")
+    );
+}
+
+/// Never more blocked than the rules say on an entry's own domain. Its
+/// subdomains are left out on purpose: an entry blocks them though
+/// `LinkRule::denies` takes the rule's host alone, a widening accepted and
+/// said once in the report, not per URL
 #[test]
 fn no_entry_blocks_what_no_rule_denies() {
     let written = [
@@ -2488,17 +2793,21 @@ fn no_entry_blocks_what_no_rule_denies() {
         "https://legit.example/blog/",
         "https://en.wikipedia.org",
         "https://example.org:8443/a",
+        "https://docs.example.org",
     ];
     let links = deny(&written);
     let rules: Vec<LinkRule> = written.iter().map(|r| rule(r)).collect();
     let urls = domain_probe_urls();
-    for domains in [links.fetch_domains(), links.search_domains()] {
+    for domains in both(&links) {
         for entry in sent(&domains) {
             let domain = entry.split('/').next().unwrap_or(entry);
             for url in urls
                 .iter()
-                .filter(|url| url.host_str() == Some(domain))
-                .filter(|url| anthropic_matches(entry, url))
+                .filter(|url| {
+                    url.host_str().map(|h| h.strip_suffix('.').unwrap_or(h))
+                        == Some(domain)
+                })
+                .filter(|url| reaches(domains.tool(), entry, url))
             {
                 assert!(
                     rules.iter().any(|r| r.denies(url)),

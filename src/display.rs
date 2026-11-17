@@ -30,7 +30,7 @@ mod profiles;
 pub use agent::{AgentDisplay, AgentText, DisplayContext};
 pub use domains::{
     DomainChange, DomainFilter, DomainNote, NotSent, ServerTool, ToolDomains,
-    Widening,
+    ToolOffer, Widening,
 };
 pub use json::{AgentJson, Exempt, json_view};
 pub use profiles::{
@@ -1424,10 +1424,10 @@ impl LinkRule {
         let Some(mut theirs) = url.path_segments() else {
             return false;
         };
-        let mut ours = self.segments().peekable();
-        if ours.peek().is_none() {
+        if !self.allows_some_paths() {
             return true;
         }
+        let mut ours = self.segments();
         if has_dot_segment(url.path()) {
             return false;
         }
@@ -1457,10 +1457,10 @@ impl LinkRule {
         {
             return false;
         }
-        let ours = loose_segments(self.url.path());
-        if ours.is_empty() {
+        if !self.denies_some_paths() {
             return true;
         }
+        let ours = loose_segments(self.url.path());
         let theirs = loose_segments(url.path());
         let mut resolved = Vec::with_capacity(theirs.len());
         for segment in &theirs {
@@ -1473,6 +1473,16 @@ impl LinkRule {
             }
         }
         theirs.starts_with(&ours) || resolved.starts_with(&ours)
+    }
+
+    /// Whether [`allows`](Self::allows) takes only some of a host's paths
+    fn allows_some_paths(&self) -> bool {
+        self.segments().next().is_some()
+    }
+
+    /// Whether [`denies`](Self::denies) takes only some of a host's paths
+    fn denies_some_paths(&self) -> bool {
+        !loose_segments(self.url.path()).is_empty()
     }
 
     /// The rule's path segments, without the empty last one of `/` and
