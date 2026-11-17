@@ -179,6 +179,12 @@ pub struct SeedConfig {
     /// when the next round would leave no room to close the session (see
     /// [`MIN_ROUND_ROOM`]).
     pub context_window: u64,
+    /// What the session's agent is shown others' text with: the tools and
+    /// the dashboard both. One agent's, already resolved: a runner with
+    /// profiles sets it per session
+    /// ([`AgentDisplayProfiles::resolve`](crate::display::AgentDisplayProfiles::resolve)),
+    /// as it does a model's token budgets
+    pub display: crate::display::AgentDisplayConfig,
 }
 
 pub use crate::reactor::gauge::DEFAULT_CONTEXT_WINDOW;
@@ -202,6 +208,7 @@ impl Default for SeedConfig {
             web_fetch: None,
             disable_parallel_tool_use: false,
             context_window: DEFAULT_CONTEXT_WINDOW,
+            display: Default::default(),
         }
     }
 }
@@ -1344,10 +1351,9 @@ impl Agent for SeedAgent {
             .soul
             .agent_name()
             .map_err(|error| SeedError::SoulName { id, error })?;
-        // What this agent is shown text with: the default for every agent,
-        // until the runner's config says otherwise. The one place it is
-        // chosen: the tools and the dashboard both read it from here
-        let display = crate::display::AgentDisplayConfig::default();
+        // The one place it is read: the tools and the dashboard both have
+        // it from here
+        let display = ctx.config.display.clone();
         let agora = Agora::new(
             ctx.client.clone(),
             id,
