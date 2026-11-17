@@ -27,6 +27,7 @@ fn url(s: &str) -> Url {
 fn allow(rules: &[&str]) -> Links {
     Links::Defanged {
         allow: rules.iter().map(|r| rule(r)).collect(),
+        allow_authors: Vec::new(),
     }
 }
 
@@ -292,6 +293,11 @@ pub(super) const ADVERSARIAL: &[&str] = &[
     "https://\u{1}https://evil.example/x",
 ];
 
+/// Whether a scheme starts anywhere in `text`
+fn has_scheme(text: &str) -> bool {
+    (0..text.len()).any(|i| scheme_at(text, i).is_some())
+}
+
 /// Under the default policy no `http` or `https` URL is left, in any
 /// case or spelling, whatever the text and whatever the site: by the
 /// scanner's own test, and by a URL parser at every place in the result
@@ -466,7 +472,7 @@ const ACROSS_A_BREAK: &[&str] = &[
 fn an_allow_rule_is_not_passed_by_a_longer_reading() {
     let links =
         allow(&["https://allowed.example", "https://en.wikipedia.org/wiki"]);
-    let Links::Defanged { allow: rules } = &links else {
+    let Links::Defanged { allow: rules, .. } = &links else {
         unreachable!()
     };
     for text in PAST_THE_END {
@@ -696,7 +702,7 @@ fn allow_leaves_only_allowed_urls() {
         "https://allowed.example",
         "https://en.wikipedia.org/wiki",
     ]);
-    let Links::Defanged { allow: rules } = &links else {
+    let Links::Defanged { allow: rules, .. } = &links else {
         unreachable!()
     };
     let sites = [None, Some(site())];
@@ -754,14 +760,15 @@ fn this_sites_pages_are_written_as_links() {
         ),
         "<agora://gov?limit=5&type=council_decision>"
     );
-    // No link: defanged
+    // No kind of its own: a page link (0.168); a page the site served
+    // before its paths were the links': the link it names
     assert_eq!(
         at("https://subliminal.technology/agora/account"),
-        "hxxps://subliminal[.]technology/agora/account"
+        "agora://page/account"
     );
     assert_eq!(
         at("https://subliminal.technology/agora/governance/GOV-2026-0003"),
-        "hxxps://subliminal[.]technology/agora/governance/GOV-2026-0003"
+        "agora://gov/GOV-2026-0003"
     );
     // A look-alike host is another site
     assert_eq!(
@@ -811,17 +818,149 @@ fn site_urls_are_links_in_every_mode() {
     ] {
         assert_eq!(&links.rewrite(BODY, Some(&site)), want, "{links:?}");
     }
-    // A page of the site with no link is any other URL
+    // A page of the site no kind names is `agora://page/…` in every mode
+    // too (0.168): neither defanged nor whole
     let account = "https://subliminal.technology/agora/account";
-    let fanged = "hxxps://subliminal[.]technology/agora/account";
-    for (links, want) in [
-        (Links::default(), fanged),
-        (allow(&["https://subliminal.technology"]), account),
-        (Links::Raw { deny: Vec::new() }, account),
-        (deny(&["https://subliminal.technology/agora"]), fanged),
+    for links in [
+        Links::default(),
+        allow(&["https://subliminal.technology"]),
+        Links::Raw { deny: Vec::new() },
+        deny(&["https://subliminal.technology/agora"]),
+        authors(&["claude-ai"])
+            .for_author(Some(&agent("claude-ai")))
+            .clone(),
     ] {
-        assert_eq!(links.rewrite(account, Some(&site)), want, "{links:?}");
+        assert_eq!(
+            links.rewrite(account, Some(&site)),
+            "agora://page/account",
+            "{links:?}"
+        );
     }
+}
+
+/// Every page of the site under `/agora/` is an `agora://` link: one no
+/// kind names is `agora://page/<path>?<query>`, which reads back as that
+/// page. Not one on a look-alike host, outside `/agora/`, or one that
+/// carries another URL
+#[test]
+fn a_page_no_kind_names_is_a_page_link() {
+    let site = site();
+    for (text, want) in [
+        (
+            "See https://subliminal.technology/agora/hello-world.",
+            "See agora://page/hello-world.",
+        ),
+        (
+            "(https://subliminal.technology/agora/account)",
+            "(agora://page/account)",
+        ),
+        // The query is kept; the fragment is not, as for every page URL
+        (
+            "https://subliminal.technology/agora/hello-world?step=2#keys",
+            "agora://page/hello-world?step=2",
+        ),
+        (
+            "http://subliminal.technology/agora/a/b%20c/",
+            "agora://page/a/b%20c/",
+        ),
+        // A kind's page with what that kind does not read
+        (
+            "https://subliminal.technology/agora/post/not-an-id",
+            "agora://page/post/not-an-id",
+        ),
+        // A kind's page as before
+        (
+            "https://subliminal.technology/agora/post/7ad26ccd",
+            "agora://post/7ad26ccd",
+        ),
+        // `/agora/page/x` is a page called that, not `agora://page/x`
+        (
+            "https://subliminal.technology/agora/page/x",
+            "agora://page/page/x",
+        ),
+        // Not Agora's: another host, the host outside `/agora/`, and what
+        // a whole link would carry
+        (
+            "https://subliminal.technology.evil.example/agora/hello-world",
+            "hxxps://subliminal[.]technology[.]evil[.]example/agora/hello-world",
+        ),
+        (
+            "https://subliminal.technology/blog/x",
+            "hxxps://subliminal[.]technology/blog/x",
+        ),
+        (
+            "https://subliminal.technology/agora/x?next=https://evil.example/",
+            "hxxps://subliminal[.]technology/agora/x?next=hxxps://evil[.]example/",
+        ),
+        (
+            "https://subliminal.technology/agora/a/../b",
+            "hxxps://subliminal[.]technology/agora/a/../b",
+        ),
+        (
+            "https://subliminal.technology:443@evil.example/agora/x",
+            "hxxps://subliminal[.]technology:443@evil[.]example/agora/x",
+        ),
+        // A schemeless host the link would carry, in a page's query or
+        // path, or in a kind's free text: the link is not written
+        (
+            "https://subliminal.technology/agora/x?u=www.evil.example",
+            "hxxps://subliminal[.]technology/agora/x?u=www[.]evil[.]example",
+        ),
+        (
+            "https://subliminal.technology/agora/www.evil.example/x",
+            "hxxps://subliminal[.]technology/agora/www[.]evil[.]example/x",
+        ),
+        (
+            "https://subliminal.technology/agora/search?q=www.evil.example",
+            "hxxps://subliminal[.]technology/agora/search?q=www[.]evil[.]example",
+        ),
+        // A dot segment between backslashes, which a parser reads as `/`
+        (
+            "https://subliminal.technology/agora/hello\\..\\account",
+            "hxxps://subliminal[.]technology/agora/hello\\..\\account",
+        ),
+        (
+            "https://subliminal.technology/agora/x\\..\\post\\7ad26ccd",
+            "hxxps://subliminal[.]technology/agora/x\\..\\post\\7ad26ccd",
+        ),
+        // A user on the site's own host
+        (
+            "https://someone@subliminal.technology/agora/post/7ad26ccd",
+            "hxxps://someone@subliminal[.]technology/agora/post/7ad26ccd",
+        ),
+    ] {
+        assert_eq!(Links::default().rewrite(text, Some(&site)), want, "{text}");
+    }
+    // Round trips: the link's page is the URL it was read from, and that
+    // URL reads as the link
+    for page in [
+        "https://subliminal.technology/agora/hello-world",
+        "https://subliminal.technology/agora/account",
+        "https://subliminal.technology/agora/hello-world?step=2",
+        "https://subliminal.technology/agora/a/b%20c/",
+        "https://subliminal.technology/agora/page/x",
+    ] {
+        let link = AgoraLink::on_site(page, &site).expect(page);
+        assert!(matches!(link, AgoraLink::Page(_)), "{page}");
+        assert_eq!(link.page_url(&site).as_str(), page);
+        assert_eq!(AgoraLink::parse_at(page, Some(&site)), Ok(link.clone()));
+        let written = link.to_string();
+        assert_eq!(written.parse::<AgoraLink>(), Ok(link.clone()), "{written}");
+        assert_eq!(
+            link.site_path(),
+            page.strip_prefix("https://subliminal.technology").unwrap()
+        );
+    }
+    // A page link of a page a kind names reads as that kind's
+    assert_eq!(
+        "agora://page/post/7ad26ccd"
+            .parse::<AgoraLink>()
+            .unwrap()
+            .to_string(),
+        "agora://post/7ad26ccd"
+    );
+    assert!("agora://page".parse::<AgoraLink>().is_err());
+    assert!("agora://page/a/../b".parse::<AgoraLink>().is_err());
 }
 
 /// Many URLs in one field cost time linear in its length, with rules to
@@ -1408,7 +1547,10 @@ fn host_spellings() {
     assert!(idn.allows(&url("https://xn--bcher-kva.example/katalog")));
     assert!(!idn.allows(&url("https://bucher.example/katalog")));
     // In free text, where the scanner's authority ends at the `ü`
-    let links = Links::Defanged { allow: vec![idn] };
+    let links = Links::Defanged {
+        allow: vec![idn],
+        allow_authors: Vec::new(),
+    };
     let text = "Im https://bücher.example/katalog/1, nicht https://bucher.example/katalog.";
     assert_eq!(
         links.rewrite(text, None),
@@ -1438,7 +1580,10 @@ fn ip_literals() {
     assert!(!v6.allows(&url("https://[2001:db8::1]:8443/a")));
     // Brackets end a URL in prose, so one in free text is not checked
     // against an allow rule: it is defanged
-    let links = Links::Defanged { allow: vec![v6] };
+    let links = Links::Defanged {
+        allow: vec![v6],
+        allow_authors: Vec::new(),
+    };
     assert_eq!(
         links.rewrite("https://[2001:db8::1]/a", None),
         "hxxps://[2001:db8::1]/a"
@@ -1624,7 +1769,13 @@ fn a_rule_round_trips_as_written() {
 
 #[test]
 fn the_default_is_everything_defanged() {
-    assert_eq!(Links::default(), Links::Defanged { allow: Vec::new() });
+    assert_eq!(
+        Links::default(),
+        Links::Defanged {
+            allow: Vec::new(),
+            allow_authors: Vec::new(),
+        }
+    );
     assert_eq!(DisplayConfig::default().links, Links::default());
     assert_eq!(AgentDisplayConfig::default().links(), &Links::default());
     // Nothing written is the default, and the default is written in full
@@ -2545,6 +2696,7 @@ fn every_entry_is_in_the_documented_grammar() {
     for links in [
         Links::Defanged {
             allow: rules.clone(),
+            allow_authors: Vec::new(),
         },
         Links::Raw {
             deny: rules.clone(),
@@ -2646,6 +2798,7 @@ fn every_allowed_url_is_reached_by_an_entry() {
 fn entry_of(rule: &LinkRule, tool: ServerTool) -> Option<String> {
     let links = Links::Defanged {
         allow: vec![rule.clone()],
+        allow_authors: Vec::new(),
     };
     let domains = match tool {
         ServerTool::WebFetch => links.fetch_domains(),
@@ -2751,6 +2904,7 @@ fn every_url_reached_beyond_the_rules_is_said() {
     for rules in &sets {
         let links = Links::Defanged {
             allow: rules.clone(),
+            allow_authors: Vec::new(),
         };
         for domains in both(&links) {
             for entry in sent(&domains) {
@@ -2817,4 +2971,123 @@ fn no_entry_blocks_what_no_rule_denies() {
             }
         }
     }
+}
+
+// ── Authors (0.168) ──────────────────────────────────────────────────────
+
+fn authors(names: &[&str]) -> Links {
+    Links::Defanged {
+        allow: Vec::new(),
+        allow_authors: names.iter().map(|n| n.parse().unwrap()).collect(),
+    }
+}
+
+fn agent(name: &str) -> AgentName {
+    name.parse().unwrap()
+}
+
+/// A listed author's text is read as under `raw` with no rule: the
+/// site's pages as links, nothing defanged, however long a URL is
+#[test]
+fn a_listed_authors_text_is_as_written_but_for_site_links() {
+    let links = authors(&["claude-ai"]);
+    let site = site();
+    let long = format!("https://evil.example/{}", "a".repeat(MAX_URL_BYTES));
+    let text = format!(
+        "See https://evil.example/x, www.example.org and \
+         https://subliminal.technology/agora/protocol, and {long}"
+    );
+    let theirs = links.for_author(Some(&agent("claude-ai")));
+    let (shown, defanged) = theirs.rewrite_noting(&text, Some(&site));
+    assert!(!defanged);
+    assert_eq!(
+        shown,
+        format!(
+            "See https://evil.example/x, www.example.org and \
+             agora://protocol, and {long}"
+        )
+    );
+    assert_eq!(
+        shown,
+        Links::Raw { deny: Vec::new() }.rewrite(&text, Some(&site))
+    );
+    // Anyone else, or no one known: the reader's policy
+    for author in [None, Some(agent("mallory")), Some(agent("Claude-AI"))] {
+        let policy = links.for_author(author.as_ref());
+        assert_eq!(policy, &links);
+        assert!(
+            policy
+                .rewrite(&text, None)
+                .starts_with("See hxxps://evil[.]example/x")
+        );
+    }
+    assert!(links.allows_author(&agent("claude-ai")));
+    assert!(!links.allows_author(&agent("Claude-AI")));
+    // With no one listed, as before
+    assert_eq!(
+        Links::default().for_author(Some(&agent("claude-ai"))),
+        &Links::default()
+    );
+}
+
+/// `raw` has no author list: its deny rules hold for everyone
+#[test]
+fn raw_has_no_authors() {
+    let links = deny(&["https://evil.example"]);
+    assert!(!links.allows_author(&agent("claude-ai")));
+    assert_eq!(links.for_author(Some(&agent("claude-ai"))), &links);
+}
+
+/// Authors leave every rule-free default exactly as it was: the
+/// adversarial corpus reads the same with a list and no author known
+#[test]
+fn an_author_list_changes_nothing_for_text_of_no_listed_author() {
+    let listed = authors(&["claude-ai"]);
+    let plain = Links::default();
+    let site = site();
+    for text in ADVERSARIAL.iter().chain(SPELLINGS) {
+        for at in [None, Some(&site)] {
+            assert_eq!(
+                listed.for_author(Some(&agent("mallory"))).rewrite(text, at),
+                plain.rewrite(text, at),
+                "{text:?}"
+            );
+        }
+    }
+}
+
+/// The web tools' domain lists cannot say who wrote a link: the report
+/// says the tool does not follow the author list
+#[test]
+fn the_tool_report_says_authors_do_not_widen_the_tool() {
+    let mut links = authors(&["claude-ai", "steward"]);
+    let told = links.fetch_domains().to_string();
+    assert!(
+        told.ends_with(
+            "  2 authors' own text is shown with its links as written; the \
+             tool is still as configured, whatever links they write\n"
+        ),
+        "{told}"
+    );
+    assert_eq!(
+        links.fetch_domains().offer(),
+        Links::default().fetch_domains().offer()
+    );
+    if let Links::Defanged { allow, .. } = &mut links {
+        allow.push(rule("https://docs.rs"));
+    }
+    let told = links.search_domains().to_string();
+    assert!(
+        told.ends_with(
+            "the tool still reaches only the domains above, whatever links \
+             they write\n"
+        ),
+        "{told}"
+    );
+    assert!(
+        !deny(&["https://evil.example"])
+            .fetch_domains()
+            .to_string()
+            .contains("author")
+    );
 }

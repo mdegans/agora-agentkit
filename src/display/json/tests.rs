@@ -339,17 +339,40 @@ mod schemas {
                 .flatten()
                 .collect();
             let has = |key: &str| properties.iter().any(|(k, _)| *k == key);
+            let authored = exempt.author.map_or(Vec::new(), |a| {
+                let mut keys = vec![a.name];
+                keys.extend(a.text.iter().copied());
+                keys
+            });
             for key in exempt
                 .followed
                 .iter()
                 .chain(exempt.verbatim)
                 .chain(exempt.nested.iter().map(|(key, _)| key))
+                .chain(exempt.entries.iter().map(|(key, _)| key))
+                .copied()
+                .chain(authored)
             {
                 if !has(key) {
                     self.problems.push(format!(
                         "{path}: exempts `{key}`, which it does not have"
                     ));
                 }
+            }
+            // The author's name is an `AgentName`, whose schema says so
+            if let Some(a) = exempt.author
+                && let Some((_, name)) =
+                    properties.iter().find(|(k, _)| *k == a.name)
+                && !same_level(name).iter().any(|s| {
+                    s["description"]
+                        .as_str()
+                        .is_some_and(|d| d.starts_with("An agent's name"))
+                })
+            {
+                self.problems.push(format!(
+                    "{path}.{}: names the author, and is not an AgentName",
+                    a.name
+                ));
             }
             for (key, property) in properties {
                 let at = format!("{path}.{key}");
@@ -378,6 +401,24 @@ mod schemas {
                         "{at} takes any JSON and is not verbatim: a key in \
                          it could pass for an exempt one"
                     ));
+                }
+                if let Some((_, inner)) =
+                    exempt.entries.iter().find(|(field, _)| *field == key)
+                {
+                    let maps: Vec<&Value> = same_level(property)
+                        .into_iter()
+                        .map(|s| &s["additionalProperties"])
+                        .filter(|v| v.is_object())
+                        .collect();
+                    if maps.is_empty() {
+                        self.problems.push(format!(
+                            "{at}: its entries are exempt, and it is not a map"
+                        ));
+                    }
+                    for entries in maps {
+                        self.object(entries, *inner, &format!("{at}.*"));
+                    }
+                    continue;
                 }
                 let inner = exempt
                     .nested
@@ -566,4 +607,217 @@ fn the_json_view_notes_what_it_defangs() {
         let _ = json_view(value, Exempt::NONE, cx);
         assert_eq!(flag.load(std::sync::atomic::Ordering::Relaxed), flagged);
     }
+}
+
+// ── Authors (0.168) ──────────────────────────────────────────────────────
+
+const NEWS: &str = "news-desk";
+
+fn listing(names: &[&str]) -> AgentDisplayConfig {
+    serde_json::from_value(json!({
+        "links": {"mode": "defanged", "allow_authors": names},
+    }))
+    .unwrap()
+}
+
+/// `value` under a config listing [`NEWS`]
+fn by_news(value: Value, exempt: Exempt<'_>) -> Value {
+    let config = listing(&[NEWS]);
+    json_view(value, exempt, DisplayContext::at(&config, Some(&site())))
+}
+
+const POSTED: Exempt<'static> = Exempt {
+    author: Some(Authored {
+        name: "agent_name",
+        text: &["body", "poll"],
+        unless: None,
+    }),
+    nested: &[("comments", COMMENTED)],
+    ..Exempt::NONE
+};
+
+const COMMENTED: Exempt<'static> = Exempt {
+    author: Some(Authored {
+        name: "agent_name",
+        text: &["body"],
+        unless: None,
+    }),
+    ..Exempt::NONE
+};
+
+/// Only the author's own keys, and what is under them, are relaxed, and
+/// only for an author the reader lists
+#[test]
+fn an_author_marker_relaxes_only_a_listed_authors_own_keys() {
+    let value = |name: Value| {
+        json!({
+            "agent_name": name,
+            "body": URL,
+            "title": URL,
+            "poll": {"options": [{"label": URL}]},
+            "comments": [
+                {"agent_name": "mallory", "body": URL},
+                {"agent_name": NEWS, "body": URL},
+            ],
+        })
+    };
+    assert_eq!(
+        by_news(value(json!(NEWS)), POSTED),
+        json!({
+            "agent_name": NEWS,
+            "body": URL,
+            // Not a key it says its author wrote
+            "title": DEFANGED,
+            "poll": {"options": [{"label": URL}]},
+            "comments": [
+                {"agent_name": "mallory", "body": DEFANGED},
+                {"agent_name": NEWS, "body": URL},
+            ],
+        })
+    );
+    // Someone else, no name, or a name that is not one: the plain policy
+    for name in [json!("mallory"), Value::Null, json!("not a name!")] {
+        let shown = by_news(value(name.clone()), POSTED);
+        assert_eq!(shown["body"], DEFANGED, "{name}");
+        assert_eq!(shown["poll"]["options"][0]["label"], DEFANGED, "{name}");
+        // Each comment by its own author, whoever wrote the post
+        assert_eq!(shown["comments"][1]["body"], URL, "{name}");
+    }
+    // Names are exact: `News-Desk` is not `news-desk`
+    let shown = by_news(value(json!("News-Desk")), POSTED);
+    assert_eq!(shown["body"], DEFANGED);
+    const MESSAGE: Exempt<'static> = Exempt {
+        author: Some(Authored {
+            name: "agent_name",
+            text: &["body"],
+            unless: Some(Unless::Broadcast),
+        }),
+        ..Exempt::NONE
+    };
+    // A broadcast, by `MessageSummary::is_broadcast`'s rule: its `kind`,
+    // or for an older server no recipient
+    let mut broadcast = value(json!(NEWS));
+    broadcast["kind"] = json!("broadcast");
+    assert_eq!(by_news(broadcast, MESSAGE)["body"], DEFANGED);
+    let mut direct = value(json!(NEWS));
+    direct["kind"] = json!("dm");
+    assert_eq!(by_news(direct, MESSAGE)["body"], URL);
+    let mut legacy = value(json!(NEWS));
+    legacy.as_object_mut().unwrap().remove("kind");
+    legacy["recipient_id"] = Value::Null;
+    assert_eq!(by_news(legacy.clone(), MESSAGE)["body"], DEFANGED);
+    legacy["recipient_id"] = json!("7ad26ccd-922f-484a-a37c-51777344a98c");
+    assert_eq!(by_news(legacy, MESSAGE)["body"], URL);
+    // A field that does not read as a message's: no author
+    let mut odd = value(json!(NEWS));
+    odd["kind"] = json!("telegram");
+    assert_eq!(by_news(odd, MESSAGE)["body"], DEFANGED);
+}
+
+/// A type that says nothing of its author is under the policy whoever it
+/// names, and so is a field the walk has left the author's object for
+#[test]
+fn with_no_marker_nothing_is_relaxed() {
+    let value =
+        json!({"agent_name": NEWS, "body": URL, "inner": {"body": URL}});
+    assert_eq!(
+        by_news(value.clone(), Exempt::NONE),
+        json!({"agent_name": NEWS, "body": DEFANGED, "inner": {"body": DEFANGED}})
+    );
+    // A nested type without a marker, under a key the author did not write
+    let shown = by_news(
+        value,
+        Exempt {
+            author: Some(Authored {
+                name: "agent_name",
+                text: &["body"],
+                unless: None,
+            }),
+            ..Exempt::NONE
+        },
+    );
+    assert_eq!(shown["body"], URL);
+    assert_eq!(shown["inner"]["body"], DEFANGED);
+}
+
+/// Under `raw` a marker relaxes nothing: a deny rule holds whoever wrote
+/// the text
+#[test]
+fn raw_mode_has_no_authors_and_is_unaffected() {
+    let raw: AgentDisplayConfig = serde_json::from_value(json!({
+        "links": {"mode": "raw", "deny": ["https://evil.example"]},
+    }))
+    .unwrap();
+    let value = json!({"agent_name": NEWS, "body": format!("{URL} https://ok.example/")});
+    let shown =
+        json_view(value, POSTED, DisplayContext::at(&raw, Some(&site())));
+    assert_eq!(shown["body"], format!("{DEFANGED} https://ok.example/"));
+}
+
+/// Every author marker on a wire type: its author's text is shown whole
+/// for a listed author and defanged for another, and the rest of the
+/// object is under the policy
+#[test]
+fn every_wire_types_author_marker() {
+    use crate::responses::*;
+    let markers: Vec<(&str, Exempt<'static>)> = vec![
+        ("PostResponse", PostResponse::JSON_EXEMPT),
+        ("CommentResponse", CommentResponse::JSON_EXEMPT),
+        ("CommentStub", CommentStub::JSON_EXEMPT),
+        ("CommentReplyResponse", CommentReplyResponse::JSON_EXEMPT),
+        ("CommentSearchHit", CommentSearchHit::JSON_EXEMPT),
+        ("MessageSummary", MessageSummary::JSON_EXEMPT),
+        ("FriendSummary", FriendSummary::JSON_EXEMPT),
+        ("AgentResponse", AgentResponse::JSON_EXEMPT),
+        ("ProposalResponse", ProposalResponse::JSON_EXEMPT),
+    ];
+    for (type_name, exempt) in markers {
+        let authored = exempt.author.expect(type_name);
+        for (name, whole) in [(NEWS, true), ("mallory", false)] {
+            let mut value = json!({authored.name: name, "elsewhere": URL});
+            if authored.unless.is_some() {
+                // A direct message, not a broadcast
+                value["kind"] = json!("dm");
+            }
+            for key in authored.text {
+                value[*key] = json!(URL);
+            }
+            let shown = by_news(value, exempt);
+            for key in authored.text {
+                let expected = if whole { URL } else { DEFANGED };
+                assert_eq!(
+                    shown[*key], expected,
+                    "{type_name}.{key} by {name}"
+                );
+            }
+            assert_eq!(shown["elsewhere"], DEFANGED, "{type_name}");
+        }
+    }
+}
+
+/// The dashboard's feeds are maps of community to posts, each post by its
+/// own author ([`Exempt::entries`])
+#[test]
+fn a_maps_entries_go_by_their_own_authors() {
+    let value = json!({
+        "feeds": {
+            "news": [
+                {"author": NEWS, "title": URL},
+                {"author": "mallory", "title": URL},
+            ],
+        },
+        "unread_post_replies": [{
+            "post_title": URL,
+            "replies": [{"author": NEWS, "preview": URL}],
+        }],
+    });
+    let shown =
+        by_news(value, crate::responses::DashboardResponse::JSON_EXEMPT);
+    assert_eq!(shown["feeds"]["news"][0]["title"], URL);
+    assert_eq!(shown["feeds"]["news"][1]["title"], DEFANGED);
+    assert_eq!(shown["unread_post_replies"][0]["post_title"], DEFANGED);
+    assert_eq!(
+        shown["unread_post_replies"][0]["replies"][0]["preview"],
+        URL
+    );
 }

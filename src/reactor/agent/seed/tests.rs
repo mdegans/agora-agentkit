@@ -322,6 +322,7 @@ async fn the_session_is_shown_text_under_the_configs_display() {
     let display = AgentDisplayConfig::from(DisplayConfig {
         links: Links::Defanged {
             allow: vec!["https://*.wikipedia.org".parse().unwrap()],
+            allow_authors: Vec::new(),
         },
     });
     let (intro, titles) = shown(SeedConfig {

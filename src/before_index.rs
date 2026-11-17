@@ -215,7 +215,7 @@ mod tests {
     #[test]
     fn the_refused_link_names_no_inbox_kind() {
         let text = inbox_link_refused("agora://inbox");
-        assert!(text.contains("search and git"), "{text}");
+        assert!(text.contains("search, git and page"), "{text}");
         assert!(!text.contains("git and inbox"), "{text}");
         assert!(!crate::links::FORM_AGAIN.contains("inbox"));
     }

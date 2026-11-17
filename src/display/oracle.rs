@@ -319,6 +319,8 @@ pub fn old_server<'a>(text: &'a str, site: Option<&Url>) -> Cow<'a, str> {
             scheme_len > 0 && on_site_host(bytes, i + scheme_len, s)
         }) && let Some(end) = url_end(bytes, i)
             && let Ok(link) = AgoraLink::parse_at(&text[i..end], Some(site))
+            // (it had no `page` kind: such a page it defanged, 0.168)
+            && !matches!(link, AgoraLink::Page(_))
         {
             let buf = out
                 .get_or_insert_with(|| String::with_capacity(text.len() + 16));

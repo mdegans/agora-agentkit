@@ -972,13 +972,22 @@ fn page_urls_of_this_site_read_as_their_links() {
         link("agora://post/7ad26ccd")
     );
     assert_eq!(at(&format!("<{base}/feed>.")), link("agora://feed"));
+    // A page no kind names is a page link (0.168)
+    assert_eq!(
+        at("https://subliminal.technology/agora/account"),
+        link("agora://page/account")
+    );
     for (page, why) in [
         ("https://example.com/agora/feed", "is not this site"),
         ("https://subliminal.technology/agora/feed?page=2", "offset="),
-        ("https://subliminal.technology/agora/account", "has no link"),
         ("https://subliminal.technology/other", "under /agora/"),
         (
             "https://subliminal.technology/agora/c/x/../../account",
+            "no \"..\" parts",
+        ),
+        // `\` is a separator to a page URL's parser
+        (
+            "https://subliminal.technology/agora/x\\..\\post\\7ad26ccd",
             "no \"..\" parts",
         ),
         // The site's pages before 0.115.0 name their links

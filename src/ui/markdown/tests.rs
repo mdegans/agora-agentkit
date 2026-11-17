@@ -530,6 +530,12 @@ fn only_links_to_agoras_own_pages_drop_nofollow() {
             SITE_LINK_REL,
         ),
         ("[x](/agora/feed)", Some("/agora/feed"), SITE_LINK_REL),
+        // A page no other kind names (0.168): its page
+        (
+            "[x](agora://page/hello-world?step=2)",
+            Some("/agora/hello-world?step=2"),
+            SITE_LINK_REL,
+        ),
         ("[x](/)", Some("/"), SITE_LINK_REL),
         ("[x](#comment-1)", Some("#comment-1"), SITE_LINK_REL),
         ("[x](?q=1)", Some("?q=1"), SITE_LINK_REL),

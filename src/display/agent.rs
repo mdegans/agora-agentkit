@@ -8,7 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use misanthropic::prompt::message::Block;
 use url::Url;
 
-use super::{AgentDisplayConfig, DisplayConfig};
+use super::{AgentDisplayConfig, DisplayConfig, Links};
+use crate::names::AgentName;
 use crate::threads;
 
 /// What a view is rendered with: the reader's config, and the site whose
@@ -63,28 +64,61 @@ impl<'a, C> DisplayContext<'a, C> {
 /// else in a view: to the text as written, before any escaping, so a URL
 /// is matched against the rules as its author wrote it (`&` is not yet
 /// `&amp;`, and a `<` still ends it).
-impl<C: AsRef<DisplayConfig>> DisplayContext<'_, C> {
+///
+/// Each is [`ByAuthor`]'s with no author: the plain policy. Text a known
+/// agent wrote goes through [`by`](Self::by)
+impl<'a, C: AsRef<DisplayConfig>> DisplayContext<'a, C> {
+    /// The same policy for text `author` wrote, which an `allow_authors`
+    /// list may show with its links as written
+    /// ([`Links::for_author`](super::Links::for_author)). The author is
+    /// the one the wire type names as the text's writer (a post's
+    /// `agent_name` for its title and body, a message's sender), never a
+    /// name read from the text, and only for that text: someone quoted in
+    /// it is not its author.
+    ///
+    /// Not a `DisplayContext`, so it cannot be handed to the view of
+    /// anything else (a post's comments)
+    pub fn by<'n>(
+        &self,
+        author: impl Into<Option<&'n AgentName>>,
+    ) -> ByAuthor<'a, C> {
+        ByAuthor {
+            links: self.config.as_ref().links.for_author(author.into()),
+            cx: *self,
+        }
+    }
+
+    /// Text shown as written but for the site's pages, which are their
+    /// `agora://` links (as under `raw` with no rule): a broadcast, the
+    /// platform's own words. Never for a record verified by its bytes
+    pub fn site_linked<'t>(&self, text: &'t str) -> Cow<'t, str> {
+        ByAuthor {
+            links: &super::AS_WRITTEN,
+            cx: *self,
+        }
+        .linked(text)
+    }
+
+    fn plain(&self) -> ByAuthor<'a, C> {
+        self.by(None)
+    }
+
     /// `text` under the reader's link policy, and nothing else. Borrowed
     /// when nothing changes
     pub fn linked<'t>(&self, text: &'t str) -> Cow<'t, str> {
-        let (text, defanged) =
-            self.config.as_ref().links.rewrite_noting(text, self.site);
-        if defanged && let Some(flag) = self.defanged {
-            flag.store(true, Ordering::Relaxed);
-        }
-        text
+        self.plain().linked(text)
     }
 
     /// `text` for between an element's tags: [`linked`](Self::linked), then
     /// [`threads::escape_text`]
     pub fn in_element(&self, text: &str) -> String {
-        threads::escape_text(&self.linked(text))
+        self.plain().in_element(text)
     }
 
     /// `text` for a line outside any element: [`linked`](Self::linked),
     /// then [`threads::defang`]
     pub fn on_line(&self, text: &str) -> String {
-        threads::defang(&self.linked(text))
+        self.plain().on_line(text)
     }
 
     /// Another's text for inside a `"…"` on a line, a title most often:
@@ -92,12 +126,60 @@ impl<C: AsRef<DisplayConfig>> DisplayContext<'_, C> {
     /// [`threads::one_line`] and [`threads::quoted`]. Uncut: to cut it, cut
     /// between `one_line` and `quoted`, as [`threads::quoted`] says
     pub fn quoted(&self, text: &str) -> String {
-        threads::quoted(&threads::one_line(&self.linked(text)))
+        self.plain().quoted(text)
     }
 
     /// A post's or comment's body inside its element: [`linked`](Self::linked),
     /// then [`threads::tidy`] and [`threads::escape_text`]. The policy reads
     /// the body as written, before `tidy` changes its line breaks
+    pub fn body(&self, body: &str) -> String {
+        self.plain().body(body)
+    }
+}
+
+/// [`DisplayContext`]'s text methods for text one agent wrote
+/// ([`DisplayContext::by`]): the same, under the policy for that author
+#[derive(Debug)]
+pub struct ByAuthor<'a, C = AgentDisplayConfig> {
+    /// The reader's policy, or for an author it lists, `raw` with no rule
+    links: &'a Links,
+    cx: DisplayContext<'a, C>,
+}
+
+impl<C> Clone for ByAuthor<'_, C> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<C> Copy for ByAuthor<'_, C> {}
+
+impl<C> ByAuthor<'_, C> {
+    /// [`DisplayContext::linked`]
+    pub fn linked<'t>(&self, text: &'t str) -> Cow<'t, str> {
+        let (text, defanged) = self.links.rewrite_noting(text, self.cx.site);
+        if defanged && let Some(flag) = self.cx.defanged {
+            flag.store(true, Ordering::Relaxed);
+        }
+        text
+    }
+
+    /// [`DisplayContext::in_element`]
+    pub fn in_element(&self, text: &str) -> String {
+        threads::escape_text(&self.linked(text))
+    }
+
+    /// [`DisplayContext::on_line`]
+    pub fn on_line(&self, text: &str) -> String {
+        threads::defang(&self.linked(text))
+    }
+
+    /// [`DisplayContext::quoted`]
+    pub fn quoted(&self, text: &str) -> String {
+        threads::quoted(&threads::one_line(&self.linked(text)))
+    }
+
+    /// [`DisplayContext::body`]
     pub fn body(&self, body: &str) -> String {
         threads::escape_text(&threads::tidy(&self.linked(body)))
     }

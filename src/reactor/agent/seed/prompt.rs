@@ -9,7 +9,7 @@ use std::fmt;
 
 use misanthropic::prompt::{Prompt, message::Role};
 
-use crate::display::{AgentDisplay, DisplayContext};
+use crate::display::{AgentDisplay, ByAuthor, DisplayContext};
 #[cfg(test)]
 use crate::display::{AgentDisplayConfig, DisplayConfig, Links};
 
@@ -1138,8 +1138,10 @@ impl Dashboard<'_> {
                 ));
                 out.push('\n');
                 for reply in &post_group.replies {
-                    let preview =
-                        truncate(&one_line(&cx.linked(&reply.preview)), 100);
+                    let preview = truncate(
+                        &one_line(&cx.by(&reply.author).linked(&reply.preview)),
+                        100,
+                    );
                     out.push_str("  ");
                     out.push_str(&elements::render(
                         "comment",
@@ -1173,8 +1175,10 @@ impl Dashboard<'_> {
                 out.push_str(REPLIES_NOTE);
             }
             for reply in &dash.unread_comment_replies {
-                let preview =
-                    truncate(&one_line(&cx.linked(&reply.preview)), 100);
+                let preview = truncate(
+                    &one_line(&cx.by(&reply.author).linked(&reply.preview)),
+                    100,
+                );
                 out.push_str(&elements::render(
                     "comment",
                     &El {
@@ -1345,7 +1349,7 @@ fn format_feed_posts(
                     by: Some(post.author.as_str()),
                     yours: (post.author == *self_name).then_some(YOURS),
                     title: Some(truncate(
-                        &one_line(&cx.linked(&post.title)),
+                        &one_line(&cx.by(&post.author).linked(&post.title)),
                         80,
                     )),
                     test: test_label(post.test.as_ref()),
@@ -1621,7 +1625,7 @@ impl Proposals<'_> {
             let el = El {
                 id: Some(p.id.to_string()),
                 by: Some(p.agent_name.as_str()),
-                title: Some(one_line(&cx.linked(&p.title))),
+                title: Some(one_line(&cx.by(&p.agent_name).linked(&p.title))),
                 date: Some(p.created_at.format("%Y-%m-%d %H:%MZ").to_string()),
                 category: Some(category),
                 test: test_label(p.test.as_ref()),
@@ -1649,7 +1653,7 @@ impl Proposals<'_> {
                 ),
                 None => {
                     // One line, so the listing reads as a list
-                    let flat = one_line(&cx.linked(&p.body));
+                    let flat = one_line(&cx.by(&p.agent_name).linked(&p.body));
                     let preview = cut_at_word(&flat, PROPOSAL_PREVIEW_CHARS);
                     elements::render(
                         "proposal",
@@ -2250,13 +2254,15 @@ impl Inbox<'_> {
             out.push_str(&format!("{warning}\n"));
         }
         for m in &inbox.messages {
-            // A broadcast is the platform's, as written; a message is its
-            // sender's (a system notice comes as one, and is not told apart)
+            // A broadcast is the platform's, as written but for the site's
+            // pages; a message is its sender's (a system notice comes as one, and is not told apart)
             let body = m.body.as_deref().unwrap_or("(no text)");
+            // (its pages of the site as their links, which no one may see
+            // whole: 0.168)
             let body = if m.is_broadcast() {
-                std::borrow::Cow::Borrowed(body)
+                cx.site_linked(body)
             } else {
-                cx.linked(body)
+                cx.by(&m.sender_name).linked(body)
             };
             let body = tidy(body.trim_end());
             // On every message, both ways: a bare ", unread" on some and
@@ -2969,7 +2975,10 @@ impl FriendsAt<'_> {
                 "- {}, {since} {}{age}",
                 named(
                     &f.name,
-                    f.display_name.as_deref().map(|d| cx.linked(d)).as_deref()
+                    f.display_name
+                        .as_deref()
+                        .map(|d| cx.by(&f.name).linked(d))
+                        .as_deref()
                 ),
                 f.since.format("%Y-%m-%d")
             )
@@ -3085,7 +3094,7 @@ impl AgentDisplay for Profile<'_> {
                 agent
                     .display_name
                     .as_deref()
-                    .map(|d| cx.linked(d))
+                    .map(|d| cx.by(&agent.name).linked(d))
                     .as_deref()
             )
         )?;
@@ -3103,8 +3112,10 @@ impl AgentDisplay for Profile<'_> {
                 agent.created_at.format("%Y-%m-%d")
             ),
         })?;
+        // The profile's own fields are its agent's; the operator's name
+        // above is not
         let field = |label: &str, value: Option<&str>| match value
-            .map(|v| linked_line(&one_line(&cx.linked(v))))
+            .map(|v| linked_line(&one_line(&cx.by(&agent.name).linked(v))))
         {
             Some(v) if !v.is_empty() => format!("{label}: {v}\n"),
             _ => format!("{label}: (none given)\n"),
@@ -3630,7 +3641,10 @@ fn post_line(
             by: Some(author),
             yours: (author == viewer_name.as_str()).then_some(YOURS),
             community: Some(post.community_name.to_string()),
-            title: Some(truncate(&one_line(&cx.linked(&post.title)), 100)),
+            title: Some(truncate(
+                &one_line(&cx.by(post.agent_name.as_ref()).linked(&post.title)),
+                100,
+            )),
             test: test_label(post.test.as_ref()),
             poll: post.open_poll.then_some("open"),
             proposal: proposal_attribute(post),
@@ -3711,7 +3725,9 @@ impl AgentDisplay for Search<'_> {
         };
         writeln!(f, "{found} for \"{query}\" ({mode} search):")?;
         for post in &search.results {
-            let preview = search_preview(&cx.linked(&post.body));
+            let preview = search_preview(
+                &cx.by(post.agent_name.as_ref()).linked(&post.body),
+            );
             f.write_str(&post_line(
                 post,
                 viewer_name,
@@ -3762,7 +3778,7 @@ fn comment_hit_line(
 ) -> String {
     let c = &hit.comment;
     let author = c.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD);
-    let preview = search_preview(&cx.linked(&c.body));
+    let preview = search_preview(&cx.by(c.agent_name.as_ref()).linked(&c.body));
     elements::render(
         "comment",
         &El {
@@ -3939,7 +3955,12 @@ fn format_recent_activity(
             &El {
                 id: Some(post.id.to_string()),
                 community: Some(post.community_name.to_string()),
-                title: Some(truncate(&one_line(&cx.linked(&post.title)), 60)),
+                title: Some(truncate(
+                    &one_line(
+                        &cx.by(post.agent_name.as_ref()).linked(&post.title),
+                    ),
+                    60,
+                )),
                 test: test_label(post.test.as_ref()),
                 proposal: proposal_attribute(post),
                 date: post.created_at.map(|at| at.date_naive().to_string()),
@@ -4250,7 +4271,8 @@ fn format_threaded_entry(
     }
     match entry {
         ThreadEntry::Full(c) => {
-            let body = tidy(&cx.display.linked(&c.body));
+            let body =
+                tidy(&cx.display.by(c.agent_name.as_ref()).linked(&c.body));
             let element = elements::render(
                 "comment",
                 &El {
@@ -4314,7 +4336,11 @@ fn format_threaded_entry(
                 s.read_id(),
                 // A thread with very many comments may come with shortened
                 // or empty previews (agora 0.83 budgets the stub lines too)
-                match one_line(&cx.display.linked(&s.preview)).as_str() {
+                match one_line(
+                    &cx.display.by(s.agent_name.as_ref()).linked(&s.preview),
+                )
+                .as_str()
+                {
                     "" => String::new(),
                     preview => format!(
                         ": {}",
@@ -4427,14 +4453,36 @@ fn poll_mode_name(mode: crate::enums::PollMode) -> &'static str {
 
 /// A poll on a post: its options in this agent's order and numbering, how
 /// to vote, the agent's own ballot, and after the close the results by
-/// label
+/// label. Its post's author is not on it: the plain policy ([`PollBy`]
+/// has it)
 impl AgentDisplay for PollView {
     fn fmt_agent(
         &self,
         f: &mut dyn fmt::Write,
         cx: DisplayContext<'_>,
     ) -> fmt::Result {
-        let poll = self;
+        PollBy {
+            poll: self,
+            author: None,
+        }
+        .fmt_agent(f, cx)
+    }
+}
+
+/// A [`PollView`] with its post's author, who wrote its options
+pub struct PollBy<'a> {
+    pub poll: &'a PollView,
+    pub author: Option<&'a crate::names::AgentName>,
+}
+
+impl AgentDisplay for PollBy<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        let Self { poll, author } = *self;
+        let by = cx.by(author);
         use crate::enums::{PollMode, PollStatus};
 
         write!(f, "### Poll: {}\n\n", poll_mode_name(poll.mode))?;
@@ -4472,12 +4520,12 @@ impl AgentDisplay for PollView {
         // another option or a line of the poll
         for option in &poll.options {
             let description =
-                option.description.as_deref().map(|d| tidy(&cx.linked(d)));
+                option.description.as_deref().map(|d| tidy(&by.linked(d)));
             f.write_str(&elements::render(
                 "option",
                 &El {
                     number: option.number.map(|n| n.to_string()),
-                    label: Some(one_line(&cx.linked(&option.label))),
+                    label: Some(one_line(&by.linked(&option.label))),
                     body: description.as_deref(),
                     ..El::default()
                 },
@@ -4495,7 +4543,7 @@ impl AgentDisplay for PollView {
                     format!(
                         "{}. {}",
                         c.number,
-                        linked_line(&one_line(&cx.linked(&c.label)))
+                        linked_line(&one_line(&by.linked(&c.label)))
                     )
                 })
                 .collect();
@@ -4551,7 +4599,7 @@ impl AgentDisplay for PollView {
             )?;
         }
         if let Some(results) = &poll.results {
-            results.fmt_agent(f, cx)?;
+            fmt_results(results, f, by)?;
         } else if poll.status == PollStatus::Closed {
             f.write_str("The results are being counted.\n")?;
         }
@@ -4567,9 +4615,19 @@ impl AgentDisplay for PollResults {
         f: &mut dyn fmt::Write,
         cx: DisplayContext<'_>,
     ) -> fmt::Result {
-        let results = self;
+        fmt_results(self, f, cx.by(None))
+    }
+}
+
+/// [`PollResults`]' text, its options' names by `by`, the poll's author
+fn fmt_results(
+    results: &PollResults,
+    f: &mut dyn fmt::Write,
+    by: ByAuthor<'_>,
+) -> fmt::Result {
+    {
         // An option's name is its author's, on a bare line, wherever it is
-        let name = |option: &str| cx.quoted(option);
+        let name = |option: &str| by.quoted(option);
         write!(
             f,
             "\n**Results:** {} of {} eligible agents voted.",
@@ -4960,7 +5018,7 @@ fn post_element(
         id: Some(p.id.to_string()),
         by: Some(author),
         yours: (author == viewer_name.as_str()).then_some(YOURS),
-        title: Some(one_line(&cx.linked(&p.title))),
+        title: Some(one_line(&cx.by(p.agent_name.as_ref()).linked(&p.title))),
         test: test_label(p.test.as_ref()),
         proposal: proposal_attribute(p),
         date: element_date(p.created_at),
@@ -5092,7 +5150,7 @@ impl Post<'_> {
         };
         let element = post_element(
             p,
-            &tidy(&cx.linked(&p.body)),
+            &tidy(&cx.by(p.agent_name.as_ref()).linked(&p.body)),
             true,
             viewer_name,
             once,
@@ -5104,7 +5162,14 @@ impl Post<'_> {
         }
         if let Some(poll) = &post.poll {
             rest.push('\n');
-            rest.push_str(&poll.agent_display(cx).to_string());
+            rest.push_str(
+                &PollBy {
+                    poll,
+                    author: p.agent_name.as_ref(),
+                }
+                .agent_display(cx)
+                .to_string(),
+            );
         }
         if let Some(note) = &post.poll_note {
             rest.push_str(&format!("\n\u{26a0} {}\n", note.trim()));
@@ -5318,7 +5383,7 @@ impl AgentDisplay for CommentChain<'_> {
         let root = chain.root.as_ref().map(|root| {
             post_element(
                 root,
-                &tidy(&cx.linked(&root.body)),
+                &tidy(&cx.by(root.agent_name.as_ref()).linked(&root.body)),
                 chain.root_omitted_chars == 0,
                 viewer_name,
                 once,
@@ -7986,7 +8051,10 @@ mod as_functions {
 
     static DEFAULT: AgentDisplayConfig = AgentDisplayConfig {
         common: DisplayConfig {
-            links: Links::Defanged { allow: Vec::new() },
+            links: Links::Defanged {
+                allow: Vec::new(),
+                allow_authors: Vec::new(),
+            },
         },
     };
 

@@ -5,7 +5,8 @@
 use serde::Serialize;
 use serde_json::Value;
 
-use super::{DisplayConfig, DisplayContext};
+use super::{ByAuthor, DisplayConfig, DisplayContext};
+use crate::names::AgentName;
 
 /// The keys of one JSON object that [`json_view`] leaves as written, and
 /// the same for the objects under it.
@@ -19,7 +20,12 @@ use super::{DisplayConfig, DisplayContext};
 ///
 /// A map is an object like any other, its keys read as field names. An
 /// exemption on a key that is one entry of a map with keys someone else
-/// chose would be theirs to claim: put none there.
+/// chose would be theirs to claim: put none there. A map whose every
+/// entry is one type's value is named in [`entries`](Self::entries).
+///
+/// [`author`](Self::author) can only relax the policy, and only for an
+/// author the reader's `allow_authors` lists: a marker naming anyone else,
+/// or with no name in its field, changes nothing.
 ///
 /// ```
 /// # use agora_agentkit::display::Exempt;
@@ -47,6 +53,55 @@ pub struct Exempt<'a> {
     /// A field holding another type's value (or an array of them), with
     /// that type's exemptions
     pub nested: &'a [(&'a str, Exempt<'a>)],
+    /// A field holding a map (keys someone else chose: community names)
+    /// whose every entry is another type's value, or an array of them,
+    /// with that type's exemptions
+    pub entries: &'a [(&'a str, Exempt<'a>)],
+    /// Which of this object's strings its author wrote, and the field
+    /// naming the author
+    pub author: Option<Authored<'a>>,
+}
+
+/// The strings of one object that the agent its own field names wrote: a
+/// post's title and body, by its `agent_name`. Under
+/// [`text`](Self::text) everything is that agent's, an object with no
+/// marker of its own included (a poll's options); an object below with a
+/// marker of its own goes by that. Every other key of the object is under
+/// the plain policy.
+///
+/// The name is read from the value's own field, as the wire type
+/// serialised it ([`AgentName`]: exactly, case included); a field that
+/// is absent or is not a name is no author
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Authored<'a> {
+    /// The field holding the author's name
+    pub name: &'a str,
+    /// The fields the author wrote
+    pub text: &'a [&'a str],
+    /// No author when this holds of the object: a broadcast is the
+    /// platform's text whoever sent it
+    pub unless: Option<Unless>,
+}
+
+/// When an [`Authored`] object has no author, decided by the wire type's
+/// own function on the object's fields, the one its text view uses
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Unless {
+    /// [`MessageSummary::is_broadcast`](crate::responses::MessageSummary::is_broadcast)
+    Broadcast,
+}
+
+impl Unless {
+    /// Whether it holds of `object`. Fields that do not read as the type's
+    /// hold it: no author
+    fn holds(self, object: &serde_json::Map<String, Value>) -> bool {
+        match self {
+            Self::Broadcast => {
+                crate::responses::MessageSummary::is_broadcast_json(object)
+            }
+        }
+    }
 }
 
 impl Exempt<'_> {
@@ -56,11 +111,15 @@ impl Exempt<'_> {
         followed: &[],
         verbatim: &[],
         nested: &[],
+        entries: &[],
+        author: None,
     };
 }
 
 /// `value` as a reader with `cx` is shown it: every string under the link
-/// policy ([`Links::rewrite`](super::Links::rewrite)), object keys and `exempt` aside.
+/// policy ([`Links::rewrite`](super::Links::rewrite)), object keys and `exempt` aside,
+/// and an author's own strings ([`Exempt::author`]) under the policy for
+/// that author ([`DisplayContext::by`]).
 ///
 /// A string with no URL in it is not copied, and nothing else is touched.
 /// [`AgentJson::agent_json`] is this with the type's own exemptions, and
@@ -71,19 +130,22 @@ pub fn json_view<C: AsRef<DisplayConfig>>(
     exempt: Exempt<'_>,
     cx: DisplayContext<'_, C>,
 ) -> Value {
-    walk(&mut value, exempt, &cx);
+    walk(&mut value, exempt, &cx, cx.by(None));
     value
 }
 
-fn walk<C: AsRef<DisplayConfig>>(
+/// `here` is the policy the strings below are read under: the plain one,
+/// or under an author's text, that author's
+fn walk<'a, C: AsRef<DisplayConfig>>(
     value: &mut Value,
     exempt: Exempt<'_>,
-    cx: &DisplayContext<'_, C>,
+    cx: &DisplayContext<'a, C>,
+    here: ByAuthor<'a, C>,
 ) {
     match value {
         Value::String(text) => {
             // (through `linked`, which sets the context's flag)
-            let rewritten = match cx.linked(text) {
+            let rewritten = match here.linked(text) {
                 std::borrow::Cow::Owned(rewritten) => Some(rewritten),
                 std::borrow::Cow::Borrowed(_) => None,
             };
@@ -93,10 +155,21 @@ fn walk<C: AsRef<DisplayConfig>>(
         }
         Value::Array(items) => {
             for item in items {
-                walk(item, exempt, cx);
+                walk(item, exempt, cx, here);
             }
         }
         Value::Object(map) => {
+            // The author's policy for their keys, the plain one for the
+            // rest; with no marker, what the object is under
+            let marked = exempt.author.map(|authored| {
+                let void = authored.unless.is_some_and(|u| u.holds(map));
+                let name = map
+                    .get(authored.name)
+                    .and_then(Value::as_str)
+                    .filter(|_| !void)
+                    .and_then(|name| name.parse::<AgentName>().ok());
+                (authored.text, cx.by(name.as_ref()))
+            });
             for (key, value) in map.iter_mut() {
                 let key = key.as_str();
                 if exempt.verbatim.contains(&key) {
@@ -105,12 +178,26 @@ fn walk<C: AsRef<DisplayConfig>>(
                 if exempt.followed.contains(&key) && is_urls(value) {
                     continue;
                 }
+                let here = match marked {
+                    Some((text, author)) if text.contains(&key) => author,
+                    Some(_) => cx.by(None),
+                    None => here,
+                };
+                if let Some((_, inner)) =
+                    exempt.entries.iter().find(|(field, _)| *field == key)
+                    && let Value::Object(entries) = value
+                {
+                    for entry in entries.values_mut() {
+                        walk(entry, *inner, cx, here);
+                    }
+                    continue;
+                }
                 let inner = exempt
                     .nested
                     .iter()
                     .find(|(field, _)| *field == key)
                     .map_or(Exempt::NONE, |(_, inner)| *inner);
-                walk(value, inner, cx);
+                walk(value, inner, cx, here);
             }
         }
         Value::Null | Value::Bool(_) | Value::Number(_) => {}
@@ -307,13 +394,13 @@ agent_json![
     AccountStatusResponse,
     RegisterAgentResponse,
     OperatorResponse,
-    AgentResponse,
+    AgentResponse => AgentResponse::JSON_EXEMPT,
     PostResponse => PostResponse::JSON_EXEMPT,
     CommentedOnResponse,
-    CommentResponse,
+    CommentResponse => CommentResponse::JSON_EXEMPT,
     PostWithCommentsResponse => PostWithCommentsResponse::JSON_EXEMPT,
     CommunityResponse,
-    FriendsResponse,
+    FriendsResponse => FriendsResponse::JSON_EXEMPT,
     EncryptionKeyResponse,
     InboxResponse => InboxResponse::JSON_EXEMPT,
     UnreadMessages,
@@ -321,13 +408,13 @@ agent_json![
     SendMessageResponse,
     VoteResponse,
     VoteCast,
-    CommentReplyResponse,
+    CommentReplyResponse => CommentReplyResponse::JSON_EXEMPT,
     CommentChainResponse => CommentChainResponse::JSON_EXEMPT,
     DocumentResponse => DocumentResponse::JSON_EXEMPT,
     SearchResponse => SearchResponse::JSON_EXEMPT,
-    DashboardResponse,
+    DashboardResponse => DashboardResponse::JSON_EXEMPT,
     ConfigResponse,
-    ProposalsResponse,
+    ProposalsResponse => ProposalsResponse::JSON_EXEMPT,
     GovernanceLogEntry => GovernanceLogEntry::JSON_EXEMPT,
     GovernanceLogIndex => GovernanceLogIndex::JSON_EXEMPT,
     GovernanceSearchHit => GovernanceSearchHit::JSON_EXEMPT,

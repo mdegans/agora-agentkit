@@ -19,6 +19,7 @@ fn config(links: Links) -> AgentDisplayConfig {
 fn allowing(rules: &[&str]) -> AgentDisplayConfig {
     config(Links::Defanged {
         allow: rules.iter().map(|r| rule(r)).collect(),
+        allow_authors: Vec::new(),
     })
 }
 
@@ -550,6 +551,34 @@ fn the_effective_config_lists_every_rule() {
     assert!(told.ends_with("  allow https://host499.example\n"));
 }
 
+#[test]
+fn the_effective_config_lists_every_author() {
+    let authors = |names: &[&str], rules: &[&str]| {
+        let section = AgentDisplayProfiles {
+            default: config(Links::Defanged {
+                allow: rules.iter().map(|r| rule(r)).collect(),
+                allow_authors: names
+                    .iter()
+                    .map(|n| n.parse().unwrap())
+                    .collect(),
+            }),
+            profiles: BTreeMap::new(),
+        };
+        let told = section.resolve(None, None).unwrap().to_string();
+        told.lines().skip(1).collect::<Vec<_>>().join("\n")
+    };
+    assert_eq!(
+        authors(&["claude-ai", "steward"], &[]),
+        "links: defanged, every off-site URL but in 2 authors' own text\n  \
+         author claude-ai\n  author steward"
+    );
+    assert_eq!(
+        authors(&["claude-ai"], &["https://docs.rs"]),
+        "links: defanged, but for 1 allowed, and in 1 author's own text\n  \
+         allow https://docs.rs\n  author claude-ai"
+    );
+}
+
 // ── Schemas ─────────────────────────────────────────────────────────────
 
 #[cfg(feature = "schemars")]
@@ -642,7 +671,8 @@ mod as_toml {
                 allow: vec![
                     rule("https://*.wikipedia.org"),
                     rule("https://www.bbc.com/news")
-                ]
+                ],
+                allow_authors: Vec::new(),
             }
         );
         let one: One =
@@ -773,5 +803,45 @@ id = "local"
             message.contains("`nwes`") && message.contains("`news`, `open`"),
             "{message}"
         );
+    }
+
+    /// `allow_authors`: names, round-tripped; a name that cannot be one
+    /// and an agent's id refused naming the key; refused under `raw`
+    #[test]
+    fn allow_authors() {
+        let file: File = read(
+            "[display]\nlinks = { mode = \"defanged\", allow = \
+             [\"https://docs.rs\"], allow_authors = [\"claude-ai\", \"Oracle\"] }\n",
+        );
+        let Links::Defanged { allow_authors, .. } =
+            &file.display.default.common.links
+        else {
+            panic!("defanged")
+        };
+        assert_eq!(allow_authors, &["claude-ai", "Oracle"]);
+        let written = toml::to_string(&file).unwrap();
+        assert!(written.contains("allow_authors = ["), "{written}");
+        assert_eq!(read::<File>(&written), file, "{written}");
+
+        for (author, named) in [
+            ("\"no spaces\"", "' '"),
+            ("\"ab\"", "3 to 64"),
+            ("\"7ad26ccd-922f-484a-a37c-51777344a98c\"", "by name"),
+            ("1", "string"),
+            ("\"claude-ai\", \"claude-ai\"", "listed twice"),
+        ] {
+            let text = format!(
+                "[display]\nlinks = {{ mode = \"defanged\", allow_authors = [{author}] }}\n"
+            );
+            let message = refused::<File>(&text);
+            assert!(message.contains(named), "{text}: {message}");
+            if named != "string" {
+                assert!(message.contains("allow_authors"), "{text}: {message}");
+            }
+        }
+        let message = refused::<File>(
+            "[display]\nlinks = { mode = \"raw\", allow_authors = [\"claude-ai\"] }\n",
+        );
+        assert!(message.contains("allow_authors"), "{message}");
     }
 }
