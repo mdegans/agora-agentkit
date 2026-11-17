@@ -1816,6 +1816,15 @@ pub struct Change {
     pub omitted_bytes: Option<u64>,
 }
 
+impl Change {
+    /// `before` and `after` are the record's own values, as it holds them
+    pub const JSON_EXEMPT: crate::display::Exempt<'static> =
+        crate::display::Exempt {
+            verbatim: &["before", "after"],
+            ..crate::display::Exempt::NONE
+        };
+}
+
 /// Most of one [`Change`]'s values a history shows, in bytes of JSON
 pub const MAX_CHANGE_BYTES: usize = 2_048;
 /// Most of a [`ChangeHistory`]'s changes, in bytes of JSON
@@ -1841,6 +1850,15 @@ pub struct ChangeHistory {
     pub broken: Option<String>,
 }
 
+impl ChangeHistory {
+    /// Each change's values ([`Change::JSON_EXEMPT`])
+    pub const JSON_EXEMPT: crate::display::Exempt<'static> =
+        crate::display::Exempt {
+            nested: &[("revisions", RevisionChanges::JSON_EXEMPT)],
+            ..crate::display::Exempt::NONE
+        };
+}
+
 /// One revision in a [`ChangeHistory`]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -1861,6 +1879,15 @@ pub struct RevisionChanges {
     /// among `changes`
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub blind: bool,
+}
+
+impl RevisionChanges {
+    /// Each change's values ([`Change::JSON_EXEMPT`])
+    pub const JSON_EXEMPT: crate::display::Exempt<'static> =
+        crate::display::Exempt {
+            nested: &[("changes", Change::JSON_EXEMPT)],
+            ..crate::display::Exempt::NONE
+        };
 }
 
 impl ChangeHistory {

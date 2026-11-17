@@ -11,6 +11,7 @@ use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use url::Url;
 
+use crate::display::Exempt;
 use crate::enums::{
     CalendarEventKind, ClientPlatform, ContentKind, DashboardCommunities,
     DecisionOutcome, DeletedBy, DesignationKind, FeedSort,
@@ -355,6 +356,14 @@ pub struct ConstitutionResponse {
 }
 
 impl ConstitutionResponse {
+    /// `text` is the platform's own, shown as written
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        verbatim: &["text"],
+        ..Exempt::NONE
+    };
+}
+
+impl ConstitutionResponse {
     /// Version `version`'s `text`, whole or with `lines` those lines of it
     /// ([`DocumentLines::select`])
     pub fn new(
@@ -550,6 +559,14 @@ pub struct DataExportBundle {
     pub sealed_state: Option<SealedStateExport>,
 }
 
+impl DataExportBundle {
+    /// The blobs' links ([`SealedStateExport::JSON_EXEMPT`])
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        nested: &[("sealed_state", SealedStateExport::JSON_EXEMPT)],
+        ..Exempt::NONE
+    };
+}
+
 /// An agent's sealed state in its data export (0.147)
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -563,6 +580,14 @@ pub struct SealedStateExport {
     pub keys: Vec<crate::state::StateKeyRecord>,
 }
 
+impl SealedStateExport {
+    /// The blobs' links ([`ExportedStateBlob::JSON_EXEMPT`])
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        nested: &[("blobs", ExportedStateBlob::JSON_EXEMPT)],
+        ..Exempt::NONE
+    };
+}
+
 /// One sealed blob in a [`SealedStateExport`], by link
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -572,6 +597,14 @@ pub struct ExportedStateBlob {
     pub size_bytes: u64,
     /// Works with the export's token
     pub url: url::Url,
+}
+
+impl ExportedStateBlob {
+    /// `url` is where the blob is fetched
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        followed: &["url"],
+        ..Exempt::NONE
+    };
 }
 
 /// An agent's published sealed-state head, as of an `ANC-` entry (0.147)
@@ -2225,6 +2258,14 @@ pub struct DocumentResponse {
 }
 
 impl DocumentResponse {
+    /// `text` is the platform's own, shown as written
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        verbatim: &["text"],
+        ..Exempt::NONE
+    };
+}
+
+impl DocumentResponse {
     /// `document`'s `text`, whole or with `lines` those lines of it
     /// ([`DocumentLines::select`])
     pub fn new(
@@ -3489,6 +3530,14 @@ pub struct GovernanceLogEntry {
     pub summary: Option<String>,
 }
 
+impl GovernanceLogEntry {
+    /// `data` is the record, verified by hashing it as served
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        verbatim: &["data"],
+        ..Exempt::NONE
+    };
+}
+
 /// One line of the governance log index — enough to decide whether an
 /// entry is worth reading, and nothing more.
 ///
@@ -4004,6 +4053,21 @@ pub struct GovernanceEntryResponse {
 }
 
 impl GovernanceEntryResponse {
+    /// `data` is the record (its attachments' texts in it), verified by
+    /// hashing it as served ([`crate::govlog`]); a data set's file is
+    /// too ([`DataFileContent::JSON_EXEMPT`]), and a history's values are
+    /// the record's ([`Change::JSON_EXEMPT`](crate::govlog::Change::JSON_EXEMPT))
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        verbatim: &["data"],
+        nested: &[
+            ("data_file", DataFileContent::JSON_EXEMPT),
+            ("history", crate::govlog::ChangeHistory::JSON_EXEMPT),
+        ],
+        ..Exempt::NONE
+    };
+}
+
+impl GovernanceEntryResponse {
     /// Whether the record has been revised, whichever version was served
     pub fn is_revised(&self) -> bool {
         !self.revisions.is_empty()
@@ -4491,6 +4555,14 @@ pub struct DataFileContent {
     /// to a directory at the repository root, resolved (0.91.4)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub asked: Option<String>,
+}
+
+impl DataFileContent {
+    /// `text` is the file's, checked against the hash its data set signs
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        verbatim: &["text"],
+        ..Exempt::NONE
+    };
 }
 
 /// A data set's file is not UTF-8 text, so `get_content` cannot serve it

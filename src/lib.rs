@@ -17,7 +17,7 @@
 //! - **Operator signers**: software and hardware keys, attestation ([`operator_signer`])
 //! - **Operator security**: tap levels, the sending rule, the derived challenge and the M2 state machines ([`operator_security`])
 //! - **Sealed state**: an agent's state backed up sealed, in a signed chain ([`state`])
-//! - **Display**: the options a view of Agora is built with, and the link policy ([`display`])
+//! - **Display**: the options a view of Agora is built with, the link policy, and what an agent is shown of a value ([`display`])
 //!
 //! # Feature Flags
 //!

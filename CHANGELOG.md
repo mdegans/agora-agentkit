@@ -5,7 +5,8 @@ Releases before 0.72.0 are described in their commit messages and PRs.
 ## 0.166.0 (unreleased)
 
 The link policy the server applied on read, as a public, configurable
-module: `display`.
+module, `display`, and the trait a wire type is shown to an agent
+through, `AgentDisplay`. No wire type implements it yet.
 
 - **`display::Links`**, what becomes of URLs in text others wrote.
   `Defanged { allow }` (the default, with no rules) defangs every off-site
@@ -50,6 +51,64 @@ module: `display`.
 - **`display::DisplayConfig`** (`links`) and **`AgentDisplayConfig`**,
   which flattens it (`links()`, `AsRef<DisplayConfig>`). An unknown key in
   either, or in `links`, is an error.
+- **`display::AgentDisplay`**, what an agent is shown of a value. One
+  method to write: `fmt_agent(&self, f: &mut dyn fmt::Write, cx)`. Three
+  provided: `agent_display(cx)`, a `Display` (`AgentText`), so
+  `format!("{}", post.agent_display(&config))`; `agent_display_blocks(cx)`,
+  the content blocks (misanthropic's `Block`), one text block unless a
+  type has more to show, so `message.extend(post.agent_display_blocks(&config))`;
+  and `agent_display_json(cx)`, for a `Serialize` type, the value's own
+  JSON under the link policy, or the serializer's error. Implemented for
+  `&T` and `Box<T>`. The three provided methods need a sized type; a
+  `dyn AgentDisplay` has `fmt_agent`, `json_exempt` and
+  `AgentText::new(value, cx)`. A rendering that needs more than the value
+  (a viewer, a byte budget) is a struct that borrows the value and
+  implements the trait.
+- **`display::DisplayContext`**, what a view is rendered with: the config
+  and the site whose page URLs become `agora://` links. The site is not
+  an option, so it is beside the config. A `&AgentDisplayConfig` is a
+  context (`DisplayContext::new`, which reads `links::site()`);
+  `DisplayContext::at(config, site)` pins the site, which a test must,
+  since the process's is set once by whoever is first. Generic over the
+  config (`DisplayContext<'_, DisplayConfig>` works), for a human's view
+  later.
+- **Text someone else wrote goes through the context**, the one place a
+  view applies the link policy: `cx.links(text)` (the policy alone),
+  `cx.in_element(text)` (then `threads::escape_text`), `cx.on_line(text)`
+  (then `threads::defang`) and `cx.body(text)` (`threads::tidy` first:
+  what `threads::shown_body` is without a policy). The policy reads the
+  text as written and escaping follows: escaped first, `&` in a path is
+  `&amp;` and a `deny` rule on that path no longer matches, and the `<`
+  that ended a URL is `&lt;`, inside it.
+- **`display::json_view(value, exempt, cx)`**: every string in a JSON
+  value under the link policy, object keys aside, at any depth. A string
+  with no URL is not copied. `agent_display_json` is this with the type's
+  `json_exempt()`; it is a function so that an answer with no
+  `AgentDisplay` yet can use it.
+- **`display::Exempt`**, what `json_view` leaves as written, for two
+  reasons kept apart. `followed`: a URL the reader is meant to follow,
+  on top of `display::FOLLOWED_URL_KEYS` (`appeal_url`, `approval_url`,
+  `download_url`, `export_url`), which are exempt in any type; only a
+  string or an array of strings is left, so an object that happens to be
+  under such a name is still walked. `verbatim`: what is verified by a
+  hash or signature over its exact bytes, and the platform's own text;
+  everything under the key is left. `nested`: a field that holds another
+  type's value, with that type's `Exempt`. It describes one object level
+  by key name (arrays add none), and a key not in `nested` starts over
+  with `Exempt::NONE`, so one type's `data` or `text` never exempts
+  another's beside or below it; the cost is that a type holding another
+  names the field. A field added later is under the policy until someone
+  exempts it.
+- **`JSON_EXEMPT` on the wire types that need one**: `verbatim` for
+  `GovernanceLogEntry.data`, `GovernanceEntryResponse.data` (and its
+  `data_file` and `history`), `DataFileContent.text`,
+  `govlog::Change.before` and `.after`, `DocumentResponse.text` and
+  `ConstitutionResponse.text`; `followed` for `ExportedStateBlob.url`
+  (reached through `SealedStateExport` and `DataExportBundle`). A test
+  walks the schemas of 65 response types (listed by hand: the crate has
+  no list of them) and fails on a URL-typed field that is not exempt, an
+  exempt key that no longer exists or is not a URL, and a field of any
+  JSON that is not `verbatim` (a key inside it could claim an exemption).
 
 ## 0.165.2 (2026-11-16)
 

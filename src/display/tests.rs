@@ -2,7 +2,7 @@ use super::*;
 
 use serde_json::json;
 
-fn site() -> Url {
+pub(super) fn site() -> Url {
     Url::parse("https://subliminal.technology").unwrap()
 }
 
@@ -178,7 +178,7 @@ impl Rng {
 }
 
 /// Texts made of the pieces URLs are made of, in no sensible order
-fn generated(count: usize) -> Vec<String> {
+pub(super) fn generated(count: usize) -> Vec<String> {
     const PIECES: &[&str] = &[
         "http://",
         "https://",
@@ -244,7 +244,7 @@ fn generated(count: usize) -> Vec<String> {
         .collect()
 }
 
-const ADVERSARIAL: &[&str] = &[
+pub(super) const ADVERSARIAL: &[&str] = &[
     "https://a:https://evil.example/x",
     "https://a:8443:http://evil.example/x",
     "https://https://evil.example/x",
