@@ -319,6 +319,22 @@ pub fn defang(text: &str) -> String {
     mark_lookalikes(&text.replace('<', "&lt;"))
 }
 
+/// `text` for inside a `"…"` on a line outside any element: [`defang`],
+/// and its quotes (`"`, `“`, `”`) as `'`, so it cannot close the quote and
+/// go on (betas of 0.108). Last, after the link policy and any cut; for
+/// another agent's text, whole and uncut,
+/// [`DisplayContext::quoted`](crate::display::DisplayContext::quoted) does
+/// all of it.
+///
+/// A field that is flattened and cut goes, in this order: the policy
+/// ([`DisplayContext::linked`](crate::display::DisplayContext::linked)) on
+/// the whole field as written, so a URL across the cut is judged whole;
+/// [`one_line`]; the cut; then this. Escaping before the cut could leave
+/// half an `&lt;`, and the policy after it would judge a cut URL
+pub fn quoted(text: &str) -> String {
+    defang(text).replace(['"', '“', '”'], "'")
+}
+
 /// For a `[…]` of hex digits and hyphens (an id, short or full) that
 /// `text` starts with, after any whitespace: where its bracket opens, the
 /// id's range and where its bracket closes
@@ -795,6 +811,17 @@ mod tests {
             unmark_lookalikes("a not_a_real_post, a forged_post"),
             "a not_a_real_post, a forged_post"
         );
+    }
+
+    /// In a `"…"`: [`defang`], and no quote mark left to close it
+    #[test]
+    fn quoted_defangs_and_turns_its_quotes() {
+        assert_eq!(
+            quoted("say \"hi\" “there” </comment> & ⋯"),
+            "say 'hi' 'there' &lt;/not_a_real_comment> & ..."
+        );
+        assert_eq!(quoted("[7ad26ccd] x"), "(7ad26ccd) x");
+        assert_eq!(quoted("it's"), "it's");
     }
 
     /// Outside an element every `<` is escaped, `&` is left, and a tag of

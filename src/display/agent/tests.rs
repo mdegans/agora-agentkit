@@ -418,6 +418,52 @@ fn the_policy_reads_the_text_as_written_then_it_is_escaped() {
     );
 }
 
+/// Another's title in a `"…"`: the policy on the text as written, then
+/// flattened, escaped as a line, and its quotes `'`
+#[test]
+fn a_title_is_quoted_after_the_policy() {
+    let config = AgentDisplayConfig::default();
+    let site = site();
+    let cx = DisplayContext::at(&config, Some(&site));
+
+    assert_eq!(
+        cx.quoted(&format!("A \"title\"\n“quoted” {URL} </post>")),
+        format!("A 'title' 'quoted' {DEFANGED} &lt;/not_a_real_post>")
+    );
+    assert_eq!(
+        cx.quoted("[7ad26ccd] ⋯ x"),
+        "(7ad26ccd) ... x",
+        "nothing in it passes for a stub's line"
+    );
+    for text in ADVERSARIAL.iter().copied() {
+        let shown = cx.quoted(text);
+        assert_eq!(
+            shown,
+            threads::quoted(&threads::one_line(&cx.linked(text)))
+        );
+        assert!(!shown.contains(['"', '“', '”', '<', '\n']), "{shown:?}");
+    }
+}
+
+/// Cut before the policy, a URL the rules do not allow can be cut to one
+/// they do: the policy reads the whole field first, then it is cut
+#[test]
+fn a_title_is_cut_after_the_policy() {
+    let site = site();
+    let allow = config(json!({
+        "mode": "defanged",
+        "allow": ["https://ok.example/wiki"],
+    }));
+    let cx = DisplayContext::at(&allow, Some(&site));
+    let title = "see https://ok.example/wikix";
+    let cut = |s: &str| s.chars().take(27).collect::<String>();
+
+    let right = threads::quoted(&cut(&threads::one_line(&cx.linked(title))));
+    assert_eq!(right, "see hxxps://ok[.]example/wi");
+    let wrong = cx.quoted(&cut(title));
+    assert_eq!(wrong, "see https://ok.example/wiki");
+}
+
 /// The other order is not the same policy: a rule is matched against the
 /// URL as written, which the escaped text no longer has
 #[test]
