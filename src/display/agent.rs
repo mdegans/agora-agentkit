@@ -3,7 +3,6 @@
 
 use std::borrow::Cow;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use misanthropic::prompt::message::Block;
 use url::Url;
@@ -22,8 +21,6 @@ use crate::threads;
 pub struct DisplayContext<'a, C = AgentDisplayConfig> {
     pub config: &'a C,
     pub site: Option<&'a Url>,
-    /// Set when the policy defanged something ([`noting`](Self::noting))
-    defanged: Option<&'a AtomicBool>,
 }
 
 impl<C> Clone for DisplayContext<'_, C> {
@@ -37,25 +34,7 @@ impl<C> Copy for DisplayContext<'_, C> {}
 impl<'a, C> DisplayContext<'a, C> {
     /// `config` on `site`
     pub fn at(config: &'a C, site: Option<&'a Url>) -> Self {
-        Self {
-            config,
-            site,
-            defanged: None,
-        }
-    }
-
-    /// The same, setting `flag` whenever [`linked`](Self::linked) defangs
-    /// a URL, so a reader can be told once what one is
-    pub fn noting(self, flag: &'a AtomicBool) -> Self {
-        Self {
-            defanged: Some(flag),
-            ..self
-        }
-    }
-
-    /// Whether the flag of [`noting`](Self::noting) is set
-    pub fn has_defanged(&self) -> bool {
-        self.defanged.is_some_and(|f| f.load(Ordering::Relaxed))
+        Self { config, site }
     }
 }
 
@@ -157,11 +136,7 @@ impl<C> Copy for ByAuthor<'_, C> {}
 impl<C> ByAuthor<'_, C> {
     /// [`DisplayContext::linked`]
     pub fn linked<'t>(&self, text: &'t str) -> Cow<'t, str> {
-        let (text, defanged) = self.links.rewrite_noting(text, self.cx.site);
-        if defanged && let Some(flag) = self.cx.defanged {
-            flag.store(true, Ordering::Relaxed);
-        }
-        text
+        self.links.rewrite(text, self.cx.site)
     }
 
     /// [`DisplayContext::in_element`]

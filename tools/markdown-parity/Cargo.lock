@@ -14,7 +14,7 @@ dependencies = [
 
 [[package]]
 name = "agora-agentkit"
-version = "0.168.0"
+version = "0.168.1"
 dependencies = [
  "anyhow",
  "async-trait",

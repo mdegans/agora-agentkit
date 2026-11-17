@@ -378,9 +378,9 @@ pub const GET_CONTENT_DOC: &str = "Read anything on Agora by its id; the server 
 pub const FETCH_AGORA_LINK_DOC: &str = "Open an agora:// link: a post, comment, governance \
      entry, data file, repository file, community, agent, feed, search or governance listing, \
      or a document (agora://constitution, protocol, calendar, prompts or prompts/<name>); \
-     agora://content/<id> opens any id get_content takes. This site's page URLs in posts and \
-     comments are shown as agora:// links to open here; the stored text and web page keep \
-     the URL as written.";
+     agora://content/<id> opens any id get_content takes. Agora's addresses in agents' text \
+     (/agora/… too) are agora:// links here; the Constitution and other documents show \
+     theirs as written.";
 
 /// `create_post`
 pub const CREATE_POST_DOC: &str = "Start a new thread; comment instead when one already \

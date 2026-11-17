@@ -3091,3 +3091,101 @@ fn the_tool_report_says_authors_do_not_widen_the_tool() {
             .contains("author")
     );
 }
+
+/// A path on the site as a Markdown link's target is the link its full
+/// URL is (beta round of 0.168.0: the steward's
+/// `[Followup](/agora/c/news/<id>)` was shown raw); in prose, or failing
+/// any check a full URL is held to, it is left as written
+#[test]
+fn a_relative_link_to_a_page_of_the_site_is_its_link() {
+    let site = site();
+    let at =
+        |text: &str| Links::default().rewrite(text, Some(&site)).into_owned();
+    for (text, want) in [
+        (
+            "[Followup: x](/agora/c/news/47fae76d-590e-4095-9e9d-7cc9ddc66086)",
+            "[Followup: x](agora://post/47fae76d-590e-4095-9e9d-7cc9ddc66086)",
+        ),
+        (
+            "[it](/agora/hello-world).",
+            "[it](agora://page/hello-world).",
+        ),
+        ("[P](</agora/protocol>)", "[P](<agora://protocol>)"),
+        (
+            "[t](/agora/gov/GOV-2026-0006 \"the record\")",
+            "[t](agora://gov/GOV-2026-0006 \"the record\")",
+        ),
+        // In prose: a path someone is talking about
+        (
+            "The server routes /agora/c/news/47fae76d-590e-4095-9e9d-7cc9ddc66086 too",
+            "The server routes /agora/c/news/47fae76d-590e-4095-9e9d-7cc9ddc66086 too",
+        ),
+        // Off the prefix, a dot segment either way, another host inside
+        ("[x](/other/page)", "[x](/other/page)"),
+        ("[x](/agora/x/../account)", "[x](/agora/x/../account)"),
+        ("[x](/agora/x\\..\\account)", "[x](/agora/x\\..\\account)"),
+        (
+            "[x](/agora/x?u=www.evil.example)",
+            "[x](/agora/x?u=www[.]evil[.]example)",
+        ),
+        ("[x](//evil.example/agora/x)", "[x](//evil.example/agora/x)"),
+        // A last character a prose URL would lose: left, so the link never
+        // names another page than a browser opens
+        ("[x](/agora/post/7ad26ccd.)", "[x](/agora/post/7ad26ccd.)"),
+        ("[x](/agora/x,)", "[x](/agora/x,)"),
+        ("[x](/agora/x/...)", "[x](/agora/x/...)"),
+    ] {
+        assert_eq!(at(text), want, "{text}");
+    }
+    // With no site there is nothing to read it against
+    let text = "[x](/agora/post/7ad26ccd)";
+    assert_eq!(Links::default().rewrite(text, None), text);
+    // And in every mode, by any author
+    for links in [
+        Links::Raw { deny: Vec::new() },
+        deny(&["https://evil.example"]),
+    ] {
+        assert_eq!(
+            links.rewrite(text, Some(&site)),
+            "[x](agora://post/7ad26ccd)"
+        );
+    }
+}
+
+/// Every form the defanger emits is seen by `shows_defanged`: driven from
+/// its own output, so a new defanged form cannot go without the note
+#[test]
+fn shows_defanged_sees_every_form_the_defanger_emits() {
+    let extra = [
+        "WWW.evil.example/x",
+        "Www.evil.example",
+        "h\nttps://evil.example/x",
+        "ht\ttps://evil.example/x",
+        "h\r\nttps://evil.example/x",
+        "h  \nttps://evil.example/x",
+        "HTTPS://EVIL.EXAMPLE",
+    ];
+    let texts = generated(5_000);
+    let deny = deny(&["https://evil.example"]);
+    let mut seen = 0;
+    for text in ADVERSARIAL
+        .iter()
+        .chain(SPELLINGS)
+        .chain(extra.iter())
+        .copied()
+        .chain(texts.iter().map(String::as_str))
+    {
+        for links in [&Links::default(), &deny] {
+            let (out, defanged) = links.rewrite_noting(text, None);
+            if defanged {
+                seen += 1;
+                assert!(shows_defanged(&out), "{text:?} gave {out:?}");
+            }
+        }
+    }
+    assert!(seen > 1_000, "{seen}");
+    for text in extra {
+        assert!(Links::default().rewrite_noting(text, None).1, "{text:?}");
+    }
+    assert!(!shows_defanged("Code on github.com and www.example.org"));
+}

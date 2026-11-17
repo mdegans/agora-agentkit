@@ -17,7 +17,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Serialize};
 use url::{Host, Position, Url};
 
-use crate::links::AgoraLink;
+use crate::links::{AgoraLink, SITE_PREFIX};
 use crate::names::AgentName;
 use crate::threads;
 
@@ -108,8 +108,18 @@ fn strict_common<'de, D: serde::Deserializer<'de>>(
 /// What becomes of URLs in text others wrote.
 ///
 /// In both modes a page URL of Agora's site is written as its `agora://`
-/// link ([`AgoraLink::on_site`]): one under `/agora/` that no kind names
-/// as `agora://page/<path>?<query>` (its `#fragment` dropped). A URL on
+/// link ([`AgoraLink::on_site`]), and so is a path on the site right after
+/// `](` or `](<`, as a Markdown inline link's target is written
+/// (`[post](/agora/c/news/<id>)`), and nowhere else. That is by the
+/// characters, not by Markdown: a code span, fenced code, an image's
+/// target and a stray `](/agora/…` are rewritten too, as a full URL in
+/// code is, and only a link of the site's own can come of it. A page under
+/// `/agora/` that no kind names is `agora://page/<path>?<query>` (its
+/// `#fragment` dropped).
+///
+/// Run the policy on the stored text, once: over text it already rendered
+/// it is not idempotent for a relative target that held a defanged URL
+/// (nothing followable results, but the text differs). A URL on
 /// the site is treated as any other URL when it is outside `/agora/` (the
 /// host's other pages are not Agora's), has a `.` or `..` segment
 /// (between `/` or `\`), a control character or a user, or another URL in
@@ -303,6 +313,29 @@ fn author_names<'de, D: serde::Deserializer<'de>>(
         })
 }
 
+/// Whether `text` shows a link as the policy defangs one: a scheme
+/// written `hxxp`, or a host `www[.]`, in any letter case and with what
+/// the scanner drops inside a scheme dropped here too (a tab or a line
+/// break, and the whitespace before one: `h\nxxps://`). For a reader's
+/// one-time note on what such a link is, asked of the text the reader is
+/// given, never of what a view read before it cut or left a field out.
+/// Text that writes one itself (`hxxps://` in a post about defanging)
+/// counts too: the note explains it all the same
+pub fn shows_defanged(text: &str) -> bool {
+    let mut read = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c == '\t' || threads::is_line_break(c) {
+            // and the whitespace before it, as `skip_dropped` reads it
+            while read.ends_with(|c: char| is_gap(c)) {
+                read.pop();
+            }
+            continue;
+        }
+        read.push(c.to_ascii_lowercase());
+    }
+    read.contains("hxxp") || read.contains("www[.]")
+}
+
 /// The longest URL read as a link or checked against a [`LinkRule`],
 /// from its scheme to the next space: a longer one matches no rule. It
 /// bounds the work per URL
@@ -389,6 +422,24 @@ impl Links {
         let mut copied = 0; // everything before this offset is already in `out`
 
         while i < bytes.len() {
+            // A path on the site as a Markdown link's target
+            // (`](/agora/c/news/<id>)`): its link, as its full URL would be
+            if let Some(site) = site
+                && bytes[i] == b'/'
+                && let Some(end) = relative_target(text, i)
+                && let Some(link) = AgoraLink::on_site_path(&text[i..end], site)
+                    .map(|link| link.to_string())
+                && matches!(DEFAULT.rewrite(&link, None), Cow::Borrowed(_))
+            {
+                let buf = out.get_or_insert_with(|| {
+                    String::with_capacity(text.len() + 16)
+                });
+                buf.push_str(&text[copied..i]);
+                buf.push_str(&link);
+                copied = end;
+                i = end;
+                continue;
+            }
             let start = if let Some(scheme) = scheme_at(text, i) {
                 scheme
             } else if www_at(bytes, i) {
@@ -1267,6 +1318,23 @@ fn url_end(text: &str, start: usize, from: usize) -> Option<usize> {
         end -= c.len_utf8();
     }
     Some(end)
+}
+
+/// The end of a path on the site written at `at` as a Markdown inline
+/// link's target: after `](` or `](<`, starting [`SITE_PREFIX`], to the
+/// first whitespace or `)`, `<`, `>`, `"`, `'`. Nowhere else: a bare
+/// `/agora/…` is more often a path someone is talking about. `None` past
+/// [`MAX_URL_BYTES`]
+fn relative_target(text: &str, at: usize) -> Option<usize> {
+    let before = &text[..at];
+    if !(before.ends_with("](") || before.ends_with("](<"))
+        || !text[at..].starts_with(SITE_PREFIX)
+    {
+        return None;
+    }
+    bounded_end(text, at, at, |c| {
+        is_gap(c) || matches!(c, ')' | '<' | '>' | '"' | '\'')
+    })
 }
 
 /// Whether the URL whose authority starts at `at` is on `site`'s host: a

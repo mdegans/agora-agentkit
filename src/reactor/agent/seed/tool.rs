@@ -617,7 +617,6 @@ impl Agora {
     /// client's site
     fn cx(&self) -> DisplayContext<'_> {
         DisplayContext::at(&self.display, Some(self.client.site()))
-            .noting(self.shown_once.defanged_flag())
     }
 
     /// The agent this tool acts as
@@ -1478,13 +1477,9 @@ impl Agora {
         };
         // Rendered after the entry, into the same result. Its own copy of
         // the context: the arms below change `self`
-        let (display, site, once) = (
-            self.display.clone(),
-            self.client.site().clone(),
-            self.shown_once.clone(),
-        );
-        let cx = DisplayContext::at(&display, Some(&site))
-            .noting(once.defanged_flag());
+        let (display, site) =
+            (self.display.clone(), self.client.site().clone());
+        let cx = DisplayContext::at(&display, Some(&site));
         let with_history =
             |rendered: String, once: &super::ShownOnce| match &history {
                 Some((h, amendments)) => {

@@ -107,6 +107,11 @@ fn write_groups(out: &mut String, groups: &BTreeMap<String, Group>) {
 fn cause(token: &str, old: &str, new: &str, site: &Url) -> &'static str {
     let lower = token.to_ascii_lowercase();
     let bytes = lower.as_bytes();
+    // 0.168.1: a path on the site as a Markdown link's target is its
+    // link, which the server left as written
+    if relative_explained(token, old, new, site) {
+        return "a relative path on the site as a Markdown target: its agora:// link (0.168.1)";
+    }
     // 0.168: a page of the site no kind names is `agora://page/…`, which
     // the server defanged. Only when that is the whole difference: the
     // default's output with those links put back as the server wrote them
@@ -171,6 +176,32 @@ fn pages_back(new: &str, site: &Url) -> String {
     }
     out.push_str(rest);
     out
+}
+
+/// Whether the server left `token` as written and the default differs
+/// from it only by each `](/agora/…)` target in it written as its link
+/// (`AgoraLink::on_site_path`), worked out here apart from the scanner
+fn relative_explained(token: &str, old: &str, new: &str, site: &Url) -> bool {
+    if old != token || !token.contains("](/agora/") {
+        return false;
+    }
+    let mut expected = String::with_capacity(token.len());
+    let mut rest = token;
+    while let Some(at) = rest.find("](/agora/") {
+        let path_at = at + 2;
+        expected.push_str(&rest[..path_at]);
+        let tail = &rest[path_at..];
+        let end = tail
+            .find(|c: char| is_gap(c) || ")<>\"'".contains(c))
+            .unwrap_or(tail.len());
+        match links::AgoraLink::on_site_path(&tail[..end], site) {
+            Some(link) => expected.push_str(&link.to_string()),
+            None => expected.push_str(&tail[..end]),
+        }
+        rest = &tail[end..];
+    }
+    expected.push_str(rest);
+    expected == new
 }
 
 // ── (b) Under the allow list ────────────────────────────────────────────

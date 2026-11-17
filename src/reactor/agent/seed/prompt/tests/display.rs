@@ -637,27 +637,43 @@ fn its_own_profile_is_under_the_policy_as_anothers_is() {
         assert_eq!(shown.matches(DEFANGED).count(), 4, "{shown}");
         assert_eq!(shown.matches("agora://post/8dbc9b3a").count(), 4);
     }
+    use crate::reactor::agent::seed::prompt::{
+        OWN_BOTH_LINKS, OWN_LINKS, OWN_SITE_LINKS,
+    };
+    // Defanged links and a site page's link: both said
     assert!(
         own.contains(&format!(
-            "(Here &lt; is <, and update_profile stores &lt; as <; {}.)",
-            crate::reactor::agent::seed::prompt::OWN_LINKS
+            "(Here &lt; is <, and update_profile stores &lt; as <; \
+             {OWN_BOTH_LINKS}.)"
         )),
         "{own}"
     );
-    assert!(!theirs.contains(crate::reactor::agent::seed::prompt::OWN_LINKS));
-    // Only when a link in it was defanged: not for a site page's link, nor
-    // for no link at all
-    for bio in [
-        "No links here.",
-        "See https://subliminal.technology/agora/protocol",
-    ] {
-        let mut clean = agent("viewer");
-        clean.display_name = None;
-        clean.model_info = None;
-        clean.operator_display_name = "Op".into();
-        clean.bio = Some(bio.into());
-        let shown = profile(&clean);
-        assert!(!shown.contains("defanged"), "{shown}");
+    for hint in [OWN_LINKS, OWN_SITE_LINKS, OWN_BOTH_LINKS] {
+        assert!(!theirs.contains(hint), "{theirs}");
+    }
+    // A site page's link alone (beta round of 0.168.0: an own bio's
+    // Constitution link shown as agora://constitution, with nothing said)
+    let mut site_only = agent("viewer");
+    site_only.display_name = None;
+    site_only.model_info = None;
+    site_only.operator_display_name = "Op".into();
+    site_only.bio =
+        Some("Read https://subliminal.technology/agora/constitution".into());
+    let shown = profile(&site_only);
+    assert!(shown.contains("Bio: Read agora://constitution"), "{shown}");
+    assert!(
+        shown.contains(&format!("(Here {OWN_SITE_LINKS}.)")),
+        "{shown}"
+    );
+    // No link at all: nothing said
+    let mut clean = agent("viewer");
+    clean.display_name = None;
+    clean.model_info = None;
+    clean.operator_display_name = "Op".into();
+    clean.bio = Some("No links here.".into());
+    let shown = profile(&clean);
+    for hint in [OWN_LINKS, OWN_SITE_LINKS, OWN_BOTH_LINKS] {
+        assert!(!shown.contains(hint), "{shown}");
     }
     let mut linked = agent("viewer");
     linked.display_name = None;
@@ -1722,5 +1738,100 @@ fn a_page_no_kind_names_is_a_link_in_every_view() {
         old_server(PAGES),
         "hxxps://subliminal[.]technology/agora/hello-world and \
          hxxps://subliminal[.]technology/agora/account"
+    );
+}
+
+// ── The link note, where a link is shown (0.168.1) ───────────────────────
+
+/// The beta round's searches: a body whose only link is past the preview's
+/// cut. The policy reads the whole body (it must: a cut can make another
+/// URL of one it judged), so it defanged a link the agent never saw, and
+/// the flag that set (before 0.168.1) put the note on a result with no
+/// defanged link in it. The note now goes by what the result shows
+#[test]
+fn a_link_past_a_previews_cut_brings_no_note() {
+    let body = format!(
+        "{} see https://arxiv.org/abs/2401.00001",
+        "word ".repeat(40)
+    );
+    // What set the flag: the policy over the whole body defangs the link
+    assert!(Links::default().rewrite_noting(&body, Some(&site())).1);
+    let mut post = crate::fixtures::post();
+    post.body = body.clone();
+    post.title = "On arxiv".into();
+    let mut comment = crate::fixtures::comment();
+    comment.body = body;
+    let search = SearchResponse {
+        results: vec![post],
+        comment_results: vec![CommentSearchHit {
+            comment,
+            post_title: "A title".into(),
+            similarity: 0.8,
+        }],
+        mode_used: SearchMode::Keyword,
+        degraded: false,
+    };
+    let shown = default_on_site(|cx| {
+        Search {
+            search: &search,
+            query: "arxiv",
+            viewer_name: &viewer(),
+            once: &ShownOnce::default(),
+        }
+        .agent_display(cx)
+        .to_string()
+    });
+    assert!(
+        !shown.contains("hxxp") && !shown.contains("arxiv[.]org"),
+        "{shown}"
+    );
+    let once = ShownOnce::default();
+    assert_eq!(once.defanged_note(&shown), None);
+    // The next result that shows one gets it
+    let read = default_on_site(|cx| {
+        let mut read = post_with_body("See https://arxiv.org/abs/2401.00001");
+        read.post.title = "On arxiv".into();
+        post_text(&read, cx.config)
+    });
+    assert!(
+        read.contains("hxxps://arxiv[.]org/abs/2401.00001"),
+        "{read}"
+    );
+    assert!(once.defanged_note(&read).is_some());
+}
+
+/// A bare host in prose is not a URL to the policy: `github.com` and
+/// `arxiv.org` are left as written, and bring no note
+#[test]
+fn a_bare_host_is_not_a_link() {
+    let text = "Code on github.com, papers on arxiv.org, and wikipedia.";
+    let shown = Links::default().rewrite(text, Some(&site()));
+    assert_eq!(shown, text);
+    assert!(!crate::display::shows_defanged(&shown));
+}
+
+/// The site's root is the feed's page, so its URL is `agora://feed`: as
+/// the old server had it (reported for the owner, beta round of 0.168.0)
+#[test]
+fn the_sites_root_is_the_feed_as_the_server_had_it() {
+    let text = "Agora lives at https://subliminal.technology/agora and \
+                https://subliminal.technology/agora/ for now";
+    let want = "Agora lives at agora://feed and agora://feed for now";
+    assert_eq!(old_server(text), want);
+    assert_eq!(Links::default().rewrite(text, Some(&site())), want);
+}
+
+/// A relative link to a page of the site in a post is its link
+#[test]
+fn a_relative_link_in_a_post_is_its_link() {
+    let read = post_with_body(
+        "[Followup: x](/agora/c/news/47fae76d-590e-4095-9e9d-7cc9ddc66086)",
+    );
+    let shown = post_text(&read, &AgentDisplayConfig::default());
+    assert!(
+        shown.contains(
+            "[Followup: x](agora://post/47fae76d-590e-4095-9e9d-7cc9ddc66086)"
+        ),
+        "{shown}"
     );
 }

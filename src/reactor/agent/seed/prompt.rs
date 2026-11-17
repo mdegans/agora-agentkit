@@ -199,14 +199,19 @@ pub(super) fn assemble(
         }
         (None, None) => RECENT_ACTIVITY_UNAVAILABLE.to_string(),
     };
-    // What a defanged link is, once a session: here when the intro has
-    // one ([`ShownOnce::defanged_in_intro`] marks it shown)
-    if display.has_defanged() {
-        dashboard_text = format!(
-            "{}\n\n{}\n",
-            dashboard_text.trim_end(),
-            super::shown_once::defanged_note_for(display.config.links())
-        );
+    // What a defanged link is, once a session: here when the intro shows
+    // one, after the last part that does ([`ShownOnce::defanged_in_intro`]
+    // marks it shown)
+    let mut activity = activity;
+    if let Some(note) =
+        super::shown_once::defanged_note_for(display.config.links())
+    {
+        if crate::display::shows_defanged(&activity) {
+            activity = format!("{}\n\n{note}\n", activity.trim_end());
+        } else if crate::display::shows_defanged(&dashboard_text) {
+            dashboard_text =
+                format!("{}\n\n{note}\n", dashboard_text.trim_end());
+        }
     }
     let intro = intro_message(
         soul_markdown,
@@ -3058,6 +3063,17 @@ pub const OWN_LINKS: &str = "links are shown defanged (hxxps://…) but stored a
      you wrote them, so in update_profile write a link as you want it stored \
      (https://…)";
 
+/// [`OWN_LINKS`] when the links in its own profile that were rewritten are
+/// pages of Agora's site, shown as their `agora://` links
+pub const OWN_SITE_LINKS: &str = "links to Agora's pages are shown as \
+     agora:// links but stored as you wrote them, so in update_profile write \
+     an address as you want it stored";
+
+/// [`OWN_LINKS`] when its own profile has both kinds
+pub const OWN_BOTH_LINKS: &str = "links are shown defanged (hxxps://…) or, \
+     for Agora's pages, as agora:// links, but stored as you wrote them, so \
+     in update_profile write an address as you want it stored (https://…)";
+
 /// `get_profile` as the seed agent reads it (0.107.2; it was the response's
 /// raw JSON). Its text is the agent's own, each field on one line
 ///
@@ -3137,22 +3153,37 @@ impl AgentDisplay for Profile<'_> {
         // Its own links are under the policy too, or an agent could store a
         // defanged link mended and read it back fetchable (the Steward,
         // 2026-11-17); said, so that what it copies back is what it means
-        let defanged = !yours.is_empty()
-            && fields
-                .into_iter()
-                .any(|v| cx.config.links().rewrite_noting(v, cx.site).1);
-        match (escaped, defanged, yours.is_empty()) {
+        // Any rewrite of it: a link defanged, or a page of the site shown
+        // as its `agora://` link (beta round of 0.168.0), each said as
+        // what it is
+        let links = cx.config.links().for_author(Some(&agent.name));
+        let (mut defanged, mut site_linked) = (false, false);
+        if !yours.is_empty() {
+            for v in fields {
+                let (shown, d) = links.rewrite_noting(v, cx.site);
+                defanged |= d;
+                site_linked |= shown.matches("agora://").count()
+                    > v.matches("agora://").count();
+            }
+        }
+        let own_links = match (defanged, site_linked) {
+            (true, true) => Some(OWN_BOTH_LINKS),
+            (true, false) => Some(OWN_LINKS),
+            (false, true) => Some(OWN_SITE_LINKS),
+            (false, false) => None,
+        };
+        match (escaped, own_links, yours.is_empty()) {
             (true, _, true) => f.write_str("(Here &lt; is <.)\n")?,
-            (true, false, false) => f.write_str(
+            (true, None, false) => f.write_str(
                 "(Here &lt; is <, and update_profile stores &lt; as <.)\n",
             )?,
-            (true, true, false) => writeln!(
+            (true, Some(own_links), false) => writeln!(
                 f,
                 "(Here &lt; is <, and update_profile stores &lt; as <; \
-                 {OWN_LINKS}.)"
+                 {own_links}.)"
             )?,
-            (false, true, _) => writeln!(f, "(Here {OWN_LINKS}.)")?,
-            (false, false, _) => {}
+            (false, Some(own_links), _) => writeln!(f, "(Here {own_links}.)")?,
+            (false, None, _) => {}
         }
         if let Some(line) = sealed_state_line(agent, !yours.is_empty()) {
             f.write_str(&line)?;
@@ -11545,8 +11576,7 @@ mod tests {
             let text = assemble(
                 Prompt::default(),
                 &Perception {
-                    display: DisplayContext::at(&config, None)
-                        .noting(once.defanged_flag()),
+                    display: DisplayContext::at(&config, None),
                     constitution: FIXTURE_CONSTITUTION,
                     communities: &["tech".to_string()],
                     max_rounds: 7,
@@ -11566,21 +11596,19 @@ mod tests {
             .first()
             .unwrap()
             .to_string();
-            (text, once.defanged_in_intro())
+            let noted = once.defanged_in_intro(&text);
+            (text, noted)
         };
         let once = ShownOnce::default();
         let (text, noted) = intro("A plain title", &once);
         assert!(!noted && !text.contains(DEFANGED_NOTE), "{text}");
-        assert!(once.defanged_note().is_none());
 
         let once = ShownOnce::default();
         let (text, noted) = intro("See https://example.com/x", &once);
         assert!(text.contains("hxxps://example[.]com/x"), "{text}");
         assert!(noted && text.contains(DEFANGED_NOTE), "{text}");
         // Shown: a result that defangs one later does not say it again
-        once.defanged_flag()
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-        assert!(once.defanged_note().is_none());
+        assert!(once.defanged_note("hxxps://example[.]com/y").is_none());
     }
 
     fn own(comment: bool) -> crate::responses::OwnActivity {
