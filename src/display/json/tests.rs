@@ -588,13 +588,14 @@ fn an_error_body_exempts_by_its_variant() {
     assert_eq!(odd.json_exempt(), Exempt::NONE);
 }
 
-/// The JSON view sets the context's flag when it defangs, as the text
-/// views do, so the note is shown whichever view did it
+/// What the JSON view shows is what says whether a defanged link is in
+/// it ([`shows_defanged`](crate::display::shows_defanged)): a site page's
+/// link is not one
 #[test]
-fn the_json_view_notes_what_it_defangs() {
+fn the_json_view_shows_what_it_defangs() {
     let config = AgentDisplayConfig::default();
     let site = site();
-    for (value, flagged) in [
+    for (value, shows) in [
         (json!({ "body": "see https://example.com/x" }), true),
         (
             json!({ "body": "https://subliminal.technology/agora/protocol" }),
@@ -602,10 +603,9 @@ fn the_json_view_notes_what_it_defangs() {
         ),
         (json!({ "body": "no links" }), false),
     ] {
-        let flag = std::sync::atomic::AtomicBool::new(false);
-        let cx = DisplayContext::at(&config, Some(&site)).noting(&flag);
-        let _ = json_view(value, Exempt::NONE, cx);
-        assert_eq!(flag.load(std::sync::atomic::Ordering::Relaxed), flagged);
+        let cx = DisplayContext::at(&config, Some(&site));
+        let shown = json_view(value, Exempt::NONE, cx).to_string();
+        assert_eq!(crate::display::shows_defanged(&shown), shows, "{shown}");
     }
 }
 

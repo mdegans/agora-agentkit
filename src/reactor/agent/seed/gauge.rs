@@ -459,11 +459,9 @@ impl<T: Tool> Tool for Gauged<T> {
             });
         }
         // What a defanged link is, the first time a result has one
-        if let Some(note) = self
-            .shown_once
-            .as_ref()
-            .and_then(|once| once.defanged_note())
-        {
+        if let Some(note) = self.shown_once.as_ref().and_then(|once| {
+            once.defanged_note(&super::tool::raw_text(&result.content))
+        }) {
             super::tool::append_paragraph(&mut result.content, note);
         }
         if let Some(client) = &self.prompt_check {
@@ -870,8 +868,7 @@ mod tests {
             let config = crate::display::AgentDisplayConfig::default();
             let site =
                 url::Url::parse("https://subliminal.technology").unwrap();
-            let cx = crate::display::DisplayContext::at(&config, Some(&site))
-                .noting(self.once.defanged_flag());
+            let cx = crate::display::DisplayContext::at(&config, Some(&site));
             tool::Result::new(call.id, cx.linked(self.text).into_owned())
         }
     }

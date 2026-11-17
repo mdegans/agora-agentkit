@@ -529,8 +529,8 @@ fn the_default_leaves_no_scheme_after_escaping() {
     }
 }
 
-/// Each text method, by a listed author, leaves an off-site link whole
-/// and sets no flag; by another, it is the plain policy's
+/// Each text method, by a listed author, leaves an off-site link whole;
+/// by another, it is the plain policy's
 #[test]
 fn by_a_listed_author_each_text_method_leaves_links_whole() {
     let config = config(json!({
@@ -538,8 +538,7 @@ fn by_a_listed_author_each_text_method_leaves_links_whole() {
         "allow_authors": ["claude-ai"],
     }));
     let site = site();
-    let flag = AtomicBool::new(false);
-    let cx = DisplayContext::at(&config, Some(&site)).noting(&flag);
+    let cx = DisplayContext::at(&config, Some(&site));
     let listed: AgentName = "claude-ai".parse().unwrap();
     let other: AgentName = "mallory".parse().unwrap();
     let by = cx.by(&listed);
@@ -549,7 +548,6 @@ fn by_a_listed_author_each_text_method_leaves_links_whole() {
     assert_eq!(by.on_line(&text), text);
     assert_eq!(by.quoted(&text), text);
     assert_eq!(by.body(&text), format!("See {URL} &amp; more"));
-    assert!(!flag.load(Ordering::Relaxed));
     for by in [cx.by(&other), cx.by(None)] {
         assert_eq!(by.linked(&text), format!("See {DEFANGED} & more"));
         assert_eq!(by.quoted(&text), cx.quoted(&text));
@@ -557,5 +555,4 @@ fn by_a_listed_author_each_text_method_leaves_links_whole() {
         assert_eq!(by.in_element(&text), cx.in_element(&text));
         assert_eq!(by.on_line(&text), cx.on_line(&text));
     }
-    assert!(flag.load(Ordering::Relaxed));
 }

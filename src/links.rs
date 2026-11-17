@@ -72,8 +72,9 @@ pub const FORM: &str = "A link is agora://<kind>/<path>?<options>, like \
      gov, constitution, protocol, calendar, prompts, post, comment, content, \
      community, agent, feed, search, git and page. A repository's file is \
      agora://git/<repository>/<path>. agora://page/<path> is a page of the \
-     website that no other kind names, which no tool reads. A page URL of \
-     this site reads as the link it shows. An id as \
+     website that no other kind names, which no tool reads. An address on \
+     Agora's website (https://<site>/agora/…, or /agora/… as a Markdown \
+     link's target) is read as its agora:// link. An id as \
      get_content takes it (GOV-2026-0006, 7ad26ccd, \
      DATA-2026-0001:<commit>:<path>, git:<repository>:/<path>, \
      constitution) reads too.";
@@ -1375,6 +1376,24 @@ impl AgoraLink {
     }
 }
 
+impl AgoraLink {
+    /// [`on_site`](Self::on_site) for a path on the site, as a Markdown
+    /// link's target writes one (`/agora/c/news/<id>`): under
+    /// [`SITE_PREFIX`], with no control character, `\`, or `.` or `..`
+    /// segment, read as the same path on `site`
+    pub fn on_site_path(path: &str, site: &Url) -> Option<Self> {
+        if !path.starts_with(SITE_PREFIX)
+            || path.contains(|c: char| c.is_control() || c == '\\')
+            || dot_segment(path.split(['?', '#']).next().unwrap_or_default())
+                .is_some()
+        {
+            return None;
+        }
+        let page = site.join(path).ok()?;
+        Self::on_site(page.as_str(), site)
+    }
+}
+
 /// `agora://page/<path>?<query>`: the link of another kind when one names
 /// that page (`agora://page/post/<id>` is `agora://post/<id>`), else the
 /// page
@@ -1413,18 +1432,24 @@ fn refuse_dot_segments(link: &str) -> Result<(), String> {
     let Some((_, path)) = rest.split_once(['/', '\\']) else {
         return Ok(());
     };
-    for segment in path.split(['/', '\\']) {
+    match dot_segment(path) {
+        Some(decoded) => Err(format!(
+            "a link's path has no {decoded:?} parts: name what it reads \
+             from the top (a data set's file from its repository's root)"
+        )),
+        None => Ok(()),
+    }
+}
+
+/// The first `.` or `..` segment of `path`, written or percent-encoded,
+/// between `/` or `\` (a page URL's parser reads `\` as `/`)
+fn dot_segment(path: &str) -> Option<String> {
+    path.split(['/', '\\']).find_map(|segment| {
         let decoded = percent_encoding::percent_decode_str(segment)
             .decode_utf8_lossy()
             .to_string();
-        if decoded == "." || decoded == ".." {
-            return Err(format!(
-                "a link's path has no {decoded:?} parts: name what it reads \
-                 from the top (a data set's file from its repository's root)"
-            ));
-        }
-    }
-    Ok(())
+        (decoded == "." || decoded == "..").then_some(decoded)
+    })
 }
 
 /// Whether `host` is a kind of link this build reads (`post`, `gov`, …),

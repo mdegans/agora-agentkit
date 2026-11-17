@@ -1707,11 +1707,14 @@ impl Agent for SeedAgent {
                 display: crate::display::DisplayContext::at(
                     &self.display,
                     Some(self.ctx.client.site()),
-                )
-                .noting(self.shown_once.defanged_flag()),
+                ),
             },
         )?;
-        self.shown_once.defanged_in_intro();
+        // The intro is the first message: its note, if it has one, counts
+        // as shown for the session
+        if let Some(intro) = self.state.prompt.messages.first() {
+            self.shown_once.defanged_in_intro(&intro.to_string());
+        }
         Ok(())
     }
 

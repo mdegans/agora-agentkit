@@ -21,7 +21,6 @@
 //! request.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use crate::display::Links;
@@ -177,30 +176,31 @@ pub fn summary_text(text: &str) -> String {
 
 /// See the [module docs](self). Cheap to clone: one shared set per session
 #[derive(Debug, Clone, Default)]
-pub struct ShownOnce(Arc<RwLock<Inner>>, Arc<AtomicBool>);
+pub struct ShownOnce(Arc<RwLock<Inner>>);
 
 /// The note on a defanged link under [`Links::Defanged`], shown the first
 /// time a result defangs one ([`ShownOnce::defanged_note`])
-pub const DEFANGED_NOTE: &str = "*(Links to other sites are shown like \
-     hxxps://example[.]com, so they can't be followed, unless your operator \
-     has allowed the site. To have a site allowed, ask your operator: \
-     `send_message` to `operator`.)*";
+pub const DEFANGED_NOTE: &str = "*(Links to other sites are shown altered, like \
+     hxxps://example[.]com, so that no tool opens one by accident; the text \
+     as written, yours included, keeps the real address. Sites your operator \
+     has allowed are shown as written: to have one allowed, `send_message` \
+     to `operator`.)*";
 
 /// [`DEFANGED_NOTE`] when the operator lists authors whose links are
 /// shown as written (`allow_authors`): a link left whole in one agent's
 /// post and defanged in another's is otherwise a puzzle, and the site of
 /// the first is not allowed
-pub const DEFANGED_AUTHORS_NOTE: &str = "*(Links to other sites are shown \
-     like hxxps://example[.]com, so they can't be followed, unless your \
-     operator has allowed the site or trusts the agent who wrote the text. \
-     To have a site allowed, ask your operator: `send_message` to \
-     `operator`.)*";
+pub const DEFANGED_AUTHORS_NOTE: &str = "*(Links to other sites are shown altered, \
+     like hxxps://example[.]com, so that no tool opens one by accident; the \
+     text as written, yours included, keeps the real address. Sites your \
+     operator has allowed, and text by agents it trusts, are shown as \
+     written: to have a site allowed, `send_message` to `operator`.)*";
 
 /// The same under [`Links::Raw`] with deny rules
-pub const BLOCKED_NOTE: &str = "*(Your operator has blocked some sites; \
-     links to them are shown like hxxps://example[.]com, so they can't be \
-     followed. To have a site unblocked, ask your operator: `send_message` \
-     to `operator`.)*";
+pub const BLOCKED_NOTE: &str = "*(Links to sites your operator has blocked are \
+     shown altered, like hxxps://example[.]com, so that no tool opens one by \
+     accident; the text as written, yours included, keeps the real address. \
+     To have a site unblocked, `send_message` to `operator`.)*";
 
 /// The note on a defanged link under `links`
 pub fn defanged_note_for(links: &Links) -> &'static str {
@@ -439,16 +439,14 @@ impl ShownOnce {
         }
     }
 
-    /// What a [`DisplayContext`](crate::display::DisplayContext) sets when
-    /// it defangs a link ([`noting`](crate::display::DisplayContext::noting))
-    pub fn defanged_flag(&self) -> &AtomicBool {
-        &self.1
-    }
-
-    /// [`DEFANGED_NOTE`], when what was rendered since the last call
-    /// defanged a link and the note is still to be shown this session
-    pub fn defanged_note(&self) -> Option<&'static str> {
-        (self.1.swap(false, Ordering::Relaxed) && self.legend("defanged")).then(
+    /// The note on a defanged link ([`defanged_note_for`]), when `shown`,
+    /// the text a result gives the agent, has one
+    /// ([`shows_defanged`](crate::display::shows_defanged)) and the note is
+    /// still to be shown this session. Asked of each result's own text, so
+    /// the note goes with the result that shows the link, never with a
+    /// later one or for a link a view cut off or left out
+    pub fn defanged_note(&self, shown: &str) -> Option<&'static str> {
+        (crate::display::shows_defanged(shown) && self.legend("defanged")).then(
             || {
                 let inner = self.0.read().expect("shown-once lock");
                 inner.links_note.unwrap_or(DEFANGED_NOTE)
@@ -463,16 +461,20 @@ impl ShownOnce {
             Some(defanged_note_for(links));
     }
 
-    /// The session's intro showed its note ([`defanged_note_for`]) if it
-    /// defanged a link
-    /// (it is seated, so the note counts as shown at once): whether it did
-    pub fn defanged_in_intro(&self) -> bool {
-        let defanged = self.1.swap(false, Ordering::Relaxed);
-        if defanged {
+    /// The session's intro, `intro`, showed its note
+    /// ([`defanged_note_for`]): marks it shown (the intro is seated, so it
+    /// counts at once), and says whether it did
+    pub fn defanged_in_intro(&self, intro: &str) -> bool {
+        let note = {
+            let inner = self.0.read().expect("shown-once lock");
+            inner.links_note.unwrap_or(DEFANGED_NOTE)
+        };
+        let shown = intro.contains(note);
+        if shown {
             let mut inner = self.0.write().expect("shown-once lock");
             inner.legends.insert("defanged");
         }
-        defanged
+        shown
     }
 
     /// Whether the note `legend` was shown this session (or by the result
@@ -643,12 +645,12 @@ mod tests {
                 once.set_links(links);
                 assert_eq!(defanged_note_for(links), note);
             }
-            once.defanged_flag().store(true, Ordering::Relaxed);
-            assert_eq!(once.defanged_note(), Some(note));
-            once.defanged_flag().store(true, Ordering::Relaxed);
-            assert_eq!(once.defanged_note(), None);
+            assert_eq!(once.defanged_note("no link here"), None);
+            let shown = "see hxxps://evil[.]example/x";
+            assert_eq!(once.defanged_note(shown), Some(note));
+            assert_eq!(once.defanged_note(shown), None);
         }
-        assert!(BLOCKED_NOTE.contains("blocked some sites"));
+        assert!(BLOCKED_NOTE.contains("your operator has blocked"));
         assert!(!DEFANGED_NOTE.contains("otherwise as written"));
     }
 
@@ -731,10 +733,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(defanged_note_for(&authors), DEFANGED_AUTHORS_NOTE);
-        assert!(
-            DEFANGED_AUTHORS_NOTE
-                .contains("or trusts the agent who wrote the text")
-        );
+        assert!(DEFANGED_AUTHORS_NOTE.contains("text by agents it trusts"));
         assert_eq!(defanged_note_for(&Links::default()), DEFANGED_NOTE);
         assert_eq!(
             defanged_note_for(&Links::Raw { deny: Vec::new() }),
