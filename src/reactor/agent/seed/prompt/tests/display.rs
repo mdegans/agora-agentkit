@@ -724,16 +724,22 @@ fn an_inbox_shows_each_kind_of_message_by_who_wrote_it() {
         ),
         "{shown}"
     );
-    for written in ["Operator", "Broadcast"] {
-        assert!(
-            shown.contains(&format!(
-                "{written} https://example.com/a?x=1&amp;y=&lt;2> then \
-                 www.example.org/p and \
-                 https://subliminal.technology/agora/post/"
-            )),
-            "{written}: {shown}"
-        );
-    }
+    assert!(
+        shown.contains(
+            "Operator https://example.com/a?x=1&amp;y=&lt;2> then \
+             www.example.org/p and \
+             https://subliminal.technology/agora/post/"
+        ),
+        "{shown}"
+    );
+    // A broadcast as written but for the site's pages (0.168)
+    assert!(
+        shown.contains(
+            "Broadcast https://example.com/a?x=1&amp;y=&lt;2> then \
+             www.example.org/p and agora://post/8dbc9b3a"
+        ),
+        "{shown}"
+    );
     assert!(
         shown.contains("\"Reply https://example.com/a?x=1&y=&lt;2> then"),
         "{shown}"
@@ -1230,4 +1236,491 @@ fn each_content_variant_exempts_what_its_type_does() {
         | ContentResponse::Git(_) => 6,
     };
     assert_eq!(all(&ContentResponse::Post(post_with_body(""))), kinds.len());
+}
+
+// ── Authors whose links are shown as written (0.168) ─────────────────────
+
+/// The author a config below lists, and one it does not
+const NEWS: &str = "news-desk";
+const OTHER: &str = "mallory";
+
+/// What the old server's trusted path sent of a trusted author's text
+/// (its `site_links_at`): the site's pages as links, every other URL as
+/// written. `raw` with no rule is that
+fn trusted(text: &str) -> String {
+    Links::Raw { deny: Vec::new() }
+        .rewrite(text, Some(&site()))
+        .into_owned()
+}
+
+fn listing(names: &[&str]) -> AgentDisplayConfig {
+    config(json!({"mode": "defanged", "allow_authors": names}))
+}
+
+/// `render` of `fixture`, with `names` set (a path and a name each) and
+/// [`LINKS`] in every field of `listed` and `others`, under a config that
+/// lists [`NEWS`], is `render` of what the old server sent of it with no
+/// policy: its trusted path for `listed` (fields [`NEWS`] wrote), its
+/// defanging for `others`
+fn author_parity<T: Serialize + DeserializeOwned>(
+    fixture: &T,
+    names: &[(&str, &str)],
+    listed: &[&str],
+    others: &[&str],
+    render: impl Fn(&T, DisplayContext<'_>) -> String,
+) -> String {
+    let mut raw = serde_json::to_value(fixture).unwrap();
+    let each = |value: &mut Value, field: &str, f: &dyn Fn(&str) -> Value| {
+        let path: Vec<&str> = field.split('/').collect();
+        let mut hits = 0;
+        at(value, &path, &mut |v| {
+            *v = f(v.as_str().unwrap_or(""));
+            hits += 1;
+        });
+        assert!(hits > 0, "the fixture has no `{field}`");
+    };
+    for (field, name) in names {
+        each(&mut raw, field, &|_| json!(name));
+    }
+    for field in listed.iter().chain(others) {
+        each(&mut raw, field, &|_| json!(format!("{LINKS} ({field})")));
+    }
+    let mut sent = raw.clone();
+    for field in listed {
+        each(&mut sent, field, &|text| json!(trusted(text)));
+    }
+    for field in others {
+        each(&mut sent, field, &|text| json!(old_server(text)));
+    }
+    let raw: T = serde_json::from_value(raw).expect("the filled fixture");
+    let sent: T = serde_json::from_value(sent).expect("the sent fixture");
+    let config = listing(&[NEWS]);
+    let site = site();
+    let new = render(&raw, DisplayContext::at(&config, Some(&site)));
+    assert_eq!(new, render(&sent, as_written()));
+    assert!(new.contains("https://example.com/a"), "{new}");
+    assert!(
+        !new.contains("https://subliminal.technology/agora/post"),
+        "{new}"
+    );
+    if !others.is_empty() {
+        assert!(new.contains(DEFANGED), "{new}");
+    }
+    new
+}
+
+fn post_view(
+    read: &PostWithCommentsResponse,
+    cx: DisplayContext<'_>,
+) -> String {
+    Post {
+        post: read,
+        viewer_name: &viewer(),
+        index: None,
+        once: &ShownOnce::default(),
+    }
+    .agent_display(cx)
+    .to_string()
+}
+
+/// A listed author's post (its title, body and poll options) is as
+/// written, and an unlisted author's comment under it is defanged; and
+/// the reverse
+#[test]
+fn a_listed_authors_post_and_an_unlisted_authors_comment() {
+    let shown = author_parity(
+        &post_read(),
+        &[
+            ("post/agent_name", NEWS),
+            ("comments/*/agent_name", OTHER),
+            ("comment_stubs/*/agent_name", OTHER),
+        ],
+        &[
+            "post/title",
+            "post/body",
+            "poll/options/*/label",
+            "poll/options/*/description",
+        ],
+        &[
+            "comments/*/body",
+            "comment_stubs/*/preview",
+            "thread_summary",
+        ],
+        post_view,
+    );
+    assert!(
+        shown.contains(
+            "https://example.com/a?x=1&amp;y=&lt;2> then www.example.org/p \
+             and agora://post/8dbc9b3a-db55-47d5-8b14-5b913a1b44ac too \
+             (post/body)"
+        ),
+        "{shown}"
+    );
+    author_parity(
+        &post_read(),
+        &[
+            ("post/agent_name", OTHER),
+            ("comments/*/agent_name", NEWS),
+            ("comment_stubs/*/agent_name", NEWS),
+        ],
+        &["comments/*/body", "comment_stubs/*/preview"],
+        &[
+            "post/title",
+            "post/body",
+            "poll/options/*/label",
+            "poll/options/*/description",
+            "thread_summary",
+        ],
+        post_view,
+    );
+}
+
+/// A listed author quoted in an unlisted author's text is not its author
+#[test]
+fn a_quote_of_a_listed_author_is_under_the_plain_policy() {
+    let mut read = post_read();
+    read.post.agent_name = Some(OTHER.parse().unwrap());
+    read.post.body = format!("{NEWS} wrote: https://example.com/a");
+    read.comments[0].agent_name = Some(NEWS.parse().unwrap());
+    read.comments[0].body = "> https://quoted.example/x".into();
+    let config = listing(&[NEWS]);
+    let site = site();
+    let shown = post_view(&read, DisplayContext::at(&config, Some(&site)));
+    assert!(
+        shown.contains(&format!("{NEWS} wrote: {DEFANGED}")),
+        "{shown}"
+    );
+    // The comment is its own author's, whatever it quotes
+    assert!(shown.contains("https://quoted.example/x"), "{shown}");
+}
+
+/// Names are matched exactly: `Oracle` and `oracle` are two agents
+#[test]
+fn an_author_differing_only_in_case_is_not_listed() {
+    let mut read = post_with_body("See https://example.com/a");
+    read.post.agent_name = Some("Oracle".parse().unwrap());
+    let shown = post_text(&read, &listing(&["oracle"]));
+    assert!(shown.contains(&format!("See {DEFANGED}")), "{shown}");
+    let shown = post_text(&read, &listing(&["Oracle"]));
+    assert!(shown.contains("See https://example.com/a"), "{shown}");
+}
+
+#[test]
+fn a_listed_authors_chain_search_and_feed() {
+    let chain = CommentChainResponse {
+        post_id: crate::fixtures::post().id,
+        post_title: Some("A title".into()),
+        root: Some(crate::fixtures::post()),
+        omitted_ancestors: 0,
+        root_omitted_chars: 0,
+        chain: vec![crate::fixtures::comment()],
+        in_your_trash: None,
+    };
+    let chain_view = |chain: &CommentChainResponse, cx: DisplayContext<'_>| {
+        CommentChain {
+            chain,
+            viewer_name: &viewer(),
+            once: &ShownOnce::default(),
+        }
+        .agent_display(cx)
+        .to_string()
+    };
+    author_parity(
+        &chain,
+        &[("root/agent_name", NEWS), ("chain/*/agent_name", OTHER)],
+        &["root/title", "root/body"],
+        // The chain's own title names no author
+        &["post_title", "chain/*/body"],
+        chain_view,
+    );
+    author_parity(
+        &chain,
+        &[("root/agent_name", OTHER), ("chain/*/agent_name", NEWS)],
+        &["chain/*/body"],
+        &["post_title", "root/title", "root/body"],
+        chain_view,
+    );
+
+    let search = SearchResponse {
+        results: vec![crate::fixtures::post()],
+        comment_results: vec![CommentSearchHit {
+            comment: crate::fixtures::comment(),
+            post_title: "A title".into(),
+            similarity: 0.8,
+        }],
+        mode_used: SearchMode::Semantic,
+        degraded: false,
+    };
+    author_parity(
+        &search,
+        &[
+            ("results/*/agent_name", NEWS),
+            ("comment_results/*/agent_name", NEWS),
+        ],
+        &[
+            "results/*/title",
+            "results/*/body",
+            "comment_results/*/body",
+        ],
+        // The post a comment is on is not the comment's author's
+        &["comment_results/*/post_title"],
+        |search, cx| {
+            Search {
+                search,
+                query: "agency",
+                viewer_name: &viewer(),
+                once: &ShownOnce::default(),
+            }
+            .agent_display(cx)
+            .to_string()
+        },
+    );
+
+    author_parity(
+        &vec![crate::fixtures::post(), crate::fixtures::post()],
+        &[("0/agent_name", NEWS), ("1/agent_name", OTHER)],
+        &["0/title"],
+        &["1/title"],
+        |posts, cx| {
+            Feed {
+                posts,
+                community: None,
+                sort: FeedSort::Date,
+                viewer_name: &viewer(),
+                once: &ShownOnce::default(),
+            }
+            .agent_display(cx)
+            .to_string()
+        },
+    );
+    // Its own posts, as the intro lists them
+    author_parity(
+        &vec![crate::fixtures::post()],
+        &[("*/agent_name", NEWS)],
+        &["*/title"],
+        &[],
+        |posts, cx| format_recent_activity(posts, 5, cx),
+    );
+}
+
+#[test]
+fn a_listed_authors_dashboard_entries() {
+    let mut d = full_dashboard();
+    // A second feed post, by someone else
+    let feed = d.feeds.values_mut().next().expect("a feed");
+    let mut theirs = feed[0].clone();
+    theirs.id = PostId::from(uuid::Uuid::from_u128(99));
+    feed.push(theirs);
+    author_parity(
+        &d,
+        &[
+            ("unread_post_replies/*/replies/*/author", NEWS),
+            ("unread_comment_replies/*/author", OTHER),
+            ("feeds/*/0/author", NEWS),
+            ("feeds/*/1/author", OTHER),
+            ("elsewhere/*/*/author", NEWS),
+        ],
+        &[
+            "unread_post_replies/*/replies/*/preview",
+            "feeds/*/0/title",
+            "elsewhere/*/*/title",
+        ],
+        &[
+            "unread_post_replies/*/post_title",
+            "unread_comment_replies/*/post_title",
+            "unread_comment_replies/*/preview",
+            "feeds/*/1/title",
+            "open_polls/*/title",
+            "my_activity/*/post_title",
+            "my_activity/*/preview",
+        ],
+        dashboard_text,
+    );
+}
+
+#[test]
+fn a_listed_authors_profile_friend_and_proposal() {
+    let config = listing(&[NEWS]);
+    let site = site();
+    let cx = DisplayContext::at(&config, Some(&site));
+    let shown = Profile {
+        agent: &agent(NEWS),
+        viewer_name: &viewer(),
+        enrolled: None,
+    }
+    .agent_display(cx)
+    .to_string();
+    // Its name, model line and bio; its operator's name is not its own
+    assert_eq!(shown.matches("https://example.com/a").count(), 3, "{shown}");
+    assert_eq!(shown.matches(DEFANGED).count(), 1, "{shown}");
+    assert!(
+        shown.contains(&format!("Operated by Op {DEFANGED}")),
+        "{shown}"
+    );
+
+    let friends = |name: &str| -> crate::responses::FriendsResponse {
+        serde_json::from_value(json!({
+            "friends": [{
+                "agent_id": uuid::Uuid::from_u128(13),
+                "name": name,
+                "display_name": format!("Name {LINKS}"),
+                "since": "2026-10-01T00:00:00Z",
+                "can_e2ee": true,
+            }],
+            "incoming_requests": [],
+            "outgoing_requests": [],
+        }))
+        .expect("a friends list")
+    };
+    let shown = friends(NEWS).agent_display(cx).to_string();
+    assert!(shown.contains("https://example.com/a"), "{shown}");
+    let shown = friends(OTHER).agent_display(cx).to_string();
+    assert!(shown.contains(DEFANGED), "{shown}");
+
+    let page = |name: &str| -> crate::responses::ProposalsResponse {
+        serde_json::from_value(json!({
+            "proposals": [{
+                "id": uuid::Uuid::from_u128(14),
+                "agent_id": uuid::Uuid::from_u128(15),
+                "agent_name": name,
+                "title": format!("Title {LINKS}"),
+                "body": format!("Body {LINKS}"),
+                "created_at": "2026-10-01T00:00:00Z",
+                "proposal_category": "policy",
+            }],
+            "total": 1,
+            "offset": 0,
+        }))
+        .expect("a proposals page")
+    };
+    let proposals = |page: &crate::responses::ProposalsResponse| {
+        Proposals {
+            page,
+            once: &ShownOnce::default(),
+        }
+        .agent_display(cx)
+        .to_string()
+    };
+    let shown = proposals(&page(NEWS));
+    assert_eq!(shown.matches("https://example.com/a").count(), 2, "{shown}");
+    assert!(!shown.contains(DEFANGED), "{shown}");
+    let shown = proposals(&page(OTHER));
+    assert_eq!(shown.matches(DEFANGED).count(), 2, "{shown}");
+}
+
+/// A listed sender's message is as written, but for the site's pages,
+/// as text and as JSON; a broadcast is the platform's whoever sent it
+#[test]
+fn a_listed_senders_message() {
+    let mut inbox = inbox();
+    for m in &mut inbox.messages {
+        m.sender_name = NEWS.parse().unwrap();
+    }
+    let config = listing(&[NEWS]);
+    let site = site();
+    let cx = DisplayContext::at(&config, Some(&site));
+    let shown = Inbox {
+        inbox: &inbox,
+        once: &ShownOnce::default(),
+        limit: None,
+    }
+    .agent_display(cx)
+    .to_string();
+    assert!(!shown.contains(DEFANGED), "{shown}");
+    assert!(
+        shown.contains(
+            "state=\"new: unread before this read\">\
+             https://example.com/a?x=1&amp;y=&lt;2> then \
+             www.example.org/p and agora://post/8dbc9b3a"
+        ),
+        "{shown}"
+    );
+    let json = inbox.agent_json(cx).unwrap();
+    assert_eq!(json["messages"][0]["body"], trusted(LINKS));
+    // The JSON's broadcast is under the plain policy, as before
+    assert_eq!(
+        json["messages"][1]["body"],
+        format!("Broadcast {}", old_server(LINKS))
+    );
+}
+
+/// The JSON of a post read: each item by its own author
+#[test]
+fn a_listed_authors_post_as_json() {
+    let mut read = post_read();
+    read.post.agent_name = Some(NEWS.parse().unwrap());
+    read.post.body = LINKS.into();
+    read.comments[0].agent_name = Some(OTHER.parse().unwrap());
+    read.comments[0].body = LINKS.into();
+    read.comment_stubs[0].agent_name = Some(NEWS.parse().unwrap());
+    read.comment_stubs[0].preview = LINKS.into();
+    let config = listing(&[NEWS]);
+    let site = site();
+    let cx = DisplayContext::at(&config, Some(&site));
+    let json = ContentResponse::Post(read.clone()).agent_json(cx).unwrap();
+    assert_eq!(json["post"]["body"], trusted(LINKS));
+    assert_eq!(json["comments"][0]["body"], old_server(LINKS));
+    assert_eq!(json["comment_stubs"][0]["preview"], trusted(LINKS));
+    // With no one listed, as before
+    let config = AgentDisplayConfig::default();
+    let json = ContentResponse::Post(read)
+        .agent_json(DisplayContext::at(&config, Some(&site)))
+        .unwrap();
+    assert_eq!(json["post"]["body"], old_server(LINKS));
+    assert_eq!(json["comment_stubs"][0]["preview"], old_server(LINKS));
+}
+
+// ── Pages of the site no kind names (0.168) ──────────────────────────────
+
+const PAGES: &str = "https://subliminal.technology/agora/hello-world and \
+     https://subliminal.technology/agora/account";
+const PAGE_LINKS: &str = "agora://page/hello-world and agora://page/account";
+
+/// The site's pages with no kind of their own are `agora://page/…` links
+/// in a post's title and body, a message and a broadcast, in every mode
+/// and for a listed author too: never defanged, never whole
+#[test]
+fn a_page_no_kind_names_is_a_link_in_every_view() {
+    let mut read = post_with_body(&format!("Body {PAGES}"));
+    read.post.title = format!("Title {PAGES}");
+    read.post.agent_name = Some(NEWS.parse().unwrap());
+    let mut inbox = inbox();
+    inbox.messages[0].body = Some(format!("Message {PAGES}"));
+    inbox.messages[1].body = Some(format!("Broadcast {PAGES}"));
+    for config in [
+        AgentDisplayConfig::default(),
+        config(json!({"mode": "raw"})),
+        config(
+            json!({"mode": "defanged", "allow": ["https://subliminal.technology"]}),
+        ),
+        listing(&[NEWS]),
+    ] {
+        let shown = post_text(&read, &config);
+        assert!(shown.contains(&format!("Title {PAGE_LINKS}")), "{shown}");
+        assert!(shown.contains(&format!("Body {PAGE_LINKS}")), "{shown}");
+        let site = site();
+        let cx = DisplayContext::at(&config, Some(&site));
+        let shown = Inbox {
+            inbox: &inbox,
+            once: &ShownOnce::default(),
+            limit: None,
+        }
+        .agent_display(cx)
+        .to_string();
+        for what in ["Message", "Broadcast"] {
+            assert!(
+                shown.contains(&format!("{what} {PAGE_LINKS}")),
+                "{what}: {shown}"
+            );
+        }
+        let json = ContentResponse::Post(read.clone()).agent_json(cx).unwrap();
+        assert_eq!(json["post"]["body"], format!("Body {PAGE_LINKS}"));
+        assert_eq!(json["post"]["title"], format!("Title {PAGE_LINKS}"));
+    }
+    // The frozen server defanged them: the one class where the two differ
+    assert_eq!(
+        old_server(PAGES),
+        "hxxps://subliminal[.]technology/agora/hello-world and \
+         hxxps://subliminal[.]technology/agora/account"
+    );
 }

@@ -10,10 +10,13 @@
 //! agora://post/<id>    agora://comment/<id>    agora://community/<name>?sort=active
 //! agora://agent/<name> agora://feed?sort=active agora://search?q=<words>
 //! agora://git          agora://git/<repository>/<path>?commit=<rev>&lines=40-60
+//! agora://page/hello-world
 //! ```
 //!
 //! `gov` is the governance log and its entries; a document is its own
-//! kind. `git` is Agora's public repositories ([`crate::git`]).
+//! kind. `git` is Agora's public repositories ([`crate::git`]). `page` is a
+//! page of the site that no other kind names (`/agora/hello-world`,
+//! `/agora/account`): [`SitePage`].
 //!
 //! A link's page is on the site: `https://<site>/agora/<kind>/<path>?…`,
 //! but for `git`, whose page is on the repositories' own host beside their
@@ -67,8 +70,10 @@ pub const FORM: &str = "A link is agora://<kind>/<path>?<options>, like \
      agora://gov/GOV-2026-0006, agora://post/7ad26ccd or \
      agora://gov/DATA-2026-0001/votes/index.md?lines=110-300; the kinds are \
      gov, constitution, protocol, calendar, prompts, post, comment, content, \
-     community, agent, feed, search and git. A repository's file is \
-     agora://git/<repository>/<path>. A page URL of this site reads as the link it shows. An id as \
+     community, agent, feed, search, git and page. A repository's file is \
+     agora://git/<repository>/<path>. agora://page/<path> is a page of the \
+     website that no other kind names, which no tool reads. A page URL of \
+     this site reads as the link it shows. An id as \
      get_content takes it (GOV-2026-0006, 7ad26ccd, \
      DATA-2026-0001:<commit>:<path>, git:<repository>:/<path>, \
      constitution) reads too.";
@@ -77,7 +82,7 @@ pub const FORM: &str = "A link is agora://<kind>/<path>?<options>, like \
 /// after a session's first refusal
 pub const FORM_AGAIN: &str = "A link is agora://<kind>/<path>?<options>; \
      the kinds are gov, constitution, protocol, calendar, prompts, post, \
-     comment, content, community, agent, feed, search and git.";
+     comment, content, community, agent, feed, search, git and page.";
 
 /// Every kind word, a link's host: the site routes `/agora/<kind>/…` on
 /// them
@@ -134,6 +139,88 @@ pub enum AgoraLink {
     /// `offset` are the input's own options. Private to its reader: its
     /// page on the website has nothing to show but that
     Inbox(GetInboxInput),
+    /// `agora://page/<path>?<query>`: a page of the site that no other
+    /// kind names (0.168). No tool reads it; it is there so that a page URL
+    /// of the site is never shown whole, nor defanged
+    Page(SitePage),
+}
+
+/// A page of the site under [`SITE_PREFIX`] that no other kind of link
+/// names: `https://<site>/agora/<path>?<query>` is
+/// `agora://page/<path>?<query>`, both ways. The path and query are kept
+/// as the page URL's parser wrote them (percent-encoded); a `#fragment` is
+/// not kept, as for every page URL read as a link (any anchor but a
+/// comment's reads as the page).
+///
+/// Not a page with a `.` or `..` segment or a control character, which
+/// parsers resolve or drop, and not one with nothing after `/agora/` (the
+/// feed's)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct SitePage {
+    /// Below `/agora/`, never empty and without a leading `/`
+    path: String,
+    query: Option<String>,
+}
+
+impl SitePage {
+    /// The page `page` is when it is under [`SITE_PREFIX`] on `site` (its
+    /// origin, or `http://` on an `https://` site's host). Whether another
+    /// kind names it is not asked here: [`AgoraLink::on_site`] asks first
+    pub fn of(page: &Url, site: &Url) -> Option<Self> {
+        if !same_site(page, site) || page.cannot_be_a_base() {
+            return None;
+        }
+        let path = page.path().strip_prefix(SITE_PREFIX)?;
+        Self::new(path, page.query())
+    }
+
+    fn new(path: &str, query: Option<&str>) -> Option<Self> {
+        let written = [path, query.unwrap_or_default()].concat();
+        if path.is_empty()
+            || written.contains(|c: char| c.is_control())
+            || path.split('/').any(|segment| {
+                let decoded = percent_encoding::percent_decode_str(segment)
+                    .decode_utf8_lossy();
+                decoded == "." || decoded == ".."
+            })
+        {
+            return None;
+        }
+        Some(Self {
+            path: path.to_string(),
+            query: query.map(str::to_string),
+        })
+    }
+
+    /// The path below `/agora/`, percent-encoded
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The query, percent-encoded, without its `?`
+    pub fn query(&self) -> Option<&str> {
+        self.query.as_deref()
+    }
+
+    /// What a tool answers a read of this page with: there is nothing to
+    /// read. Its page URL is not in it: whole, it would be a fetch target
+    pub fn unread_note(&self) -> String {
+        format!(
+            "{} is a page of Agora's website that has no form an agent can \
+             read: no tool reads it.",
+            AgoraLink::Page(self.clone())
+        )
+    }
+
+    /// `/agora/<path>?<query>`
+    fn site_path(&self) -> String {
+        let mut out = [SITE_PREFIX, &self.path].concat();
+        if let Some(query) = &self.query {
+            out.push('?');
+            out.push_str(query);
+        }
+        out
+    }
 }
 
 /// A string that is neither an `agora://` link nor an id `get_content`
@@ -161,10 +248,11 @@ enum Kind {
     Search,
     Git,
     Inbox,
+    Page,
 }
 
 impl Kind {
-    const ALL: [Kind; 14] = [
+    const ALL: [Kind; 15] = [
         Kind::Gov,
         Kind::Constitution,
         Kind::Protocol,
@@ -179,6 +267,7 @@ impl Kind {
         Kind::Search,
         Kind::Git,
         Kind::Inbox,
+        Kind::Page,
     ];
 
     const fn host(self) -> &'static str {
@@ -197,6 +286,7 @@ impl Kind {
             Kind::Search => "search",
             Kind::Git => "git",
             Kind::Inbox => "inbox",
+            Kind::Page => "page",
         }
     }
 
@@ -301,6 +391,8 @@ impl AgoraLink {
             Self::Profile(_) => "get_profile",
             Self::Constitution(_) => "get_constitution",
             Self::Inbox(_) => "get_inbox",
+            // No tool reads a page: the link's own tool answers what it is
+            Self::Page(_) => "fetch_agora_link",
         }
     }
 
@@ -420,6 +512,13 @@ impl AgoraLink {
                 // The client's, never the model's: not an option
                 options.remove("operator_section");
                 (Kind::Inbox, vec![], options, None)
+            }
+            Self::Page(page) => {
+                let mut url = Kind::Page.base();
+                url.set_path(&["/", &page.path].concat());
+                url.set_query(page.query.as_deref());
+                protect_last_char(&mut url);
+                return url;
             }
         };
         url_of(kind, &segments, options, last)
@@ -560,7 +659,13 @@ fn same_site(page: &Url, site: &Url) -> bool {
 /// The page URL `page`'s link, as an `agora://` URL: the site's paths are
 /// the links' (`/agora/<kind>/…?…`), and `/agora/c/<name>[/<post>]` is
 /// still served, as a redirect
-fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
+/// With `as_page`, a page under `/agora/` that no kind names is
+/// `agora://page/<path>` ([`SitePage`]); without, it has no link
+fn from_page(
+    page: &Url,
+    site: Option<&Url>,
+    as_page: bool,
+) -> Result<Url, String> {
     let Some(site) = site else {
         return Err("this client knows no website to read page URLs of".into());
     };
@@ -607,13 +712,23 @@ fn from_page(page: &Url, site: Option<&Url>) -> Result<Url, String> {
         ["api", "constitution"] => (Kind::Constitution, &[]),
         ["c", _, post] => (Kind::Post, std::slice::from_ref(post)),
         [kind, rest @ ..] => {
-            match Kind::ALL.into_iter().find(|k| k.host() == *kind) {
+            // `/agora/page/…` is no kind's page: `agora://page/<path>`'s
+            // page is `/agora/<path>`
+            match Kind::ALL
+                .into_iter()
+                .find(|k| k.host() == *kind && *k != Kind::Page)
+            {
                 Some(kind) => (kind, rest),
                 None => {
-                    return Err(moved(&parts, &query, Old::Page)
-                        .unwrap_or_else(|| {
-                            format!("the page {} has no link", page.path())
-                        }));
+                    if let Some(why) = moved(&parts, &query, Old::Page) {
+                        return Err(why);
+                    }
+                    return match SitePage::of(page, site) {
+                        Some(p) if as_page => Ok(AgoraLink::Page(p).to_url()),
+                        _ => {
+                            Err(format!("the page {} has no link", page.path()))
+                        }
+                    };
                 }
             }
         }
@@ -662,6 +777,9 @@ impl AgoraLink {
     /// [`page_url`](Self::page_url)). [`from_site_path`](Self::from_site_path)
     /// reads it back.
     pub fn site_path(&self) -> String {
+        if let Self::Page(page) = self {
+            return page.site_path();
+        }
         let url = self.to_url();
         let mut path = String::from(SITE_PREFIX);
         path.push_str(url.host_str().unwrap_or_default());
@@ -683,7 +801,10 @@ impl AgoraLink {
         let url = self.to_url();
         let mut page = site.clone();
         page.set_fragment(None);
-        if url.host_str() == Some(Kind::Git.host())
+        if let Self::Page(p) = self {
+            page.set_path(&[SITE_PREFIX, &p.path].concat());
+            page.set_query(p.query.as_deref());
+        } else if url.host_str() == Some(Kind::Git.host())
             && let Some(git_site) = repositories_site(site)
         {
             page = git_site;
@@ -788,6 +909,35 @@ fn moved(
     query: &[(String, String)],
     old: Old,
 ) -> Option<String> {
+    let (link, bare) = moved_links(parts, query)?;
+    // Its options as a link would take them, else the page's link alone
+    let said = old.said();
+    Some(
+        match (parse_link(link.as_str()), parse_link(bare.as_str())) {
+            (Ok(l), _) => format!("{said}; its link is {l}"),
+            (Err(e), Ok(l)) => format!(
+                "{said}; its link is {l} (and of {} options, {e})",
+                old.whose()
+            ),
+            (Err(e), Err(_)) => format!("{said}: {e}"),
+        },
+    )
+}
+
+/// The link of a page the site served before 0.115.0, as [`moved`] names
+/// it: with the page's options, else without
+fn moved_link(parts: &[&str], query: &[(String, String)]) -> Option<AgoraLink> {
+    let (link, bare) = moved_links(parts, query)?;
+    parse_link(link.as_str())
+        .or_else(|_| parse_link(bare.as_str()))
+        .ok()
+}
+
+/// [`moved`]'s link, with the page's options and without
+fn moved_links(
+    parts: &[&str],
+    query: &[(String, String)],
+) -> Option<(Url, Url)> {
     let mut link = match parts {
         ["governance", "obligations"] | ["obligations"] => {
             let mut link = Kind::Gov.base();
@@ -826,18 +976,7 @@ fn moved(
     if link.query() == Some("") {
         link.set_query(None);
     }
-    // Its options as a link would take them, else the page's link alone
-    let said = old.said();
-    Some(
-        match (parse_link(link.as_str()), parse_link(bare.as_str())) {
-            (Ok(l), _) => format!("{said}; its link is {l}"),
-            (Err(e), Ok(l)) => format!(
-                "{said}; its link is {l} (and of {} options, {e})",
-                old.whose()
-            ),
-            (Err(e), Err(_)) => format!("{said}: {e}"),
-        },
-    )
+    Some((link, bare))
 }
 
 /// A link whose kind is an id get_content takes (`agora://prompt:<name>`,
@@ -1164,7 +1303,7 @@ impl AgoraLink {
             refuse_dot_segments(unwrapped).map_err(fail)?;
             let page = Url::parse(unwrapped)
                 .map_err(|e| fail(format!("not a URL ({e})")))?;
-            let link = from_page(&page, site).map_err(fail)?;
+            let link = from_page(&page, site, true).map_err(fail)?;
             return parse_link(link.as_str()).map_err(fail);
         }
         // Every id get_content takes, as it takes it
@@ -1184,6 +1323,75 @@ impl AgoraLink {
                 })
             }
         }
+    }
+}
+
+impl AgoraLink {
+    /// The link a page URL of `site` is shown as: the link it reads as
+    /// ([`parse_at`](Self::parse_at)), else, for a page under `/agora/`
+    /// that reads as none (a post's page with a malformed id, an old
+    /// page), `agora://page/<path>` ([`SitePage`]). `None` for anything
+    /// else: another host, the site's host outside `/agora/`, a `.` or
+    /// `..` segment or a control character
+    pub fn on_site(given: &str, site: &Url) -> Option<Self> {
+        let scheme = |scheme: &str| {
+            given
+                .get(..scheme.len())
+                .is_some_and(|h| h.eq_ignore_ascii_case(scheme))
+        };
+        if !(scheme("https://") || scheme("http://")) {
+            return None;
+        }
+        if let Ok(link) = Self::parse_at(given, Some(site)) {
+            return Some(link);
+        }
+        if given.contains(|c: char| c.is_control()) {
+            return None;
+        }
+        refuse_dot_segments(given).ok()?;
+        let page = Url::parse(given).ok()?;
+        let found = SitePage::of(&page, site)?;
+        // A page the site served before 0.115.0: the link it names
+        let parts: Vec<String> = found
+            .path
+            .split('/')
+            .map(|p| {
+                percent_encoding::percent_decode_str(p)
+                    .decode_utf8_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let parts: Vec<&str> = parts.iter().map(String::as_str).collect();
+        let query: Vec<(String, String)> =
+            page.query_pairs().into_owned().collect();
+        Some(moved_link(&parts, &query).unwrap_or(Self::Page(found)))
+    }
+}
+
+/// `agora://page/<path>?<query>`: the link of another kind when one names
+/// that page (`agora://page/post/<id>` is `agora://post/<id>`), else the
+/// page
+fn parse_page(url: &Url) -> Result<AgoraLink, String> {
+    let path = url.path().strip_prefix('/').unwrap_or(url.path());
+    let Some(page) = SitePage::new(path, url.query()) else {
+        return Err(if path.is_empty() {
+            "agora://page/<path>: the path is missing (the site's \
+             front page is agora://feed)"
+                .into()
+        } else {
+            "a page's path has no control characters, `.` or `..`".into()
+        });
+    };
+    // Where the page would be on a site, read as a page URL is
+    let site = Url::parse("https://agora.invalid").expect("a constant URL");
+    let mut at = site.clone();
+    at.set_path(&page.site_path());
+    at.set_query(page.query());
+    match from_page(&at, Some(&site), false)
+        .and_then(|link| parse_link(link.as_str()))
+    {
+        Ok(link) => Ok(link),
+        Err(_) => Ok(AgoraLink::Page(page)),
     }
 }
 
@@ -1243,6 +1451,9 @@ fn parse_link(link: &str) -> Result<AgoraLink, String> {
     }
     let host = host.to_ascii_lowercase();
     let kind = Kind::ALL.into_iter().find(|k| k.host() == host);
+    if kind == Some(Kind::Page) {
+        return parse_page(&url);
+    }
     let Some(kind) = kind else {
         if host == "governance" {
             let segments: Vec<&str> = url
@@ -1415,6 +1626,7 @@ fn parse_link(link: &str) -> Result<AgoraLink, String> {
             }
             from_options::<SearchInput>(options).map(AgoraLink::Search)
         }
+        Kind::Page => unreachable!("read above, before its path is decoded"),
         Kind::Inbox => {
             none_after("inbox", 0)?;
             if options.contains_key("operator_section") {

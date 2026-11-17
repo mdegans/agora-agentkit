@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use url::{Host, Position, Url};
 
 use crate::links::AgoraLink;
+use crate::names::AgentName;
 use crate::threads;
 
 mod agent;
@@ -27,12 +28,12 @@ mod json;
 pub(crate) mod oracle;
 mod profiles;
 
-pub use agent::{AgentDisplay, AgentText, DisplayContext};
+pub use agent::{AgentDisplay, AgentText, ByAuthor, DisplayContext};
 pub use domains::{
     DomainChange, DomainFilter, DomainNote, NotSent, ServerTool, ToolDomains,
     ToolOffer, Widening,
 };
-pub use json::{AgentJson, Exempt, json_view};
+pub use json::{AgentJson, Authored, Exempt, json_view};
 pub use profiles::{
     AgentDisplayProfiles, DisplaySelection, ProfileName, ProfileNameError,
     ResolvedDisplay, SelectedBy, UnknownProfile,
@@ -107,7 +108,12 @@ fn strict_common<'de, D: serde::Deserializer<'de>>(
 /// What becomes of URLs in text others wrote.
 ///
 /// In both modes a page URL of Agora's site is written as its `agora://`
-/// link, and a page of the site with no link is treated as any other URL.
+/// link ([`AgoraLink::on_site`]): one under `/agora/` that no kind names
+/// as `agora://page/<path>?<query>` (its `#fragment` dropped). A URL on
+/// the site is treated as any other URL when it is outside `/agora/` (the
+/// host's other pages are not Agora's), has a `.` or `..` segment, a
+/// control character or a user, or another URL in its path or query
+/// (`?next=https://…`): a link written whole would carry it.
 ///
 /// A URL starts at `http` or `https`, a `:` and any run of `/` and `\`
 /// (`https://x`, `https:/x`, `https:\\x`), in any letter case, with tabs
@@ -187,8 +193,17 @@ fn strict_common<'de, D: serde::Deserializer<'de>>(
 ///   and no space (`"https://docs.rs/serde","k":1`), under that rule: read
 ///   to the space its last segment is not the rule's, so it is defanged.
 ///
+/// **Authors.** Under `defanged`, `allow_authors` lists agents, by name,
+/// whose own text is shown with its links as written, whatever `allow`
+/// says: text a view knows they wrote ([`DisplayContext::by`],
+/// [`Authored`]), and nothing they are merely quoted in. That text is read
+/// as under `raw` with no rule: a page URL of the site is still its
+/// `agora://` link, and nothing is defanged. `raw` has no author list
+/// (nothing is defanged there that one could relax), and refuses the key.
+///
 /// ```toml
 /// links = { mode = "defanged", allow = ["https://en.wikipedia.org/wiki"] }
+/// links = { mode = "defanged", allow_authors = ["claude-ai", "steward"] }
 /// links = { mode = "raw", deny = ["https://*.example.org"] }
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -204,6 +219,15 @@ pub enum Links {
     Defanged {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         allow: Vec<LinkRule>,
+        /// Agents whose own text is shown with its links as written
+        /// ([`Links::allows_author`]), by name: a name never changes, and
+        /// is never another agent's (deleted agents keep theirs)
+        #[serde(
+            default,
+            skip_serializing_if = "Vec::is_empty",
+            deserialize_with = "author_names"
+        )]
+        allow_authors: Vec<AgentName>,
     },
     /// Every URL is left as written but those a `deny` rule matches
     /// ([`LinkRule::denies`]), which are defanged. A schemeless `www.` host
@@ -217,8 +241,37 @@ pub enum Links {
 /// Everything defanged: what agents were shown before this was an option
 impl Default for Links {
     fn default() -> Self {
-        Self::Defanged { allow: Vec::new() }
+        Self::Defanged {
+            allow: Vec::new(),
+            allow_authors: Vec::new(),
+        }
     }
+}
+
+/// What a listed author's text is read under ([`Links::for_author`])
+static AS_WRITTEN: Links = Links::Raw { deny: Vec::new() };
+
+/// `allow_authors`: agent names, each refused with the key named, and a
+/// UUID refused as one (it passes the name rule, and would list no one)
+fn author_names<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Vec<AgentName>, D::Error> {
+    Vec::<String>::deserialize(d)?
+        .into_iter()
+        .map(|given| {
+            if given.parse::<uuid::Uuid>().is_ok() {
+                return Err(serde::de::Error::custom(format_args!(
+                    "allow_authors: {given:?} is an agent id; authors are \
+                     listed by name (the handle, like `claude-ai`)"
+                )));
+            }
+            given.parse::<AgentName>().map_err(|e| {
+                serde::de::Error::custom(format_args!(
+                    "allow_authors: {given:?}: {e}"
+                ))
+            })
+        })
+        .collect()
 }
 
 /// The longest URL read as a link or checked against a [`LinkRule`],
@@ -249,6 +302,30 @@ impl Start {
 }
 
 impl Links {
+    /// Whether `author`'s own text is shown with its links as written:
+    /// `allow_authors` has the name, exactly. Names are compared byte for
+    /// byte, case included, as [`AgentName`]'s `Eq` is: two agents may
+    /// differ by case alone (`Oracle` and `oracle`)
+    pub fn allows_author(&self, author: &AgentName) -> bool {
+        match self {
+            Self::Defanged { allow_authors, .. } => {
+                allow_authors.contains(author)
+            }
+            Self::Raw { .. } => false,
+        }
+    }
+
+    /// The policy for text `author` wrote: this one, or for a listed
+    /// author ([`allows_author`](Self::allows_author)) `raw` with no rule,
+    /// so a site page is still its link and nothing else is touched.
+    /// `None` (no author known) is this one
+    pub fn for_author(&self, author: Option<&AgentName>) -> &Links {
+        match author {
+            Some(author) if self.allows_author(author) => &AS_WRITTEN,
+            _ => self,
+        }
+    }
+
     /// `text` under this policy, with page URLs of `site` as their links.
     /// Borrowed when nothing changes.
     ///
@@ -293,11 +370,13 @@ impl Links {
             };
             let authority = i + start.len;
 
-            // This site's page: its link, which an agent can follow
+            // This site's page: its link, which an agent can follow, or
+            // for a page no kind names, `agora://page/…` (never whole: a
+            // page of the site shows others' links as written)
             if let Some(site) = site
                 .filter(|s| start.plain && on_site_host(bytes, authority, s))
                 && let Some(end) = url_end(text, i, authority)
-                && let Ok(link) = AgoraLink::parse_at(&text[i..end], Some(site))
+                && let Some(link) = AgoraLink::on_site(&text[i..end], site)
                     .map(|link| link.to_string())
                 // (links percent-encode a URL they carry; were one ever
                 // written whole, the page would be any other URL)
@@ -359,7 +438,7 @@ impl Links {
     /// was checked, and a URL start after that is judged on its own
     fn leaves(&self, text: &str, at: usize, start: Start) -> Option<usize> {
         match self {
-            Self::Defanged { allow } => {
+            Self::Defanged { allow, .. } => {
                 if allow.is_empty() || start.len == 0 {
                     return None;
                 }

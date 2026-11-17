@@ -507,16 +507,35 @@ impl fmt::Display for ResolvedDisplay<'_> {
             common: DisplayConfig { links },
         } = self.config;
         match links {
-            Links::Defanged { allow } if allow.is_empty() => {
-                writeln!(f, "links: defanged, every off-site URL")
-            }
-            Links::Defanged { allow } => {
-                writeln!(
-                    f,
-                    "links: defanged, but for {} allowed",
-                    allow.len()
-                )?;
-                allow.iter().try_for_each(|r| writeln!(f, "  allow {r}"))
+            Links::Defanged {
+                allow,
+                allow_authors,
+            } => {
+                let authors = match allow_authors.len() {
+                    0 => String::new(),
+                    1 => " in 1 author's own text".to_string(),
+                    n => format!(" in {n} authors' own text"),
+                };
+                match allow.len() {
+                    0 if authors.is_empty() => {
+                        writeln!(f, "links: defanged, every off-site URL")?
+                    }
+                    0 => writeln!(
+                        f,
+                        "links: defanged, every off-site URL but{authors}"
+                    )?,
+                    n if authors.is_empty() => {
+                        writeln!(f, "links: defanged, but for {n} allowed")?
+                    }
+                    n => writeln!(
+                        f,
+                        "links: defanged, but for {n} allowed, and{authors}"
+                    )?,
+                }
+                allow.iter().try_for_each(|r| writeln!(f, "  allow {r}"))?;
+                allow_authors
+                    .iter()
+                    .try_for_each(|name| writeln!(f, "  author {name}"))
             }
             Links::Raw { deny } if deny.is_empty() => {
                 writeln!(f, "links: raw, every URL left as written")

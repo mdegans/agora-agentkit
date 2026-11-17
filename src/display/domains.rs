@@ -90,6 +90,9 @@ pub struct ToolDomains {
     /// Which list the rules were, and whether there were any
     mode: Mode,
     rules: usize,
+    /// How many authors' own text is shown with its links as written
+    /// (`allow_authors`), which no domain list can say
+    authors: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -252,7 +255,13 @@ impl Links {
 
     fn tool_domains(&self, tool: ServerTool) -> ToolDomains {
         match self {
-            Self::Defanged { allow } => allowed(allow, tool),
+            Self::Defanged {
+                allow,
+                allow_authors,
+            } => ToolDomains {
+                authors: allow_authors.len(),
+                ..allowed(allow, tool)
+            },
             Self::Raw { deny } => blocked(deny, tool),
         }
     }
@@ -340,6 +349,7 @@ fn allowed(rules: &[LinkRule], tool: ServerTool) -> ToolDomains {
         notes,
         mode: Mode::Allow,
         rules: rules.len(),
+        authors: 0,
     }
 }
 
@@ -372,6 +382,7 @@ fn blocked(rules: &[LinkRule], tool: ServerTool) -> ToolDomains {
         notes,
         mode: Mode::Deny,
         rules: rules.len(),
+        authors: 0,
     }
 }
 
@@ -546,9 +557,32 @@ impl fmt::Display for NotSent {
 
 /// Plain text for an operator: what is sent, a line per entry, then a
 /// line per rule widened or not sent (every one: nothing is left out),
+/// and with `allow_authors`, a line saying the tool does not follow them,
 /// each ended by a newline
 impl fmt::Display for ToolDomains {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.fmt_filter(f)?;
+        let reach = match self.filter {
+            DomainFilter::Allowed(_) => "still reaches only the domains above",
+            DomainFilter::Withhold => "is still withheld",
+            DomainFilter::Unfiltered | DomainFilter::Blocked(_) => {
+                "is still as configured"
+            }
+        };
+        match self.authors {
+            0 => Ok(()),
+            n => writeln!(
+                f,
+                "  {n} {} own text is shown with its links as written; the \
+                 tool {reach}, whatever links they write",
+                if n == 1 { "author's" } else { "authors'" }
+            ),
+        }
+    }
+}
+
+impl ToolDomains {
+    fn fmt_filter(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let tool = self.tool;
         let (name, list) = match (&self.filter, self.mode) {
             (DomainFilter::Allowed(list), _) => ("allowed_domains", list),

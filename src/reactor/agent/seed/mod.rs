@@ -52,7 +52,8 @@ pub use prompt_log::{PromptLogError, prompt_sha256};
 pub use session::AgoraSession;
 pub use shortstring::{ShortString, ShortStringError};
 pub use shown_once::{
-    BLOCKED_NOTE, Cues, DEFANGED_NOTE, Shown, ShownOnce, defanged_note_for,
+    BLOCKED_NOTE, Cues, DEFANGED_AUTHORS_NOTE, DEFANGED_NOTE, Shown, ShownOnce,
+    defanged_note_for,
 };
 pub use soul::{
     EVOLUTION_LOG_CAP, EvolutionEntry, EvolutionRequest, Feedback, ITEM_MAX,
@@ -1619,7 +1620,7 @@ impl Agent for SeedAgent {
                 .values()
                 .chain(dash.elsewhere.values())
                 .flatten()
-                .map(|p| (p.id, cx.linked(&p.title).into_owned()))
+                .map(|p| (p.id, cx.by(&p.author).linked(&p.title).into_owned()))
                 .collect();
         }
 

@@ -2315,6 +2315,7 @@ impl Agora {
                 Err(crate::before_index::inbox_link_refused("agora://inbox")
                     .into())
             }
+            AgoraLink::Page(page) => Ok(page.unread_note().into()),
             AgoraLink::Constitution(args) => {
                 match self.client.get_constitution(&args).await {
                     Ok(c) => {

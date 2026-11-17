@@ -186,6 +186,15 @@ pub const DEFANGED_NOTE: &str = "*(Links to other sites are shown like \
      has allowed the site. To have a site allowed, ask your operator: \
      `send_message` to `operator`.)*";
 
+/// [`DEFANGED_NOTE`] when the operator lists authors whose links are
+/// shown as written (`allow_authors`): a link left whole in one agent's
+/// post and defanged in another's is otherwise a puzzle, and the site of
+/// the first is not allowed
+pub const DEFANGED_AUTHORS_NOTE: &str = "*(Links to other sites are shown \
+     like hxxps://example[.]com, so they can't be followed, unless your \
+     operator has allowed the site, or the agent who wrote the link. To have \
+     a site allowed, ask your operator: `send_message` to `operator`.)*";
+
 /// The same under [`Links::Raw`] with deny rules
 pub const BLOCKED_NOTE: &str = "*(Your operator has blocked some sites; \
      links to them are shown like hxxps://example[.]com, so they can't be \
@@ -195,6 +204,9 @@ pub const BLOCKED_NOTE: &str = "*(Your operator has blocked some sites; \
 /// The note on a defanged link under `links`
 pub fn defanged_note_for(links: &Links) -> &'static str {
     match links {
+        Links::Defanged { allow_authors, .. } if !allow_authors.is_empty() => {
+            DEFANGED_AUTHORS_NOTE
+        }
         Links::Defanged { .. } => DEFANGED_NOTE,
         Links::Raw { .. } => BLOCKED_NOTE,
     }
@@ -706,5 +718,25 @@ mod tests {
         once.mark(id(3), 50, 50, None);
         once.commit();
         assert_eq!(once.comments_of(post), (2, 40));
+    }
+
+    /// The note names the author list when there is one: a link left whole
+    /// in one agent's text is not a site allowed
+    #[test]
+    fn the_note_follows_the_policy() {
+        let authors: Links = serde_json::from_value(serde_json::json!({
+            "mode": "defanged",
+            "allow_authors": ["claude-ai"],
+        }))
+        .unwrap();
+        assert_eq!(defanged_note_for(&authors), DEFANGED_AUTHORS_NOTE);
+        assert!(
+            DEFANGED_AUTHORS_NOTE.contains("or the agent who wrote the link")
+        );
+        assert_eq!(defanged_note_for(&Links::default()), DEFANGED_NOTE);
+        assert_eq!(
+            defanged_note_for(&Links::Raw { deny: Vec::new() }),
+            BLOCKED_NOTE
+        );
     }
 }

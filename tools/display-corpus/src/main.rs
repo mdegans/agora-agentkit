@@ -107,6 +107,12 @@ fn write_groups(out: &mut String, groups: &BTreeMap<String, Group>) {
 fn cause(token: &str, old: &str, new: &str) -> &'static str {
     let lower = token.to_ascii_lowercase();
     let bytes = lower.as_bytes();
+    // 0.168: a page of the site no kind names is `agora://page/…`, which
+    // the server defanged. Only when that is the whole difference: the
+    // default's output with those links put back as the server wrote them
+    if new.contains("agora://page/") && page_links_as_server(new, token) == old {
+        return "a site page no kind names: agora://page/ here, defanged by the server (0.168)";
+    }
     if old.matches("agora://").count() != new.matches("agora://").count() {
         return "a site page: link in one, defanged in the other";
     }
@@ -135,6 +141,30 @@ fn cause(token: &str, old: &str, new: &str) -> &'static str {
         return "a URL inside another's authority (after its `:` or `@`)";
     }
     "UNEXPLAINED"
+}
+
+/// `new` with each `agora://page/<path>` it has put back as the server
+/// wrote the page URL `token` has there: the token's URL, defanged by the
+/// server's own scanner. A token holds one URL in the cases this explains
+fn page_links_as_server(new: &str, token: &str) -> String {
+    let Some(at) = new.find("agora://page/") else {
+        return new.to_string();
+    };
+    let end = new[at..]
+        .find(|c: char| is_gap(c) || "<>\"'`()[]{}|".contains(c))
+        .map_or(new.len(), |o| at + o);
+    let link = new[at..end].trim_end_matches(['.', ',', ';', ':', '!', '?', '*', '_']);
+    let Some(page_at) = token.find("http") else {
+        return new.to_string();
+    };
+    // The page URL as the token has it, to where the link's text ends
+    let rest = &token[page_at..];
+    let page_end = rest
+        .find(|c: char| "<>\"'`()[]{}|".contains(c))
+        .unwrap_or(rest.len());
+    let page = rest[..page_end].trim_end_matches(['.', ',', ';', ':', '!', '?', '*', '_']);
+    let server = oracle::old_server(page, None);
+    [&new[..at], server.as_ref(), &new[at + link.len()..]].concat()
 }
 
 // ── (b) Under the allow list ────────────────────────────────────────────
@@ -320,7 +350,10 @@ fn main() {
         .map(|l| l.parse().unwrap_or_else(|e| panic!("{e}")))
         .collect();
     let hosts = rule_hosts(&rules);
-    let listed = Links::Defanged { allow: rules.clone() };
+    let listed = Links::Defanged {
+        allow: rules.clone(),
+        allow_authors: Vec::new(),
+    };
     let default = Links::default();
 
     let mut fields = Vec::new();
@@ -405,7 +438,9 @@ fn main() {
         }
         if !found {
             let i = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
-            let why = if old.matches("agora://").count() != new.matches("agora://").count() {
+            let why = if new.contains("agora://page/") && !old.contains("agora://page/") {
+                "a site page no kind names, across a space the token split did not see (0.168)"
+            } else if old.matches("agora://").count() != new.matches("agora://").count() {
                 "a site page before a space that is not ASCII, or a line break that is not"
             } else {
                 "a scheme spelt across whitespace"
