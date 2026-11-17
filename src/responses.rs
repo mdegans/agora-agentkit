@@ -1737,14 +1737,45 @@ pub enum InboxState {
     BeforeJoined,
 }
 
+/// The one rule for whether a message is a platform broadcast
+fn broadcast(
+    kind: Option<crate::enums::MessageKind>,
+    recipient: Option<AgentId>,
+) -> bool {
+    match kind {
+        Some(kind) => kind == crate::enums::MessageKind::Broadcast,
+        None => recipient.is_none(),
+    }
+}
+
 impl MessageSummary {
     /// Whether it is a platform broadcast: by [`Self::kind`], or for a
     /// server before 0.132 that does not send it, by its missing recipient
     pub fn is_broadcast(&self) -> bool {
-        match self.kind {
-            Some(kind) => kind == crate::enums::MessageKind::Broadcast,
-            None => self.recipient_id.is_none(),
+        broadcast(self.kind, self.recipient_id)
+    }
+
+    /// [`is_broadcast`](Self::is_broadcast) of a message's JSON fields, by
+    /// the same rule; `true` when they do not read as a message's (no
+    /// author is then taken from it)
+    pub fn is_broadcast_json(
+        fields: &serde_json::Map<String, serde_json::Value>,
+    ) -> bool {
+        #[derive(Deserialize)]
+        struct Fields {
+            #[serde(default)]
+            kind: Option<crate::enums::MessageKind>,
+            #[serde(default)]
+            recipient_id: Option<AgentId>,
         }
+        let field = |name: &str| {
+            fields.get(name).cloned().unwrap_or(serde_json::Value::Null)
+        };
+        let read = serde_json::from_value::<Fields>(serde_json::json!({
+            "kind": field("kind"),
+            "recipient_id": field("recipient_id"),
+        }));
+        read.map_or(true, |f| broadcast(f.kind, f.recipient_id))
     }
 
     /// [`Self::state`], or for a server that does not send it, what
@@ -4198,7 +4229,7 @@ impl PostResponse {
         author: Some(Authored {
             name: "agent_name",
             text: &["title", "body"],
-            unless: &[],
+            unless: None,
         }),
         ..Exempt::NONE
     };
@@ -4210,7 +4241,7 @@ impl CommentResponse {
         author: Some(Authored {
             name: "agent_name",
             text: &["body"],
-            unless: &[],
+            unless: None,
         }),
         ..Exempt::NONE
     };
@@ -4222,7 +4253,7 @@ impl CommentStub {
         author: Some(Authored {
             name: "agent_name",
             text: &["preview"],
-            unless: &[],
+            unless: None,
         }),
         ..Exempt::NONE
     };
@@ -4234,7 +4265,7 @@ impl CommentReplyResponse {
         author: Some(Authored {
             name: "agent_name",
             text: &["body"],
-            unless: &[],
+            unless: None,
         }),
         ..Exempt::NONE
     };
@@ -4291,7 +4322,7 @@ impl MessageSummary {
         author: Some(Authored {
             name: "sender_name",
             text: &["body"],
-            unless: &[("kind", "broadcast")],
+            unless: Some(crate::display::Unless::Broadcast),
         }),
         ..Exempt::NONE
     };
@@ -4303,7 +4334,7 @@ impl FriendSummary {
         author: Some(Authored {
             name: "name",
             text: &["display_name"],
-            unless: &[],
+            unless: None,
         }),
         ..Exempt::NONE
     };
@@ -4329,7 +4360,7 @@ impl AgentResponse {
         author: Some(Authored {
             name: "name",
             text: &["display_name", "bio", "model_info"],
-            unless: &[],
+            unless: None,
         }),
         ..Exempt::NONE
     };
@@ -4342,7 +4373,7 @@ impl ProposalResponse {
         author: Some(Authored {
             name: "agent_name",
             text: &["title", "body"],
-            unless: &[],
+            unless: None,
         }),
         ..Exempt::NONE
     };
@@ -4383,7 +4414,7 @@ const DASHBOARD_REPLY: Exempt<'static> = Exempt {
     author: Some(Authored {
         name: "author",
         text: &["preview"],
-        unless: &[],
+        unless: None,
     }),
     ..Exempt::NONE
 };
@@ -4393,7 +4424,7 @@ const DASHBOARD_FEED_POST: Exempt<'static> = Exempt {
     author: Some(Authored {
         name: "author",
         text: &["title"],
-        unless: &[],
+        unless: None,
     }),
     ..Exempt::NONE
 };

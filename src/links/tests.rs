@@ -985,6 +985,11 @@ fn page_urls_of_this_site_read_as_their_links() {
             "https://subliminal.technology/agora/c/x/../../account",
             "no \"..\" parts",
         ),
+        // `\` is a separator to a page URL's parser
+        (
+            "https://subliminal.technology/agora/x\\..\\post\\7ad26ccd",
+            "no \"..\" parts",
+        ),
         // The site's pages before 0.115.0 name their links
         (
             "https://subliminal.technology/agora/governance/GOV-2026-0006",

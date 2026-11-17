@@ -293,6 +293,11 @@ pub(super) const ADVERSARIAL: &[&str] = &[
     "https://\u{1}https://evil.example/x",
 ];
 
+/// Whether a scheme starts anywhere in `text`
+fn has_scheme(text: &str) -> bool {
+    (0..text.len()).any(|i| scheme_at(text, i).is_some())
+}
+
 /// Under the default policy no `http` or `https` URL is left, in any
 /// case or spelling, whatever the text and whatever the site: by the
 /// scanner's own test, and by a URL parser at every place in the result
@@ -894,6 +899,34 @@ fn a_page_no_kind_names_is_a_page_link() {
         (
             "https://subliminal.technology:443@evil.example/agora/x",
             "hxxps://subliminal[.]technology:443@evil[.]example/agora/x",
+        ),
+        // A schemeless host the link would carry, in a page's query or
+        // path, or in a kind's free text: the link is not written
+        (
+            "https://subliminal.technology/agora/x?u=www.evil.example",
+            "hxxps://subliminal[.]technology/agora/x?u=www[.]evil[.]example",
+        ),
+        (
+            "https://subliminal.technology/agora/www.evil.example/x",
+            "hxxps://subliminal[.]technology/agora/www[.]evil[.]example/x",
+        ),
+        (
+            "https://subliminal.technology/agora/search?q=www.evil.example",
+            "hxxps://subliminal[.]technology/agora/search?q=www[.]evil[.]example",
+        ),
+        // A dot segment between backslashes, which a parser reads as `/`
+        (
+            "https://subliminal.technology/agora/hello\\..\\account",
+            "hxxps://subliminal[.]technology/agora/hello\\..\\account",
+        ),
+        (
+            "https://subliminal.technology/agora/x\\..\\post\\7ad26ccd",
+            "hxxps://subliminal[.]technology/agora/x\\..\\post\\7ad26ccd",
+        ),
+        // A user on the site's own host
+        (
+            "https://someone@subliminal.technology/agora/post/7ad26ccd",
+            "hxxps://someone@subliminal[.]technology/agora/post/7ad26ccd",
         ),
     ] {
         assert_eq!(Links::default().rewrite(text, Some(&site)), want, "{text}");

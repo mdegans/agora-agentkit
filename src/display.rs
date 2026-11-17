@@ -33,7 +33,7 @@ pub use domains::{
     DomainChange, DomainFilter, DomainNote, NotSent, ServerTool, ToolDomains,
     ToolOffer, Widening,
 };
-pub use json::{AgentJson, Authored, Exempt, json_view};
+pub use json::{AgentJson, Authored, Exempt, Unless, json_view};
 pub use profiles::{
     AgentDisplayProfiles, DisplaySelection, ProfileName, ProfileNameError,
     ResolvedDisplay, SelectedBy, UnknownProfile,
@@ -111,9 +111,14 @@ fn strict_common<'de, D: serde::Deserializer<'de>>(
 /// link ([`AgoraLink::on_site`]): one under `/agora/` that no kind names
 /// as `agora://page/<path>?<query>` (its `#fragment` dropped). A URL on
 /// the site is treated as any other URL when it is outside `/agora/` (the
-/// host's other pages are not Agora's), has a `.` or `..` segment, a
-/// control character or a user, or another URL in its path or query
-/// (`?next=https://…`): a link written whole would carry it.
+/// host's other pages are not Agora's), has a `.` or `..` segment
+/// (between `/` or `\`), a control character or a user, or another URL in
+/// its path or query (`?next=https://…`, `?u=www.evil.example`): a link
+/// written whole would carry it, so a link is written only when the
+/// default policy would leave all of it. A page the site served before
+/// its paths were the links' (`/agora/governance/GOV-…`) is the link it
+/// names, with the page's query if that link takes it and without it if
+/// not.
 ///
 /// A URL starts at `http` or `https`, a `:` and any run of `/` and `\`
 /// (`https://x`, `https:/x`, `https:\\x`), in any letter case, with tabs
@@ -201,6 +206,13 @@ fn strict_common<'de, D: serde::Deserializer<'de>>(
 /// `agora://` link, and nothing is defanged. `raw` has no author list
 /// (nothing is defanged there that one could relax), and refuses the key.
 ///
+/// "Author" is whoever wrote the field, not whoever first wrote a link in
+/// it: a link a listed author quotes or reposts from someone else is
+/// shown as written too, as the server's trusted tier did. List only
+/// registered agents: a name no one has registered yet can be registered
+/// by anyone (a typo is the risk), and a config cannot check offline that
+/// a name exists. A name listed twice is refused.
+///
 /// ```toml
 /// links = { mode = "defanged", allow = ["https://en.wikipedia.org/wiki"] }
 /// links = { mode = "defanged", allow_authors = ["claude-ai", "steward"] }
@@ -251,6 +263,13 @@ impl Default for Links {
 /// What a listed author's text is read under ([`Links::for_author`])
 static AS_WRITTEN: Links = Links::Raw { deny: Vec::new() };
 
+/// The default, every off-site URL defanged: what a site page's link is
+/// checked against before it is written
+static DEFAULT: Links = Links::Defanged {
+    allow: Vec::new(),
+    allow_authors: Vec::new(),
+};
+
 /// `allow_authors`: agent names, each refused with the key named, and a
 /// UUID refused as one (it passes the name rule, and would list no one)
 fn author_names<'de, D: serde::Deserializer<'de>>(
@@ -271,7 +290,17 @@ fn author_names<'de, D: serde::Deserializer<'de>>(
                 ))
             })
         })
-        .collect()
+        .try_fold(Vec::new(), |mut names: Vec<AgentName>, name| {
+            let name = name?;
+            // Refused, not merged: `check` would count one author twice
+            if names.contains(&name) {
+                return Err(serde::de::Error::custom(format_args!(
+                    "allow_authors: {name:?} is listed twice"
+                )));
+            }
+            names.push(name);
+            Ok(names)
+        })
 }
 
 /// The longest URL read as a link or checked against a [`LinkRule`],
@@ -380,7 +409,10 @@ impl Links {
                     .map(|link| link.to_string())
                 // (links percent-encode a URL they carry; were one ever
                 // written whole, the page would be any other URL)
-                && !has_scheme(&link)
+                // Nothing in it the plain policy would touch: a scheme or
+                // a `www.` host in its path or query (`?u=www.evil.example`)
+                // is a URL a whole link would carry
+                && matches!(DEFAULT.rewrite(&link, None), Cow::Borrowed(_))
             {
                 let buf = out.get_or_insert_with(|| {
                     String::with_capacity(text.len() + 16)
@@ -1167,10 +1199,6 @@ fn is_domain(written: &str) -> bool {
     };
     let ace = last.len() > 4 && last[..4].eq_ignore_ascii_case("xn--");
     ace || (last.chars().count() >= 2 && last.chars().all(char::is_alphabetic))
-}
-
-fn has_scheme(text: &str) -> bool {
-    (0..text.len()).any(|i| scheme_at(text, i).is_some())
 }
 
 /// A schemeless `www.` host at `i`, at the start of a word

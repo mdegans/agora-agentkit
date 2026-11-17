@@ -828,6 +828,7 @@ id = "local"
             ("\"ab\"", "3 to 64"),
             ("\"7ad26ccd-922f-484a-a37c-51777344a98c\"", "by name"),
             ("1", "string"),
+            ("\"claude-ai\", \"claude-ai\"", "listed twice"),
         ] {
             let text = format!(
                 "[display]\nlinks = {{ mode = \"defanged\", allow_authors = [{author}] }}\n"

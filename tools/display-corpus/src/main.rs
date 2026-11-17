@@ -104,13 +104,13 @@ fn write_groups(out: &mut String, groups: &BTreeMap<String, Group>) {
 // ── (a) The default against the server's scanner ────────────────────────
 
 /// Why the default differs from the server on one whitespace-free token
-fn cause(token: &str, old: &str, new: &str) -> &'static str {
+fn cause(token: &str, old: &str, new: &str, site: &Url) -> &'static str {
     let lower = token.to_ascii_lowercase();
     let bytes = lower.as_bytes();
     // 0.168: a page of the site no kind names is `agora://page/…`, which
     // the server defanged. Only when that is the whole difference: the
     // default's output with those links put back as the server wrote them
-    if new.contains("agora://page/") && page_links_as_server(new, token) == old {
+    if new.contains("agora://page/") && pages_back(new, site) == old {
         return "a site page no kind names: agora://page/ here, defanged by the server (0.168)";
     }
     if old.matches("agora://").count() != new.matches("agora://").count() {
@@ -143,28 +143,34 @@ fn cause(token: &str, old: &str, new: &str) -> &'static str {
     "UNEXPLAINED"
 }
 
-/// `new` with each `agora://page/<path>` it has put back as the server
-/// wrote the page URL `token` has there: the token's URL, defanged by the
-/// server's own scanner. A token holds one URL in the cases this explains
-fn page_links_as_server(new: &str, token: &str) -> String {
-    let Some(at) = new.find("agora://page/") else {
-        return new.to_string();
-    };
-    let end = new[at..]
-        .find(|c: char| is_gap(c) || "<>\"'`()[]{}|".contains(c))
-        .map_or(new.len(), |o| at + o);
-    let link = new[at..end].trim_end_matches(['.', ',', ';', ':', '!', '?', '*', '_']);
-    let Some(page_at) = token.find("http") else {
-        return new.to_string();
-    };
-    // The page URL as the token has it, to where the link's text ends
-    let rest = &token[page_at..];
-    let page_end = rest
-        .find(|c: char| "<>\"'`()[]{}|".contains(c))
-        .unwrap_or(rest.len());
-    let page = rest[..page_end].trim_end_matches(['.', ',', ';', ':', '!', '?', '*', '_']);
-    let server = oracle::old_server(page, None);
-    [&new[..at], server.as_ref(), &new[at + link.len()..]].concat()
+/// `new` with each `agora://page/…` link in it put back as the server
+/// wrote its page: the page's URL on `site`, defanged by the server's
+/// scanner (which had no `page` kind). Equal to the server's output only
+/// when the page links are the whole difference: a page written `http://`
+/// or with a `#fragment` does not come back equal, and is not explained
+fn pages_back(new: &str, site: &Url) -> String {
+    const START: &str = "agora://page/";
+    let mut out = String::with_capacity(new.len());
+    let mut rest = new;
+    while let Some(at) = rest.find(START) {
+        out.push_str(&rest[..at]);
+        let tail = &rest[at..];
+        let end = tail
+            .find(|c: char| is_gap(c) || "<>\"'`()[]{}|".contains(c))
+            .unwrap_or(tail.len());
+        let link = tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?', '*', '_']);
+        match link.parse::<links::AgoraLink>() {
+            Ok(page @ links::AgoraLink::Page(_)) => {
+                let url = page.page_url(site);
+                out.push_str(&oracle::old_server(url.as_str(), Some(site)));
+            }
+            // Not a page link as written: left, so it cannot match
+            _ => out.push_str(link),
+        }
+        rest = &tail[link.len()..];
+    }
+    out.push_str(rest);
+    out
 }
 
 // ── (b) Under the allow list ────────────────────────────────────────────
@@ -424,7 +430,7 @@ fn main() {
                 continue;
             }
             found = true;
-            let why = cause(token, &o, &n);
+            let why = cause(token, &o, &n, &site);
             if why == "UNEXPLAINED" {
                 a_unexplained += 1;
             }
@@ -438,7 +444,7 @@ fn main() {
         }
         if !found {
             let i = old.bytes().zip(new.bytes()).take_while(|(a, b)| a == b).count();
-            let why = if new.contains("agora://page/") && !old.contains("agora://page/") {
+            let why = if new.contains("agora://page/") && pages_back(&new, &site) == old {
                 "a site page no kind names, across a space the token split did not see (0.168)"
             } else if old.matches("agora://").count() != new.matches("agora://").count() {
                 "a site page before a space that is not ASCII, or a line break that is not"

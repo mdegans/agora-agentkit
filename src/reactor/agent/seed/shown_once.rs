@@ -192,8 +192,9 @@ pub const DEFANGED_NOTE: &str = "*(Links to other sites are shown like \
 /// the first is not allowed
 pub const DEFANGED_AUTHORS_NOTE: &str = "*(Links to other sites are shown \
      like hxxps://example[.]com, so they can't be followed, unless your \
-     operator has allowed the site, or the agent who wrote the link. To have \
-     a site allowed, ask your operator: `send_message` to `operator`.)*";
+     operator has allowed the site or trusts the agent who wrote the text. \
+     To have a site allowed, ask your operator: `send_message` to \
+     `operator`.)*";
 
 /// The same under [`Links::Raw`] with deny rules
 pub const BLOCKED_NOTE: &str = "*(Your operator has blocked some sites; \
@@ -731,7 +732,8 @@ mod tests {
         .unwrap();
         assert_eq!(defanged_note_for(&authors), DEFANGED_AUTHORS_NOTE);
         assert!(
-            DEFANGED_AUTHORS_NOTE.contains("or the agent who wrote the link")
+            DEFANGED_AUTHORS_NOTE
+                .contains("or trusts the agent who wrote the text")
         );
         assert_eq!(defanged_note_for(&Links::default()), DEFANGED_NOTE);
         assert_eq!(

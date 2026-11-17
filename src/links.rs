@@ -178,7 +178,8 @@ impl SitePage {
         let written = [path, query.unwrap_or_default()].concat();
         if path.is_empty()
             || written.contains(|c: char| c.is_control())
-            || path.split('/').any(|segment| {
+            // (`\` too: a page URL's parser reads it as `/`)
+            || path.split(['/', '\\']).any(|segment| {
                 let decoded = percent_encoding::percent_decode_str(segment)
                     .decode_utf8_lossy();
                 decoded == "." || decoded == ".."
@@ -1342,6 +1343,12 @@ impl AgoraLink {
         if !(scheme("https://") || scheme("http://")) {
             return None;
         }
+        // A user or password: whose page it is depends on the reader
+        if Url::parse(given).is_ok_and(|url| {
+            !url.username().is_empty() || url.password().is_some()
+        }) {
+            return None;
+        }
         if let Ok(link) = Self::parse_at(given, Some(site)) {
             return Some(link);
         }
@@ -1402,10 +1409,11 @@ fn refuse_dot_segments(link: &str) -> Result<(), String> {
         return Ok(());
     };
     let rest = rest.split(['?', '#']).next().unwrap_or_default();
-    let Some((_, path)) = rest.split_once('/') else {
+    // A page URL's parser reads `\` as `/`: a separator either way
+    let Some((_, path)) = rest.split_once(['/', '\\']) else {
         return Ok(());
     };
-    for segment in path.split('/') {
+    for segment in path.split(['/', '\\']) {
         let decoded = percent_encoding::percent_decode_str(segment)
             .decode_utf8_lossy()
             .to_string();

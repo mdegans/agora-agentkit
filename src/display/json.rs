@@ -78,9 +78,30 @@ pub struct Authored<'a> {
     pub name: &'a str,
     /// The fields the author wrote
     pub text: &'a [&'a str],
-    /// No author when a field holds this string: a message's `kind` is
-    /// `broadcast`, which is the platform's text whoever sent it
-    pub unless: &'a [(&'a str, &'a str)],
+    /// No author when this holds of the object: a broadcast is the
+    /// platform's text whoever sent it
+    pub unless: Option<Unless>,
+}
+
+/// When an [`Authored`] object has no author, decided by the wire type's
+/// own function on the object's fields, the one its text view uses
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Unless {
+    /// [`MessageSummary::is_broadcast`](crate::responses::MessageSummary::is_broadcast)
+    Broadcast,
+}
+
+impl Unless {
+    /// Whether it holds of `object`. Fields that do not read as the type's
+    /// hold it: no author
+    fn holds(self, object: &serde_json::Map<String, Value>) -> bool {
+        match self {
+            Self::Broadcast => {
+                crate::responses::MessageSummary::is_broadcast_json(object)
+            }
+        }
+    }
 }
 
 impl Exempt<'_> {
@@ -141,9 +162,7 @@ fn walk<'a, C: AsRef<DisplayConfig>>(
             // The author's policy for their keys, the plain one for the
             // rest; with no marker, what the object is under
             let marked = exempt.author.map(|authored| {
-                let void = authored.unless.iter().any(|(field, value)| {
-                    map.get(*field).and_then(Value::as_str) == Some(value)
-                });
+                let void = authored.unless.is_some_and(|u| u.holds(map));
                 let name = map
                     .get(authored.name)
                     .and_then(Value::as_str)

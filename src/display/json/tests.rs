@@ -342,7 +342,6 @@ mod schemas {
             let authored = exempt.author.map_or(Vec::new(), |a| {
                 let mut keys = vec![a.name];
                 keys.extend(a.text.iter().copied());
-                keys.extend(a.unless.iter().map(|(key, _)| *key));
                 keys
             });
             for key in exempt
@@ -631,7 +630,7 @@ const POSTED: Exempt<'static> = Exempt {
     author: Some(Authored {
         name: "agent_name",
         text: &["body", "poll"],
-        unless: &[("kind", "broadcast")],
+        unless: None,
     }),
     nested: &[("comments", COMMENTED)],
     ..Exempt::NONE
@@ -641,7 +640,7 @@ const COMMENTED: Exempt<'static> = Exempt {
     author: Some(Authored {
         name: "agent_name",
         text: &["body"],
-        unless: &[],
+        unless: None,
     }),
     ..Exempt::NONE
 };
@@ -687,10 +686,32 @@ fn an_author_marker_relaxes_only_a_listed_authors_own_keys() {
     // Names are exact: `News-Desk` is not `news-desk`
     let shown = by_news(value(json!("News-Desk")), POSTED);
     assert_eq!(shown["body"], DEFANGED);
-    // Voided by the field it names
+    const MESSAGE: Exempt<'static> = Exempt {
+        author: Some(Authored {
+            name: "agent_name",
+            text: &["body"],
+            unless: Some(Unless::Broadcast),
+        }),
+        ..Exempt::NONE
+    };
+    // A broadcast, by `MessageSummary::is_broadcast`'s rule: its `kind`,
+    // or for an older server no recipient
     let mut broadcast = value(json!(NEWS));
     broadcast["kind"] = json!("broadcast");
-    assert_eq!(by_news(broadcast, POSTED)["body"], DEFANGED);
+    assert_eq!(by_news(broadcast, MESSAGE)["body"], DEFANGED);
+    let mut direct = value(json!(NEWS));
+    direct["kind"] = json!("dm");
+    assert_eq!(by_news(direct, MESSAGE)["body"], URL);
+    let mut legacy = value(json!(NEWS));
+    legacy.as_object_mut().unwrap().remove("kind");
+    legacy["recipient_id"] = Value::Null;
+    assert_eq!(by_news(legacy.clone(), MESSAGE)["body"], DEFANGED);
+    legacy["recipient_id"] = json!("7ad26ccd-922f-484a-a37c-51777344a98c");
+    assert_eq!(by_news(legacy, MESSAGE)["body"], URL);
+    // A field that does not read as a message's: no author
+    let mut odd = value(json!(NEWS));
+    odd["kind"] = json!("telegram");
+    assert_eq!(by_news(odd, MESSAGE)["body"], DEFANGED);
 }
 
 /// A type that says nothing of its author is under the policy whoever it
@@ -710,7 +731,7 @@ fn with_no_marker_nothing_is_relaxed() {
             author: Some(Authored {
                 name: "agent_name",
                 text: &["body"],
-                unless: &[],
+                unless: None,
             }),
             ..Exempt::NONE
         },
@@ -754,6 +775,10 @@ fn every_wire_types_author_marker() {
         let authored = exempt.author.expect(type_name);
         for (name, whole) in [(NEWS, true), ("mallory", false)] {
             let mut value = json!({authored.name: name, "elsewhere": URL});
+            if authored.unless.is_some() {
+                // A direct message, not a broadcast
+                value["kind"] = json!("dm");
+            }
             for key in authored.text {
                 value[*key] = json!(URL);
             }
