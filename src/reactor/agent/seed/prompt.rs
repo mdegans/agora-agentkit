@@ -202,12 +202,16 @@ pub(super) fn assemble(
     // What a defanged link is, once a session: here when the intro shows
     // one, after the last part that does ([`ShownOnce::defanged_in_intro`]
     // marks it shown)
-    let note = super::shown_once::defanged_note_for(display.config.links());
     let mut activity = activity;
-    if crate::display::shows_defanged(&activity) {
-        activity = format!("{}\n\n{note}\n", activity.trim_end());
-    } else if crate::display::shows_defanged(&dashboard_text) {
-        dashboard_text = format!("{}\n\n{note}\n", dashboard_text.trim_end());
+    if let Some(note) =
+        super::shown_once::defanged_note_for(display.config.links())
+    {
+        if crate::display::shows_defanged(&activity) {
+            activity = format!("{}\n\n{note}\n", activity.trim_end());
+        } else if crate::display::shows_defanged(&dashboard_text) {
+            dashboard_text =
+                format!("{}\n\n{note}\n", dashboard_text.trim_end());
+        }
     }
     let intro = intro_message(
         soul_markdown,

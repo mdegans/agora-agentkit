@@ -108,10 +108,18 @@ fn strict_common<'de, D: serde::Deserializer<'de>>(
 /// What becomes of URLs in text others wrote.
 ///
 /// In both modes a page URL of Agora's site is written as its `agora://`
-/// link ([`AgoraLink::on_site`]), and so is a path on the site written as
-/// a Markdown inline link's target (`[post](/agora/c/news/<id>)`; not one
-/// in prose, which may be a path someone is talking about): one under `/agora/` that no kind names
-/// as `agora://page/<path>?<query>` (its `#fragment` dropped). A URL on
+/// link ([`AgoraLink::on_site`]), and so is a path on the site right after
+/// `](` or `](<`, as a Markdown inline link's target is written
+/// (`[post](/agora/c/news/<id>)`), and nowhere else. That is by the
+/// characters, not by Markdown: a code span, fenced code, an image's
+/// target and a stray `](/agora/…` are rewritten too, as a full URL in
+/// code is, and only a link of the site's own can come of it. A page under
+/// `/agora/` that no kind names is `agora://page/<path>?<query>` (its
+/// `#fragment` dropped).
+///
+/// Run the policy on the stored text, once: over text it already rendered
+/// it is not idempotent for a relative target that held a defanged URL
+/// (nothing followable results, but the text differs). A URL on
 /// the site is treated as any other URL when it is outside `/agora/` (the
 /// host's other pages are not Agora's), has a `.` or `..` segment
 /// (between `/` or `\`), a control character or a user, or another URL in
@@ -306,13 +314,26 @@ fn author_names<'de, D: serde::Deserializer<'de>>(
 }
 
 /// Whether `text` shows a link as the policy defangs one: a scheme
-/// written `hxxp`, or a host `www[.]`. For a reader's one-time note on
-/// what such a link is, asked of the text the reader is given, never of
-/// what a view read before it cut or left a field out. Text that writes
-/// one itself (`hxxps://` in a post about defanging) counts too: the note
-/// explains it all the same
+/// written `hxxp`, or a host `www[.]`, in any letter case and with what
+/// the scanner drops inside a scheme dropped here too (a tab or a line
+/// break, and the whitespace before one: `h\nxxps://`). For a reader's
+/// one-time note on what such a link is, asked of the text the reader is
+/// given, never of what a view read before it cut or left a field out.
+/// Text that writes one itself (`hxxps://` in a post about defanging)
+/// counts too: the note explains it all the same
 pub fn shows_defanged(text: &str) -> bool {
-    text.to_ascii_lowercase().contains("hxxp") || text.contains("www[.]")
+    let mut read = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c == '\t' || threads::is_line_break(c) {
+            // and the whitespace before it, as `skip_dropped` reads it
+            while read.ends_with(|c: char| is_gap(c)) {
+                read.pop();
+            }
+            continue;
+        }
+        read.push(c.to_ascii_lowercase());
+    }
+    read.contains("hxxp") || read.contains("www[.]")
 }
 
 /// The longest URL read as a link or checked against a [`LinkRule`],
@@ -1301,8 +1322,8 @@ fn url_end(text: &str, start: usize, from: usize) -> Option<usize> {
 
 /// The end of a path on the site written at `at` as a Markdown inline
 /// link's target: after `](` or `](<`, starting [`SITE_PREFIX`], to the
-/// first whitespace or `)`, `<`, `>`, `"`, `'`. Nowhere else: `/agora/…`
-/// in prose is a path someone is talking about. `None` past
+/// first whitespace or `)`, `<`, `>`, `"`, `'`. Nowhere else: a bare
+/// `/agora/…` is more often a path someone is talking about. `None` past
 /// [`MAX_URL_BYTES`]
 fn relative_target(text: &str, at: usize) -> Option<usize> {
     let before = &text[..at];

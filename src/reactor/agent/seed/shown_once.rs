@@ -96,8 +96,9 @@ struct Inner {
     /// The agent's turns this session, counted by the tool's `on_turn`
     turn: u64,
     /// The note on a defanged link for the session's link policy
-    /// ([`defanged_note_for`]); [`DEFANGED_NOTE`] until one is set
-    links_note: Option<&'static str>,
+    /// ([`defanged_note_for`]), once one is set; [`DEFANGED_NOTE`] until
+    /// then. `Some(None)`: a policy that defangs nothing has no note
+    links_note: Option<Option<&'static str>>,
 }
 
 /// How a result points at further reads: in `agora://` links when it was
@@ -202,14 +203,17 @@ pub const BLOCKED_NOTE: &str = "*(Links to sites your operator has blocked are \
      accident; the text as written, yours included, keeps the real address. \
      To have a site unblocked, `send_message` to `operator`.)*";
 
-/// The note on a defanged link under `links`
-pub fn defanged_note_for(links: &Links) -> &'static str {
+/// The note on a defanged link under `links`; none under `raw` with no
+/// deny rule, which defangs nothing (an agent writing `hxxp` itself is not
+/// told of sites its operator has blocked)
+pub fn defanged_note_for(links: &Links) -> Option<&'static str> {
     match links {
         Links::Defanged { allow_authors, .. } if !allow_authors.is_empty() => {
-            DEFANGED_AUTHORS_NOTE
+            Some(DEFANGED_AUTHORS_NOTE)
         }
-        Links::Defanged { .. } => DEFANGED_NOTE,
-        Links::Raw { .. } => BLOCKED_NOTE,
+        Links::Defanged { .. } => Some(DEFANGED_NOTE),
+        Links::Raw { deny } if deny.is_empty() => None,
+        Links::Raw { .. } => Some(BLOCKED_NOTE),
     }
 }
 
@@ -446,12 +450,16 @@ impl ShownOnce {
     /// the note goes with the result that shows the link, never with a
     /// later one or for a link a view cut off or left out
     pub fn defanged_note(&self, shown: &str) -> Option<&'static str> {
-        (crate::display::shows_defanged(shown) && self.legend("defanged")).then(
-            || {
-                let inner = self.0.read().expect("shown-once lock");
-                inner.links_note.unwrap_or(DEFANGED_NOTE)
-            },
-        )
+        let note = self.links_note()?;
+        (crate::display::shows_defanged(shown) && self.legend("defanged"))
+            .then_some(note)
+    }
+
+    /// The session's note ([`defanged_note_for`]), [`DEFANGED_NOTE`] until
+    /// a policy is set
+    fn links_note(&self) -> Option<&'static str> {
+        let inner = self.0.read().expect("shown-once lock");
+        inner.links_note.unwrap_or(Some(DEFANGED_NOTE))
     }
 
     /// The session's link policy, which says which note
@@ -465,9 +473,8 @@ impl ShownOnce {
     /// ([`defanged_note_for`]): marks it shown (the intro is seated, so it
     /// counts at once), and says whether it did
     pub fn defanged_in_intro(&self, intro: &str) -> bool {
-        let note = {
-            let inner = self.0.read().expect("shown-once lock");
-            inner.links_note.unwrap_or(DEFANGED_NOTE)
+        let Some(note) = self.links_note() else {
+            return false;
         };
         let shown = intro.contains(note);
         if shown {
@@ -643,7 +650,7 @@ mod tests {
             let once = ShownOnce::default();
             if let Some(links) = &links {
                 once.set_links(links);
-                assert_eq!(defanged_note_for(links), note);
+                assert_eq!(defanged_note_for(links), Some(note));
             }
             assert_eq!(once.defanged_note("no link here"), None);
             let shown = "see hxxps://evil[.]example/x";
@@ -732,12 +739,20 @@ mod tests {
             "allow_authors": ["claude-ai"],
         }))
         .unwrap();
-        assert_eq!(defanged_note_for(&authors), DEFANGED_AUTHORS_NOTE);
+        assert_eq!(defanged_note_for(&authors), Some(DEFANGED_AUTHORS_NOTE));
         assert!(DEFANGED_AUTHORS_NOTE.contains("text by agents it trusts"));
-        assert_eq!(defanged_note_for(&Links::default()), DEFANGED_NOTE);
-        assert_eq!(
-            defanged_note_for(&Links::Raw { deny: Vec::new() }),
-            BLOCKED_NOTE
-        );
+        assert_eq!(defanged_note_for(&Links::default()), Some(DEFANGED_NOTE));
+        // `raw` with no deny rule defangs nothing: no note, whatever an
+        // agent writes
+        let open = Links::Raw { deny: Vec::new() };
+        assert_eq!(defanged_note_for(&open), None);
+        let once = ShownOnce::default();
+        once.set_links(&open);
+        assert_eq!(once.defanged_note("I wrote hxxps://x[.]example"), None);
+        assert!(!once.defanged_in_intro("anything"));
+        let deny = Links::Raw {
+            deny: vec!["https://evil.example".parse().unwrap()],
+        };
+        assert_eq!(defanged_note_for(&deny), Some(BLOCKED_NOTE));
     }
 }

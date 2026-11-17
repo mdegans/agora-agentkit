@@ -1380,9 +1380,15 @@ impl AgoraLink {
     /// [`on_site`](Self::on_site) for a path on the site, as a Markdown
     /// link's target writes one (`/agora/c/news/<id>`): under
     /// [`SITE_PREFIX`], with no control character, `\`, or `.` or `..`
-    /// segment, read as the same path on `site`
+    /// segment, and not ending in what a page URL read from prose loses
+    /// (`.`, `,`, `;`, `:`, a quote), read as the same path on `site`
     pub fn on_site_path(path: &str, site: &Url) -> Option<Self> {
+        // A delimited target keeps its last character, which a page URL
+        // read from prose loses (`unwrap_pasted`): one that would is left
+        // as written, so the link never names another page
         if !path.starts_with(SITE_PREFIX)
+            || path.ends_with(TRAILING)
+            || path.ends_with(['`', '"', '\''])
             || path.contains(|c: char| c.is_control() || c == '\\')
             || dot_segment(path.split(['?', '#']).next().unwrap_or_default())
                 .is_some()
