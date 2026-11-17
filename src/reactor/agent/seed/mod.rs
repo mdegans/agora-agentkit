@@ -45,8 +45,8 @@ pub use memory::{
     TARGET_WORDS,
 };
 pub use prompt::{
-    MODEL_LINE_PREFIX, ModelName, constitution_sha256, embedded_constitution,
-    format_dashboard, model_line, replace_model_line, system_text,
+    Dashboard, MODEL_LINE_PREFIX, ModelName, constitution_sha256,
+    embedded_constitution, model_line, replace_model_line, system_text,
 };
 pub use prompt_log::{PromptLogError, prompt_sha256};
 pub use session::AgoraSession;
@@ -396,6 +396,9 @@ impl RetryAfter for SeedError {
 
 /// See the [module docs](self)
 pub struct SeedAgent {
+    /// What it is shown text with, its tools' results and its dashboard
+    /// alike
+    display: crate::display::AgentDisplayConfig,
     /// What this session showed the agent, and in which turn (in memory only)
     shown_once: ShownOnce,
     id: AgentId,
@@ -1341,6 +1344,10 @@ impl Agent for SeedAgent {
             .soul
             .agent_name()
             .map_err(|error| SeedError::SoulName { id, error })?;
+        // What this agent is shown text with: the default for every agent,
+        // until the runner's config says otherwise. The one place it is
+        // chosen: the tools and the dashboard both read it from here
+        let display = crate::display::AgentDisplayConfig::default();
         let agora = Agora::new(
             ctx.client.clone(),
             id,
@@ -1349,7 +1356,8 @@ impl Agent for SeedAgent {
             ctx.keys.encryption_key(id),
             state.ledger.clone(),
         )
-        .with_reflection();
+        .with_reflection()
+        .with_display(display.clone());
         let AgoraSession {
             tools,
             context,
@@ -1361,6 +1369,7 @@ impl Agent for SeedAgent {
             rounds_left: ctx.config.max_rounds,
         };
         Ok(Self {
+            display,
             shown_once,
             id,
             state,
@@ -1562,15 +1571,21 @@ impl Agent for SeedAgent {
             .await?;
         self.filter_fresh(&mut dash);
 
-        // The repetition policy compares against what the model can see.
+        // The repetition policy compares against what the model can see:
+        // the titles as its dashboard shows them, under its link policy
+        // (as the server sent them, while it applied one)
         {
+            let cx = crate::display::DisplayContext::at(
+                &self.display,
+                Some(self.ctx.client.site()),
+            );
             let mut ledger = self.state.ledger.write().expect("ledger lock");
             ledger.titles_seen = dash
                 .feeds
                 .values()
                 .chain(dash.elsewhere.values())
                 .flatten()
-                .map(|p| (p.id, p.title.clone()))
+                .map(|p| (p.id, cx.links(&p.title).into_owned()))
                 .collect();
         }
 
@@ -1654,6 +1669,10 @@ impl Agent for SeedAgent {
                         self.admitted.as_ref().unwrap_or(&self.state.model),
                     )
                 },
+                display: crate::display::DisplayContext::at(
+                    &self.display,
+                    Some(self.ctx.client.site()),
+                ),
             },
         )?;
         Ok(())

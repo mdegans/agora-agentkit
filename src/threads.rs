@@ -174,7 +174,11 @@ pub fn tidy(body: &str) -> String {
 /// sent as about 128 KB of JSON). The server's comment budget charges
 /// this, and sends it as a stub's size. Since 0.108 a line break costs a
 /// byte, as it is shown: the `│` that started each line after the first is
-/// gone, the element's tags close the body instead
+/// gone, the element's tags close the body instead.
+///
+/// It counts the text as stored: under the default link policy a defanged
+/// link is two bytes longer for each dot of its host, so what a reader is
+/// shown can be slightly over this
 pub fn body_bytes(body: &str) -> usize {
     shown_body(body).len().max(body.len())
 }

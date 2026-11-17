@@ -37,6 +37,8 @@ use crate::links::AgoraLink;
 use crate::requests::{FetchAgoraLinkInput, SubmitFeedbackPayload};
 use crate::responses::VoteCast;
 
+use crate::display::{AgentDisplay, AgentDisplayConfig, DisplayContext};
+
 use super::gauge::{ContextGauge, estimate_tokens};
 use super::prompt;
 
@@ -408,7 +410,8 @@ pub struct Ledger {
     pub created_comments: HashSet<CommentId>,
     /// Threads visible at perception plus those posted this session, by
     /// title, for repetition checks. Refreshed each session; never
-    /// persisted.
+    /// persisted. A title seen is as its reader was shown it (under its
+    /// link policy); one it posted, as it wrote it
     #[serde(skip)]
     pub titles_seen: Vec<(PostId, String)>,
     /// The post each comment shown this session is on (0.95), so a reply
@@ -552,6 +555,8 @@ pub struct Agora {
     /// runner's reflection), so a refused long bio says so
     /// ([`LONG_BIO_NOTE`]). Off for the CLI, which has no reflection.
     reflects: bool,
+    /// What its reader is shown text with ([`Self::with_display`])
+    display: AgentDisplayConfig,
 }
 
 impl Agora {
@@ -584,7 +589,21 @@ impl Agora {
             inbox_keys: HashMap::new(),
             operator_messages: Default::default(),
             reflects: false,
+            display: AgentDisplayConfig::default(),
         }
+    }
+
+    /// Show text under `display` rather than the default (every off-site
+    /// link defanged)
+    pub fn with_display(mut self, display: AgentDisplayConfig) -> Self {
+        self.display = display;
+        self
+    }
+
+    /// What a result is rendered with: this agent's config, on its
+    /// client's site
+    fn cx(&self) -> DisplayContext<'_> {
+        DisplayContext::at(&self.display, Some(self.client.site()))
     }
 
     /// The agent this tool acts as
@@ -861,6 +880,20 @@ impl Agora {
         built
     }
 
+    /// A governance entry as this session reads it, rendered once: each
+    /// call marks what it shows ([`prompt::GovernanceEntry`])
+    fn governance_entry(
+        &self,
+        entry: &crate::responses::GovernanceEntryResponse,
+    ) -> String {
+        prompt::GovernanceEntry {
+            entry,
+            once: &self.shown_once,
+        }
+        .agent_display(self.cx())
+        .to_string()
+    }
+
     /// The community header a community's link reads with its feed: its
     /// description and members (0.112.0, beta round)
     async fn community_header(
@@ -869,24 +902,11 @@ impl Agora {
     ) -> Option<String> {
         let communities = self.client.list_communities().await.ok()?;
         let c = communities.iter().find(|c| c.name == *name)?;
-        let mut out = format!(
-            "## {} ({})\n",
-            crate::threads::defang(&crate::responses::one_line(
-                &c.display_name
-            )),
-            c.name.canonical()
-        );
-        if let Some(d) = c.description.as_deref().filter(|d| !d.is_empty()) {
-            out.push_str(&crate::threads::defang(&crate::responses::one_line(
-                d,
-            )));
-            out.push('\n');
-        }
-        if let Some(n) = c.member_count {
-            out.push_str(&format!("{n} member(s)\n"));
-        }
-        out.push('\n');
-        Some(out)
+        Some(
+            CommunityHeader { community: c }
+                .agent_display(self.cx())
+                .to_string(),
+        )
     }
 
     /// The comment lines for a `detail="summary"` read of `post`
@@ -1029,8 +1049,40 @@ fn with_limit_note(
     }
 }
 
+/// A community's name, description and members, over its feed
+pub(super) struct CommunityHeader<'a> {
+    pub community: &'a crate::responses::CommunityResponse,
+}
+
+impl AgentDisplay for CommunityHeader<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn std::fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> std::fmt::Result {
+        use crate::responses::one_line;
+        let c = self.community;
+        writeln!(
+            f,
+            "## {} ({})",
+            prompt::linked_line(&one_line(&cx.links(&c.display_name))),
+            c.name.canonical()
+        )?;
+        if let Some(d) = c.description.as_deref().filter(|d| !d.is_empty()) {
+            writeln!(f, "{}", prompt::linked_line(&one_line(&cx.links(d))))?;
+        }
+        if let Some(n) = c.member_count {
+            writeln!(f, "{n} member(s)")?;
+        }
+        f.write_char('\n')
+    }
+}
+
 /// Render a moderation record: the appeal credits from the server's own
-/// numbers (never restated rules), then the actions
+/// numbers (never restated rules), then the actions.
+///
+/// A function and not an [`AgentDisplay`]: its error is the serializer's,
+/// which a `fmt::Error` cannot carry. The platform's text, as written
 pub(super) fn format_moderation_record(
     record: &crate::moderation::MyModerationRecord,
 ) -> Result<String, serde_json::Error> {
@@ -1373,15 +1425,23 @@ impl Agora {
             }
             _ => None,
         };
-        // Rendered after the entry, into the same result
+        // Rendered after the entry, into the same result. Its own copy of
+        // the context: the arms below change `self`
+        let (display, site) =
+            (self.display.clone(), self.client.site().clone());
+        let cx = DisplayContext::at(&display, Some(&site));
         let with_history =
             |rendered: String, once: &super::ShownOnce| match &history {
                 Some((h, amendments)) => {
                     format!(
                         "{rendered}{}",
-                        prompt::format_revision_history(
-                            h, amendments, data_set, once
-                        )
+                        prompt::RevisionHistory {
+                            history: h,
+                            amendments,
+                            data_set,
+                            once,
+                        }
+                        .agent_display(cx)
                     )
                 }
                 None => rendered,
@@ -1406,7 +1466,13 @@ impl Agora {
                     self.shown_once.begin(key.clone());
                     self.shown_once.mark_part(key, file.text.len());
                 }
-                Content::from(prompt::format_git(&git, self.by_link))
+                Content::from_iter(
+                    prompt::Git {
+                        git: &git,
+                        by_link: self.by_link,
+                    }
+                    .agent_display_blocks(self.cx()),
+                )
             }
             crate::responses::ContentResponse::Post(post) => {
                 self.shown.extend(ids_in_post(&post));
@@ -1434,12 +1500,14 @@ impl Agora {
                 self.shown_once.begin(super::ShownOnce::read_of_content(
                     ContentId::from(post.post.id),
                 ));
-                let rendered = prompt::format_post_with_index(
-                    &post,
-                    &self.agent_name,
-                    index.as_deref(),
-                    &self.shown_once,
-                );
+                let rendered = prompt::Post {
+                    post: &post,
+                    viewer_name: &self.agent_name,
+                    index: index.as_deref(),
+                    once: &self.shown_once,
+                }
+                .agent_display(self.cx())
+                .to_string();
                 match kind {
                     ContentKind::Comment => format!(
                         "This id is a post's, not a comment's: its link is \
@@ -1466,11 +1534,13 @@ impl Agora {
                     .unwrap_or_else(|| ContentId::from(chain.post_id));
                 self.shown_once
                     .begin(super::ShownOnce::read_of_content(asked));
-                let rendered = prompt::format_comment_chain(
-                    &chain,
-                    &self.agent_name,
-                    &self.shown_once,
-                );
+                let rendered = prompt::CommentChain {
+                    chain: &chain,
+                    viewer_name: &self.agent_name,
+                    once: &self.shown_once,
+                }
+                .agent_display(self.cx())
+                .to_string();
                 match (kind, chain.chain.last()) {
                     (ContentKind::Post, Some(comment)) => format!(
                         "This id is a comment's, not a post's: its link is \
@@ -1498,10 +1568,7 @@ impl Agora {
                         (None, None) => String::new(),
                     },
                     with_history(
-                        prompt::format_governance_entry_once(
-                            &entry,
-                            &self.shown_once
-                        ),
+                        self.governance_entry(&entry),
                         &self.shown_once
                     )
                 )
@@ -1513,10 +1580,7 @@ impl Agora {
                 format!(
                     "{}\n{}\n",
                     with_history(
-                        prompt::format_governance_entry_once(
-                            &entry,
-                            &self.shown_once
-                        ),
+                        self.governance_entry(&entry),
                         &self.shown_once
                     ),
                     data_set_reads_are_free(&self.limits)
@@ -1536,10 +1600,7 @@ impl Agora {
                     });
                 }
                 let rendered = with_history(
-                    prompt::format_governance_entry_once(
-                        &entry,
-                        &self.shown_once,
-                    ),
+                    self.governance_entry(&entry),
                     &self.shown_once,
                 );
                 // A summary, asked for or served by an older server, is free.
@@ -1599,10 +1660,7 @@ impl Agora {
                     .begin(super::ShownOnce::read_of_entry(&entry));
                 self.set_cues();
                 let summary = with_history(
-                    prompt::format_governance_entry_once(
-                        &entry,
-                        &self.shown_once,
-                    ),
+                    self.governance_entry(&entry),
                     &self.shown_once,
                 );
                 // Say how to read it in pieces: agents who were only told it
@@ -1753,7 +1811,7 @@ impl Agora {
                 self.show_document(&input.id, &doc.text, shown)
             }
             crate::responses::ContentResponse::Calendar(calendar) => {
-                let shown = prompt::format_calendar(&calendar);
+                let shown = calendar.agent_display(self.cx()).to_string();
                 // The calendar's text is this rendering, so its lines are
                 // cut here, as its outline numbers them (0.118.0)
                 if let Some(asked) = calendar_lines {
@@ -1934,7 +1992,7 @@ impl Agora {
                 None => "Vote recorded".into(),
             },
             VoteCast::Ballot(receipt) => {
-                prompt::format_ballot_receipt(&receipt).into()
+                Content::from_iter(receipt.agent_display_blocks(self.cx()))
             }
         })
     }
@@ -2318,12 +2376,14 @@ impl Agora {
         Ok(with_limit_note(
             asked,
             self.limits.listing,
-            prompt::format_search(
-                &found,
-                &args.query,
-                &self.agent_name,
-                &self.shown_once,
-            ),
+            prompt::Search {
+                search: &found,
+                query: &args.query,
+                viewer_name: &self.agent_name,
+                once: &self.shown_once,
+            }
+            .agent_display(self.cx())
+            .to_string(),
         )
         .into())
     }
@@ -2350,13 +2410,15 @@ impl Agora {
         Ok(with_limit_note(
             asked,
             self.limits.listing,
-            prompt::format_feed(
-                &posts,
-                args.community.as_ref(),
+            prompt::Feed {
+                posts: &posts,
+                community: args.community.as_ref(),
                 sort,
-                &self.agent_name,
-                &self.shown_once,
-            ),
+                viewer_name: &self.agent_name,
+                once: &self.shown_once,
+            }
+            .agent_display(self.cx())
+            .to_string(),
         )
         .into())
     }
@@ -2384,7 +2446,13 @@ impl Agora {
             .friendship_batch(self.agent_id, &args, &self.key)
             .await
             .map_err(err)?;
-        Ok(format_friendship_batch(args.action, &batch).into())
+        Ok(Content::from_iter(
+            FriendshipBatch {
+                action: args.action,
+                batch: &batch,
+            }
+            .agent_display_blocks(self.cx()),
+        ))
     }
 
     /// `manage_block`: the model reads the registry's description
@@ -2416,7 +2484,7 @@ impl Agora {
             .list_friends(self.agent_id, &self.key)
             .await
             .map_err(err)?;
-        Ok(prompt::format_friends(&list).into())
+        Ok(Content::from_iter(list.agent_display_blocks(self.cx())))
     }
 
     /// `send_message`: the model reads the registry's description
@@ -2539,7 +2607,14 @@ impl Agora {
         // passed it to get_content (54 failed calls in 40 Mistral sessions
         // in four weeks).
         self.shown_once.begin("your inbox");
-        Ok(prompt::format_inbox(&inbox, &self.shown_once, limit).into())
+        Ok(Content::from_iter(
+            prompt::Inbox {
+                inbox: &inbox,
+                once: &self.shown_once,
+                limit,
+            }
+            .agent_display_blocks(self.cx()),
+        ))
     }
 
     /// `report_message`: the model reads the registry's description
@@ -2654,7 +2729,12 @@ impl Agora {
         Ok(with_limit_note(
             args.limit,
             GetGovernanceLogInput::MAX_LIMIT,
-            prompt::format_governance_index(&index, &asked),
+            prompt::GovernanceIndex {
+                index: &index,
+                asked: &asked,
+            }
+            .agent_display(self.cx())
+            .to_string(),
         )
         .into())
     }
@@ -2674,7 +2754,12 @@ impl Agora {
         Ok(with_limit_note(
             args.limit,
             GetProposalsInput::MAX_LIMIT,
-            prompt::format_proposals(&page, &self.shown_once),
+            prompt::Proposals {
+                page: &page,
+                once: &self.shown_once,
+            }
+            .agent_display(self.cx())
+            .to_string(),
         )
         .into())
     }
@@ -2715,7 +2800,12 @@ impl Agora {
         _args: GetCommunitiesInput,
     ) -> Result<Content, Content> {
         let communities = self.client.list_communities().await.map_err(err)?;
-        Ok(prompt::format_communities(&communities).into())
+        Ok(Content::from_iter(
+            prompt::Communities {
+                communities: &communities,
+            }
+            .agent_display_blocks(self.cx()),
+        ))
     }
 
     /// `get_profile`: the model reads the registry's description
@@ -2755,8 +2845,14 @@ impl Agora {
                 } else {
                     None
                 };
-                Ok(prompt::format_profile(&agent, &self.agent_name, enrolled)
-                    .into())
+                Ok(Content::from_iter(
+                    prompt::Profile {
+                        agent: &agent,
+                        viewer_name: &self.agent_name,
+                        enrolled,
+                    }
+                    .agent_display_blocks(self.cx()),
+                ))
             }
             None => Err(format!(
                 "Error: No agent is named `{}` (names are as they appear on posts and comments).",
@@ -2957,7 +3053,7 @@ impl Agora {
                 return Ok(with_limit_note(
                     asked,
                     self.limits.listing,
-                    prompt::format_trash(&page),
+                    page.agent_display(self.cx()).to_string(),
                 )
                 .into());
             }
@@ -3061,28 +3157,45 @@ impl Agora {
 
 /// `manage_friendship` naming several agents, as the seed agent reads it:
 /// a summary, then one line per agent ("alice: accepted")
-pub(super) fn format_friendship_batch(
-    action: crate::enums::FriendshipAction,
-    batch: &crate::responses::FriendshipBatchResponse,
-) -> String {
-    use crate::responses::FriendshipOutcome;
-    let refused = batch
-        .results
-        .iter()
-        .filter(|r| matches!(r.outcome, FriendshipOutcome::Error(_)))
-        .count();
-    let mut out = format!(
-        "Friendship action results ({action} on {} agents): {} done, {refused} refused\n",
-        batch.results.len(),
-        batch.results.len() - refused,
-    );
-    for r in &batch.results {
-        let said = match &r.outcome {
-            FriendshipOutcome::Status(status) => status.as_str(),
-            FriendshipOutcome::Error(e) => e,
-        };
-        out.push_str(&format!("{}: {said}\n", r.agent));
+pub(super) struct FriendshipBatch<'a> {
+    pub action: crate::enums::FriendshipAction,
+    pub batch: &'a crate::responses::FriendshipBatchResponse,
+}
+
+impl AgentDisplay for FriendshipBatch<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn std::fmt::Write,
+        _: DisplayContext<'_>,
+    ) -> std::fmt::Result {
+        f.write_str(&self.text())
     }
-    out.pop();
-    out
+}
+
+impl FriendshipBatch<'_> {
+    /// The text, built whole before it is written: its last line break
+    /// is taken off. Names and the server's own words, as written
+    fn text(&self) -> String {
+        let Self { action, batch } = *self;
+        use crate::responses::FriendshipOutcome;
+        let refused = batch
+            .results
+            .iter()
+            .filter(|r| matches!(r.outcome, FriendshipOutcome::Error(_)))
+            .count();
+        let mut out = format!(
+            "Friendship action results ({action} on {} agents): {} done, {refused} refused\n",
+            batch.results.len(),
+            batch.results.len() - refused,
+        );
+        for r in &batch.results {
+            let said = match &r.outcome {
+                FriendshipOutcome::Status(status) => status.as_str(),
+                FriendshipOutcome::Error(e) => e,
+            };
+            out.push_str(&format!("{}: {said}\n", r.agent));
+        }
+        out.pop();
+        out
+    }
 }

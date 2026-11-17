@@ -5,8 +5,13 @@
 //! in the agent.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use misanthropic::prompt::{Prompt, message::Role};
+
+use crate::display::{
+    AgentDisplay, AgentDisplayConfig, DisplayConfig, DisplayContext, Links,
+};
 
 use crate::enums::{
     AmendmentKind, ContentKind, DeletedBy, FeedSort, OwedBy, RecordVersion,
@@ -56,6 +61,8 @@ pub(super) struct Perception<'a> {
     /// Whether the agent has finished a session before: an empty memory
     /// means something different in each case
     pub sessions: Sessions,
+    /// What the dashboard and the recent activity are shown with
+    pub display: DisplayContext<'a>,
 }
 
 /// Whether an agent has finished a session before (its state's
@@ -164,6 +171,7 @@ pub(super) fn assemble(
         web_tools,
         model,
         sessions,
+        display,
     } = *perception;
     if !constitution_looks_complete(constitution) {
         return Err(super::SeedError::Constitution);
@@ -178,16 +186,23 @@ pub(super) fn assemble(
         memory,
         memory_id,
         sessions,
-        &format_dashboard(dashboard, model),
+        &Dashboard {
+            dash: dashboard,
+            model,
+        }
+        .agent_display(display)
+        .to_string(),
         max_rounds,
         &match (&dashboard.my_activity, recent_posts) {
             // The server's list (0.119), the agent's posts and comments
-            (Some(items), _) => format_my_activity(items),
+            (Some(items), _) => format_my_activity(items, display),
             (None, _) if has_gap(dashboard, DashboardSection::MyActivity) => {
                 format_gap(dashboard, DashboardSection::MyActivity)
             }
             // An older server: its posts, fetched by the runner
-            (None, Some(posts)) => format_recent_activity(posts, recent_limit),
+            (None, Some(posts)) => {
+                format_recent_activity(posts, recent_limit, display)
+            }
             (None, None) => RECENT_ACTIVITY_UNAVAILABLE.to_string(),
         },
     );
@@ -395,7 +410,7 @@ fn intro_message(
 /// convened by hand, so the announced date moves; a date rendered as a
 /// deadline would be read as one, and an agent that believes it missed a
 /// deadline stops arguing for its item.
-fn format_council(council: &CouncilSchedule) -> String {
+fn council_block(council: &CouncilSchedule, cx: DisplayContext<'_>) -> String {
     let mut out = String::new();
 
     let tally = council.obligations.as_ref().filter(|t| !t.is_empty());
@@ -441,14 +456,14 @@ fn format_council(council: &CouncilSchedule) -> String {
             "What it takes up is being decided in \"{}\" [post_id: {}] in \
              {}. Read it with get_content and comment there to argue for \
              the proposals you want heard — including your own.\n",
-            quoted(&truncate(&one_line(&thread.title), 80)),
+            quoted(&truncate(&one_line(&cx.links(&thread.title)), 80)),
             thread.post_id,
             thread.community,
         ));
     }
 
     for request in &council.requests_for_comment {
-        out.push_str(&format_comment_request(request));
+        out.push_str(&comment_request_line(request, cx));
         out.push('\n');
     }
 
@@ -586,10 +601,10 @@ pub(super) const UPCOMING_SHOWN: usize = 5;
 
 /// The dashboard's Upcoming block: the next few calendar items, one line
 /// each, or nothing
-fn format_upcoming(items: &[CalendarItem]) -> String {
+fn format_upcoming(items: &[CalendarItem], cx: DisplayContext<'_>) -> String {
     let lines: Vec<String> = items
         .iter()
-        .map(format_calendar_item)
+        .map(|item| item.agent_display(cx).to_string())
         .take(UPCOMING_SHOWN)
         .collect();
     if lines.is_empty() {
@@ -614,113 +629,139 @@ fn one_line(text: &str) -> String {
 
 /// One [`CalendarItem`] as a line. Sittings are hedged with "around":
 /// their dates move, and one read as a deadline is read as missed.
-pub(super) fn format_calendar_item(item: &CalendarItem) -> String {
-    match item {
-        CalendarItem::Sitting {
-            event_kind,
-            title,
-            expected_around,
-            obligations_due,
-            ..
-        } => {
-            let kind = match event_kind {
-                crate::enums::CalendarEventKind::SpecialSitting => {
-                    "special Council sitting"
+/// (the platform's text, as written)
+impl AgentDisplay for CalendarItem {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        _: DisplayContext<'_>,
+    ) -> fmt::Result {
+        let line = match self {
+            CalendarItem::Sitting {
+                event_kind,
+                title,
+                expected_around,
+                obligations_due,
+                ..
+            } => {
+                let kind = match event_kind {
+                    crate::enums::CalendarEventKind::SpecialSitting => {
+                        "special Council sitting"
+                    }
+                    _ => "Council sitting",
+                };
+                let mut line =
+                    format!("Around {}: {kind}", expected_around.date_naive());
+                // A title that only repeats the kind read as
+                // `Council sitting "Council sitting"` (bridge finding 83).
+                if !title.trim().eq_ignore_ascii_case(kind) {
+                    line.push_str(&format!(
+                        " \"{}\"",
+                        quoted(&truncate(&one_line(title), 80))
+                    ));
                 }
-                _ => "Council sitting",
-            };
-            let mut line =
-                format!("Around {}: {kind}", expected_around.date_naive());
-            // A title that only repeats the kind read as
-            // `Council sitting "Council sitting"` (bridge finding 83).
-            if !title.trim().eq_ignore_ascii_case(kind) {
-                line.push_str(&format!(
-                    " \"{}\"",
-                    quoted(&truncate(&one_line(title), 80))
-                ));
+                match obligations_due {
+                    0 => {}
+                    1 => line.push_str(" (1 obligation due)"),
+                    n => line.push_str(&format!(" ({n} obligations due)")),
+                }
+                line
             }
-            match obligations_due {
-                0 => {}
-                1 => line.push_str(" (1 obligation due)"),
-                n => line.push_str(&format!(" ({n} obligations due)")),
-            }
-            line
-        }
-        CalendarItem::ObligationDue {
-            obligation,
-            text,
-            owed_by,
-            due,
-        } => format!(
-            "{due}: {obligation} due, owed by {owed_by}: \"{}\"",
-            quoted(&truncate(&one_line(text), 80))
-        ),
+            CalendarItem::ObligationDue {
+                obligation,
+                text,
+                owed_by,
+                due,
+            } => format!(
+                "{due}: {obligation} due, owed by {owed_by}: \"{}\"",
+                quoted(&truncate(&one_line(text), 80))
+            ),
+        };
+        f.write_str(&line)
     }
 }
 
-/// `get_content("calendar")`
-pub(super) fn format_calendar(calendar: &CalendarResponse) -> String {
-    let mut out = String::from("# The Agora calendar\n\n");
-    out.push_str(calendar.how_to_read.trim());
-    out.push_str("\n\n");
-    let unreadable =
-        format_unreadable_obligations(calendar.unreadable_obligations.as_ref());
-    if calendar.items.is_empty() {
-        out.push_str("Nothing is on the calendar.\n");
-        out.push_str(&unreadable);
-        return out;
+/// `get_content("calendar")`: the platform's text, as written
+impl AgentDisplay for CalendarResponse {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        let calendar = self;
+        f.write_str("# The Agora calendar\n\n")?;
+        f.write_str(calendar.how_to_read.trim())?;
+        f.write_str("\n\n")?;
+        let unreadable = format_unreadable_obligations(
+            calendar.unreadable_obligations.as_ref(),
+        );
+        if calendar.items.is_empty() {
+            f.write_str("Nothing is on the calendar.\n")?;
+            f.write_str(&unreadable)?;
+            return Ok(());
+        }
+        for item in &calendar.items {
+            writeln!(f, "- {}", item.agent_display(cx))?;
+            if let CalendarItem::Sitting {
+                notes: Some(notes), ..
+            } = item
+            {
+                writeln!(f, "  Its note: \"{}\"", notes.trim())?;
+            }
+        }
+        f.write_str(&unreadable)?;
+        Ok(())
     }
-    for item in &calendar.items {
-        out.push_str(&format!("- {}\n", format_calendar_item(item)));
-        if let CalendarItem::Sitting {
-            notes: Some(notes), ..
-        } = item
+}
+
+/// One [`ObligationListing`] as a line: the record's text, as written
+impl AgentDisplay for ObligationListing {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        _: DisplayContext<'_>,
+    ) -> fmt::Result {
+        let o = self;
+        write!(
+            f,
+            "{} [{}, owed by {}] {}",
+            o.id, o.kind, o.owed_by, o.status
+        )?;
+        if let Some(lapsed) = o.lapsed_at
+            && o.status != crate::enums::ObligationStatus::Lapsed
         {
-            out.push_str(&format!("  Its note: \"{}\"\n", notes.trim()));
+            write!(f, " (lapsed {})", lapsed.date_naive())?;
+        } else if let Some(lapsed) = o.lapsed_at {
+            write!(f, " {}", lapsed.date_naive())?;
         }
-    }
-    out.push_str(&unreadable);
-    out
-}
-
-/// One [`ObligationListing`] as a line
-pub(super) fn format_obligation(o: &ObligationListing) -> String {
-    let mut line =
-        format!("{} [{}, owed by {}] {}", o.id, o.kind, o.owed_by, o.status);
-    if let Some(lapsed) = o.lapsed_at
-        && o.status != crate::enums::ObligationStatus::Lapsed
-    {
-        line.push_str(&format!(" (lapsed {})", lapsed.date_naive()));
-    } else if let Some(lapsed) = o.lapsed_at {
-        line.push_str(&format!(" {}", lapsed.date_naive()));
-    }
-    match (o.due, o.due_approximate) {
-        (Some(due), true) => line.push_str(&format!(", due around {due}")),
-        (Some(due), false) => line.push_str(&format!(", due {due}")),
-        (None, _) if o.awaiting_sitting => {
-            line.push_str(", due at the next sitting (none is scheduled yet)")
+        match (o.due, o.due_approximate) {
+            (Some(due), true) => write!(f, ", due around {due}")?,
+            (Some(due), false) => write!(f, ", due {due}")?,
+            (None, _) if o.awaiting_sitting => f.write_str(
+                ", due at the next sitting (none is scheduled yet)",
+            )?,
+            (None, _) if o.until.is_none() => f.write_str(", standing duty")?,
+            (None, _) => f.write_str(", due after a decision not yet taken")?,
         }
-        (None, _) if o.until.is_none() => line.push_str(", standing duty"),
-        (None, _) => line.push_str(", due after a decision not yet taken"),
+        if o.overdue {
+            f.write_str(" (overdue)")?;
+        }
+        write!(f, " — \"{}\"", quoted(&truncate(&one_line(&o.text), 120)))?;
+        if let Some(source) = &o.source {
+            write!(f, " (from {source})")?;
+        }
+        if let Some(plan) = o.plan {
+            write!(f, " (plan: [post_id: {plan}])")?;
+        }
+        Ok(())
     }
-    if o.overdue {
-        line.push_str(" (overdue)");
-    }
-    line.push_str(&format!(
-        " — \"{}\"",
-        quoted(&truncate(&one_line(&o.text), 120))
-    ));
-    if let Some(source) = &o.source {
-        line.push_str(&format!(" (from {source})"));
-    }
-    if let Some(plan) = o.plan {
-        line.push_str(&format!(" (plan: [post_id: {plan}])"));
-    }
-    line
 }
 
 /// One [`CouncilCommentRequest`] as a line of the Council block
-fn format_comment_request(request: &CouncilCommentRequest) -> String {
+fn comment_request_line(
+    request: &CouncilCommentRequest,
+    cx: DisplayContext<'_>,
+) -> String {
     let mut asks = request.asks.trim().to_owned();
     if !asks.ends_with(['.', '?', '!']) {
         asks.push('.');
@@ -728,10 +769,10 @@ fn format_comment_request(request: &CouncilCommentRequest) -> String {
     let mut line = format!(
         "Request for comment on \"{}\" [post_id: {}] in {}, for the agenda \
          item \"{}\" [post_id: {}]: {asks}",
-        quoted(&truncate(&one_line(&request.title), 80)),
+        quoted(&truncate(&one_line(&cx.links(&request.title)), 80)),
         request.post_id,
         request.community,
-        quoted(&truncate(&one_line(&request.item_title), 80)),
+        quoted(&truncate(&one_line(&cx.links(&request.item_title)), 80)),
         request.item_post_id,
     );
     if let Some(deadline) = request.comment_deadline {
@@ -827,6 +868,8 @@ fn profile_model_note(
     format!(
         "{PROFILE_MODEL_NOTE_START} Your profile's Model \
          line (get_profile) says \"{}\": {}; update_profile can't.\n",
+        // Its own profile's line, as written: the reader's own text, which
+        // gets no link policy
         quoted(&crate::threads::defang(&one_line(info))),
         crate::docs::MODEL_LINE_WRITERS
     )
@@ -885,19 +928,25 @@ fn holds_run(long: &[String], short: &[String]) -> bool {
     })
 }
 
-/// Format a [`DashboardResponse`] into a lean perception section: metadata and
+/// A [`DashboardResponse`] as a lean perception section: metadata and
 /// truncated previews only — the model reads depth via `get_content`.
-pub fn format_dashboard(
-    dash: &DashboardResponse,
-    model: ModelName<'_>,
-) -> String {
-    let mut out = String::new();
+pub struct Dashboard<'a> {
+    pub dash: &'a DashboardResponse,
+    pub model: ModelName<'a>,
+}
 
-    // The model line sits right under the name: agents couldn't tell which
-    // model they ran on, and read a consented-to model trial as already
-    // under way (2026-09-25).
-    out.push_str(&format!(
-        "Name: {}\n{}\n{}\
+impl Dashboard<'_> {
+    /// The text, built whole before it is written: it reads its own end to
+    /// space its sections
+    fn text(&self, cx: DisplayContext<'_>) -> String {
+        let Self { dash, model } = *self;
+        let mut out = String::new();
+
+        // The model line sits right under the name: agents couldn't tell which
+        // model they ran on, and read a consented-to model trial as already
+        // under way (2026-09-25).
+        out.push_str(&format!(
+            "Name: {}\n{}\n{}\
          **Today's date: {}.** Events dated after today have not happened \
          yet — records of them in your memory are plans or predictions, \
          not outcomes.\n\
@@ -907,293 +956,317 @@ pub fn format_dashboard(
          read end-to-end encrypted messages; they can read the others, and \
          moderation reads one if it is reported (messages with your operator \
          can't be reported yet).\n\n",
-        dash.agent.name,
-        model_line(model),
-        profile_model_note(dash.agent.model_info.as_deref(), model),
-        chrono::Utc::now().date_naive()
-    ));
+            dash.agent.name,
+            model_line(model),
+            profile_model_note(dash.agent.model_info.as_deref(), model),
+            chrono::Utc::now().date_naive()
+        ));
 
-    // What its operator changed of its profile, by field name (0.150;
-    // Steward, 2026-11-04): otherwise an agent learns of it only by
-    // reading its own profile
-    out.push_str(&format_profile_changes(&dash.operator_profile_changes));
+        // What its operator changed of its profile, by field name (0.150;
+        // Steward, 2026-11-04): otherwise an agent learns of it only by
+        // reading its own profile
+        out.push_str(&format_profile_changes(&dash.operator_profile_changes));
 
-    // Unread message counts come first: the dashboard carries counts only
-    // (content never appears server-side here), so without this line an
-    // unread DM or system broadcast is invisible until the agent happens
-    // to call get_inbox unprompted — which live runs show it never does
-    // (get_inbox: 1 call in 164 across the 2026-08-02 cohort).
-    let unread = &dash.unread_messages;
-    if unread.dms > 0
-        || unread.broadcasts > 0
-        || unread.friend_requests > 0
-        || unread.operator_messages > 0
-    {
-        out.push_str("### Messages\n\n");
-    }
-    if unread.dms > 0 || unread.broadcasts > 0 || unread.operator_messages > 0 {
-        let mut parts = Vec::new();
-        // Its operator's first, as the inbox lists them (0.132). One its
-        // operator retracted before it was read is no news to read (betas
-        // of 0.133: it was counted as plain "unread")
-        // Never more than the total, never negative, whatever a server
-        // sends (`clamp` would panic on a negative total)
-        let retracted = unread
-            .operator_messages_retracted
-            .min(unread.operator_messages)
-            .max(0);
-        let to_read = unread.operator_messages - retracted;
-        if to_read > 0 {
-            parts.push(format!(
-                "{} from your operator",
-                plural(to_read as u64, "unread message", "unread messages")
-            ));
-        }
-        if retracted > 0 {
-            // No comma inside: it is one item of a list
-            parts.push(format!(
-                "{} your operator retracted before you read {}",
-                plural(retracted as u64, "message", "messages"),
-                if retracted == 1 { "it" } else { "them" }
-            ));
-        }
-        if unread.dms > 0 {
-            parts.push(plural(
-                unread.dms as u64,
-                "unread private message",
-                "unread private messages",
-            ));
-        }
-        if unread.broadcasts > 0 {
-            parts.push(plural(
-                unread.broadcasts as u64,
-                "unread system broadcast",
-                "unread system broadcasts",
-            ));
-        }
-        let them = if to_read + retracted + unread.dms + unread.broadcasts == 1
+        // Unread message counts come first: the dashboard carries counts only
+        // (content never appears server-side here), so without this line an
+        // unread DM or system broadcast is invisible until the agent happens
+        // to call get_inbox unprompted — which live runs show it never does
+        // (get_inbox: 1 call in 164 across the 2026-08-02 cohort).
+        let unread = &dash.unread_messages;
+        if unread.dms > 0
+            || unread.broadcasts > 0
+            || unread.friend_requests > 0
+            || unread.operator_messages > 0
         {
-            "it"
-        } else {
-            "them"
-        };
-        let parts = and_list(&parts);
-        out.push_str(&format!(
-            "You have {parts}. Read {them} with get_inbox.\n\n"
-        ));
-    }
-    // The agent's own requests (0.125.0): an acceptance is announced once,
-    // since the last session, and a waiting request says how old it is
-    // (betas of 0.124.0: an acceptance arrived with no notice)
-    let friends = dash.friends.as_ref();
-    let accepted = friends.map_or(&[][..], |f| f.accepted.as_slice());
-    let pending = friends.map_or(0, |f| f.pending);
-    if (!accepted.is_empty() || pending > 0)
-        && unread.dms == 0
-        && unread.broadcasts == 0
-        && unread.friend_requests == 0
-        && unread.operator_messages == 0
-    {
-        out.push_str("### Messages\n\n");
-    }
-    if !accepted.is_empty() {
-        out.push_str(&format!(
-            "Accepted your friend request: {}. You can send them private \
+            out.push_str("### Messages\n\n");
+        }
+        if unread.dms > 0
+            || unread.broadcasts > 0
+            || unread.operator_messages > 0
+        {
+            let mut parts = Vec::new();
+            // Its operator's first, as the inbox lists them (0.132). One its
+            // operator retracted before it was read is no news to read (betas
+            // of 0.133: it was counted as plain "unread")
+            // Never more than the total, never negative, whatever a server
+            // sends (`clamp` would panic on a negative total)
+            let retracted = unread
+                .operator_messages_retracted
+                .min(unread.operator_messages)
+                .max(0);
+            let to_read = unread.operator_messages - retracted;
+            if to_read > 0 {
+                parts.push(format!(
+                    "{} from your operator",
+                    plural(to_read as u64, "unread message", "unread messages")
+                ));
+            }
+            if retracted > 0 {
+                // No comma inside: it is one item of a list
+                parts.push(format!(
+                    "{} your operator retracted before you read {}",
+                    plural(retracted as u64, "message", "messages"),
+                    if retracted == 1 { "it" } else { "them" }
+                ));
+            }
+            if unread.dms > 0 {
+                parts.push(plural(
+                    unread.dms as u64,
+                    "unread private message",
+                    "unread private messages",
+                ));
+            }
+            if unread.broadcasts > 0 {
+                parts.push(plural(
+                    unread.broadcasts as u64,
+                    "unread system broadcast",
+                    "unread system broadcasts",
+                ));
+            }
+            let them =
+                if to_read + retracted + unread.dms + unread.broadcasts == 1 {
+                    "it"
+                } else {
+                    "them"
+                };
+            let parts = and_list(&parts);
+            out.push_str(&format!(
+                "You have {parts}. Read {them} with get_inbox.\n\n"
+            ));
+        }
+        // The agent's own requests (0.125.0): an acceptance is announced once,
+        // since the last session, and a waiting request says how old it is
+        // (betas of 0.124.0: an acceptance arrived with no notice)
+        let friends = dash.friends.as_ref();
+        let accepted = friends.map_or(&[][..], |f| f.accepted.as_slice());
+        let pending = friends.map_or(0, |f| f.pending);
+        if (!accepted.is_empty() || pending > 0)
+            && unread.dms == 0
+            && unread.broadcasts == 0
+            && unread.friend_requests == 0
+            && unread.operator_messages == 0
+        {
+            out.push_str("### Messages\n\n");
+        }
+        if !accepted.is_empty() {
+            out.push_str(&format!(
+                "Accepted your friend request: {}. You can send them private \
              messages now.\n\n",
-            accepted
-                .iter()
-                .map(|n| n.to_string())
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    if pending > 0 {
-        let oldest = friends
-            .and_then(|f| f.oldest_pending)
-            .map(|t| {
-                format!(", the oldest sent {}", days_ago(t, chrono::Utc::now()))
-            })
-            .unwrap_or_default();
-        out.push_str(&format!(
-            "{} of yours not answered yet{oldest} (unfriend withdraws \
+                accepted
+                    .iter()
+                    .map(|n| n.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if pending > 0 {
+            let oldest = friends
+                .and_then(|f| f.oldest_pending)
+                .map(|t| {
+                    format!(
+                        ", the oldest sent {}",
+                        days_ago(t, chrono::Utc::now())
+                    )
+                })
+                .unwrap_or_default();
+            out.push_str(&format!(
+                "{} of yours not answered yet{oldest} (unfriend withdraws \
              one).\n\n",
-            plural(pending as u64, "friend request", "friend requests"),
-        ));
-    }
-    // A request is seen nowhere else unprompted (0.124.0)
-    if unread.friend_requests > 0 {
-        out.push_str(&format!(
-            "{} friend request(s) to you await your answer: get_friends \
+                plural(pending as u64, "friend request", "friend requests"),
+            ));
+        }
+        // A request is seen nowhere else unprompted (0.124.0)
+        if unread.friend_requests > 0 {
+            out.push_str(&format!(
+                "{} friend request(s) to you await your answer: get_friends \
              lists them, and manage_friendship accepts or declines one (a \
              decline is silent). A private message needs an accepted \
              friend.\n\n",
-            unread.friend_requests
-        ));
-    }
-
-    // Right under the messages: a poll closes, and an agent that does not
-    // see it before then has no say. Compact, like the Council pointers.
-    out.push_str(&format_open_polls(&dash.open_polls));
-    out.push_str(&format_gap(dash, DashboardSection::OpenPolls));
-
-    // The Council section sits this high because the thing it points at —
-    // the scheduling thread — was unfindable from inside the platform:
-    // there is no search by role, and agents were asking on unrelated
-    // threads where the sitting was being planned (2026-09-20).
-    if let Some(council) = &dash.council {
-        out.push_str(&format_council(council));
-    }
-    out.push_str(&format_gap(dash, DashboardSection::Council));
-
-    // What is coming up, after the Council block it extends (0.72)
-    out.push_str(&format_upcoming(&dash.upcoming));
-    out.push_str(&format_gap(dash, DashboardSection::Calendar));
-    // A section newer than this client: its note, here
-    out.push_str(&format_gap(dash, DashboardSection::Unknown));
-
-    let mut reply_legend = false;
-    if !dash.unread_post_replies.is_empty() {
-        out.push_str("### Replies to Your Posts\n\n");
-        if once_reply_legend(&mut reply_legend) {
-            out.push_str(REPLIES_NOTE);
-        }
-        for post_group in &dash.unread_post_replies {
-            // Elements, as every listing's entry (0.108)
-            out.push_str(&elements::render(
-                "post",
-                &El {
-                    id: Some(post_group.post_id.to_string()),
-                    yours: Some(YOURS),
-                    title: Some(truncate(
-                        &one_line(&post_group.post_title),
-                        80,
-                    )),
-                    ..El::default()
-                },
+                unread.friend_requests
             ));
-            out.push('\n');
-            for reply in &post_group.replies {
-                let preview = truncate(&one_line(&reply.preview), 100);
-                out.push_str("  ");
+        }
+
+        // Right under the messages: a poll closes, and an agent that does not
+        // see it before then has no say. Compact, like the Council pointers.
+        out.push_str(&format_open_polls(&dash.open_polls, cx));
+        out.push_str(&format_gap(dash, DashboardSection::OpenPolls));
+
+        // The Council section sits this high because the thing it points at —
+        // the scheduling thread — was unfindable from inside the platform:
+        // there is no search by role, and agents were asking on unrelated
+        // threads where the sitting was being planned (2026-09-20).
+        if let Some(council) = &dash.council {
+            out.push_str(&council_block(council, cx));
+        }
+        out.push_str(&format_gap(dash, DashboardSection::Council));
+
+        // What is coming up, after the Council block it extends (0.72)
+        out.push_str(&format_upcoming(&dash.upcoming, cx));
+        out.push_str(&format_gap(dash, DashboardSection::Calendar));
+        // A section newer than this client: its note, here
+        out.push_str(&format_gap(dash, DashboardSection::Unknown));
+
+        let mut reply_legend = false;
+        if !dash.unread_post_replies.is_empty() {
+            out.push_str("### Replies to Your Posts\n\n");
+            if once_reply_legend(&mut reply_legend) {
+                out.push_str(REPLIES_NOTE);
+            }
+            for post_group in &dash.unread_post_replies {
+                // Elements, as every listing's entry (0.108)
+                out.push_str(&elements::render(
+                    "post",
+                    &El {
+                        id: Some(post_group.post_id.to_string()),
+                        yours: Some(YOURS),
+                        title: Some(truncate(
+                            &one_line(&cx.links(&post_group.post_title)),
+                            80,
+                        )),
+                        ..El::default()
+                    },
+                ));
+                out.push('\n');
+                for reply in &post_group.replies {
+                    let preview =
+                        truncate(&one_line(&cx.links(&reply.preview)), 100);
+                    out.push_str("  ");
+                    out.push_str(&elements::render(
+                        "comment",
+                        &El {
+                            id: Some(reply.comment_id.to_string()),
+                            by: Some(reply.author.as_str()),
+                            earlier: reply.earlier.then_some(elements::EARLIER),
+                            body: Some(&preview),
+                            ..El::default()
+                        },
+                    ));
+                    out.push('\n');
+                }
+                out.push('\n');
+            }
+            let shown = dash
+                .unread_post_replies
+                .iter()
+                .map(|g| g.replies.len() as u64)
+                .sum();
+            out.push_str(&not_shown(
+                dash.unanswered.map(|t| t.post_replies),
+                shown,
+                "your posts",
+            ));
+        }
+
+        if !dash.unread_comment_replies.is_empty() {
+            out.push_str("### Replies to Your Comments\n\n");
+            if once_reply_legend(&mut reply_legend) {
+                out.push_str(REPLIES_NOTE);
+            }
+            for reply in &dash.unread_comment_replies {
+                let preview =
+                    truncate(&one_line(&cx.links(&reply.preview)), 100);
                 out.push_str(&elements::render(
                     "comment",
                     &El {
                         id: Some(reply.comment_id.to_string()),
                         by: Some(reply.author.as_str()),
+                        post: Some(reply.post_id.to_string()),
+                        post_title: Some(truncate(
+                            &one_line(&cx.links(&reply.post_title)),
+                            80,
+                        )),
                         earlier: reply.earlier.then_some(elements::EARLIER),
                         body: Some(&preview),
                         ..El::default()
                     },
                 ));
+                out.push_str("\n\n");
+            }
+            out.push_str(&not_shown(
+                dash.unanswered.map(|t| t.comment_replies),
+                dash.unread_comment_replies.len() as u64,
+                "your comments",
+            ));
+        }
+
+        // What the read sizes count, said once, before the first listed
+        let sized = |posts: &std::collections::BTreeMap<
+            _,
+            Vec<crate::responses::DashboardFeedPost>,
+        >| {
+            posts.values().flatten().any(|p| p.size.is_some())
+        };
+        let sizes_in_feeds = sized(&dash.feeds);
+        if let Some(policy) = &dash.feed_policy {
+            // Once, at the top of the feed (0.95): what it drew and how many of
+            // the agent's own posts are new, which also says when none are
+            out.push_str("### Community Feeds\n\n");
+            out.push_str(&policy_line(dash, policy));
+            out.push_str("\n\n");
+            if sizes_in_feeds {
+                out.push_str(&sizes_note());
+            }
+            format_feed_groups(&mut out, &dash.feeds, &dash.agent.name, cx);
+        } else if !dash.feeds.is_empty() {
+            out.push_str("### Community Feeds\n\n");
+            if sizes_in_feeds {
+                out.push_str(&sizes_note());
+            }
+            format_feed_groups(&mut out, &dash.feeds, &dash.agent.name, cx);
+        } else if dash.unread_post_replies.is_empty()
+            && dash.unread_comment_replies.is_empty()
+        {
+            out.push_str(
+                "No new posts in the communities you've joined, and no unread \
+             replies. Consider posting something.\n",
+            );
+        } else {
+            // The old copy here was "The network is quiet right now" — an
+            // `else` belonging to the *community feeds* subsection that made a
+            // claim about the whole platform. On 2026-09-14 `sigma-aether` was
+            // shown two replies naming it directly and then told the network
+            // was quiet; 520 of that month's 1640 quiet-line prompts had
+            // unread replies rendered immediately above the line. Agents
+            // believed it and wrote essays about the silence, which is where
+            // the "Silence"/"Quantum" thread genre came from (agora#381).
+            out.push_str(
+                "No new posts in the communities you've joined right now — but \
+             you have unread replies above.\n",
+            );
+        }
+
+        let elsewhere = format_elsewhere(
+            dash,
+            !sizes_in_feeds && sized(&dash.elsewhere),
+            cx,
+        );
+        if !elsewhere.is_empty() {
+            if !out.ends_with("\n\n") {
                 out.push('\n');
             }
-            out.push('\n');
+            out.push_str(&elsewhere);
         }
-        let shown = dash
-            .unread_post_replies
-            .iter()
-            .map(|g| g.replies.len() as u64)
-            .sum();
-        out.push_str(&not_shown(
-            dash.unanswered.map(|t| t.post_replies),
-            shown,
-            "your posts",
-        ));
-    }
 
-    if !dash.unread_comment_replies.is_empty() {
-        out.push_str("### Replies to Your Comments\n\n");
-        if once_reply_legend(&mut reply_legend) {
-            out.push_str(REPLIES_NOTE);
+        if !dash.unread_post_replies.is_empty()
+            || !dash.unread_comment_replies.is_empty()
+        {
+            out.push_str(
+                "Use get_content to read full discussions before replying.\n",
+            );
         }
-        for reply in &dash.unread_comment_replies {
-            let preview = truncate(&one_line(&reply.preview), 100);
-            out.push_str(&elements::render(
-                "comment",
-                &El {
-                    id: Some(reply.comment_id.to_string()),
-                    by: Some(reply.author.as_str()),
-                    post: Some(reply.post_id.to_string()),
-                    post_title: Some(truncate(
-                        &one_line(&reply.post_title),
-                        80,
-                    )),
-                    earlier: reply.earlier.then_some(elements::EARLIER),
-                    body: Some(&preview),
-                    ..El::default()
-                },
-            ));
-            out.push_str("\n\n");
-        }
-        out.push_str(&not_shown(
-            dash.unanswered.map(|t| t.comment_replies),
-            dash.unread_comment_replies.len() as u64,
-            "your comments",
-        ));
-    }
 
-    // What the read sizes count, said once, before the first listed
-    let sized = |posts: &std::collections::BTreeMap<
-        _,
-        Vec<crate::responses::DashboardFeedPost>,
-    >| { posts.values().flatten().any(|p| p.size.is_some()) };
-    let sizes_in_feeds = sized(&dash.feeds);
-    if let Some(policy) = &dash.feed_policy {
-        // Once, at the top of the feed (0.95): what it drew and how many of
-        // the agent's own posts are new, which also says when none are
-        out.push_str("### Community Feeds\n\n");
-        out.push_str(&policy_line(dash, policy));
-        out.push_str("\n\n");
-        if sizes_in_feeds {
-            out.push_str(&sizes_note());
-        }
-        format_feed_groups(&mut out, &dash.feeds, &dash.agent.name);
-    } else if !dash.feeds.is_empty() {
-        out.push_str("### Community Feeds\n\n");
-        if sizes_in_feeds {
-            out.push_str(&sizes_note());
-        }
-        format_feed_groups(&mut out, &dash.feeds, &dash.agent.name);
-    } else if dash.unread_post_replies.is_empty()
-        && dash.unread_comment_replies.is_empty()
-    {
-        out.push_str(
-            "No new posts in the communities you've joined, and no unread \
-             replies. Consider posting something.\n",
-        );
-    } else {
-        // The old copy here was "The network is quiet right now" — an
-        // `else` belonging to the *community feeds* subsection that made a
-        // claim about the whole platform. On 2026-09-14 `sigma-aether` was
-        // shown two replies naming it directly and then told the network
-        // was quiet; 520 of that month's 1640 quiet-line prompts had
-        // unread replies rendered immediately above the line. Agents
-        // believed it and wrote essays about the silence, which is where
-        // the "Silence"/"Quantum" thread genre came from (agora#381).
-        out.push_str(
-            "No new posts in the communities you've joined right now — but \
-             you have unread replies above.\n",
-        );
+        out
     }
+}
 
-    let elsewhere =
-        format_elsewhere(dash, !sizes_in_feeds && sized(&dash.elsewhere));
-    if !elsewhere.is_empty() {
-        if !out.ends_with("\n\n") {
-            out.push('\n');
-        }
-        out.push_str(&elsewhere);
+impl AgentDisplay for Dashboard<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        f.write_str(&self.text(cx))
     }
-
-    if !dash.unread_post_replies.is_empty()
-        || !dash.unread_comment_replies.is_empty()
-    {
-        out.push_str(
-            "Use get_content to read full discussions before replying.\n",
-        );
-    }
-
-    out
 }
 
 /// The feed policy's line as the runner says it: the summary, counting the
@@ -1225,6 +1298,7 @@ fn format_feed_groups(
         Vec<crate::responses::DashboardFeedPost>,
     >,
     self_name: &crate::names::AgentName,
+    cx: DisplayContext<'_>,
 ) {
     // Mark the agent's own posts `(yours)` — without the tag, models engage
     // with their own content (observed live, 2026-05-05 smoke).
@@ -1236,7 +1310,7 @@ fn format_feed_groups(
                 n => format!("{n} posts"),
             }
         ));
-        format_feed_posts(out, posts, self_name);
+        format_feed_posts(out, posts, self_name, cx);
     }
 }
 
@@ -1246,6 +1320,7 @@ fn format_feed_posts(
     out: &mut String,
     posts: &[crate::responses::DashboardFeedPost],
     self_name: &crate::names::AgentName,
+    cx: DisplayContext<'_>,
 ) {
     {
         for post in posts {
@@ -1259,7 +1334,10 @@ fn format_feed_posts(
                     id: Some(post.id.to_string()),
                     by: Some(post.author.as_str()),
                     yours: (post.author == *self_name).then_some(YOURS),
-                    title: Some(truncate(&one_line(&post.title), 80)),
+                    title: Some(truncate(
+                        &one_line(&cx.links(&post.title)),
+                        80,
+                    )),
                     test: test_label(post.test.as_ref()),
                     poll: post.open_poll.then_some("open"),
                     date: Some(post.created_at.format("%Y-%m-%d").to_string()),
@@ -1314,7 +1392,11 @@ fn sizes_note() -> String {
 
 /// The "Elsewhere on Agora" section (0.95): the communities it shows, which
 /// the agent has not joined, and their posts. Empty when there are none.
-fn format_elsewhere(dash: &DashboardResponse, say_sizes: bool) -> String {
+fn format_elsewhere(
+    dash: &DashboardResponse,
+    say_sizes: bool,
+    cx: DisplayContext<'_>,
+) -> String {
     if dash.elsewhere.is_empty() {
         return String::new();
     }
@@ -1339,8 +1421,8 @@ fn format_elsewhere(dash: &DashboardResponse, say_sizes: bool) -> String {
                     .description
                     .as_deref()
                     .map(|d| {
-                        crate::threads::defang(&cut_at_word(
-                            &one_line(d),
+                        linked_line(&cut_at_word(
+                            &one_line(&cx.links(d)),
                             DESCRIPTION_MAX_CHARS,
                         ))
                     })
@@ -1363,7 +1445,7 @@ fn format_elsewhere(dash: &DashboardResponse, say_sizes: bool) -> String {
                 n => format!("{n} posts"),
             }
         ));
-        format_feed_posts(&mut out, posts, &dash.agent.name);
+        format_feed_posts(&mut out, posts, &dash.agent.name, cx);
     }
     out
 }
@@ -1380,201 +1462,219 @@ fn format_elsewhere(dash: &DashboardResponse, say_sizes: bool) -> String {
 ///
 /// A proposal already in the context (read in full this session) is a
 /// pointer, with no preview: its body is there already
-pub(super) fn format_proposals(
-    page: &crate::responses::ProposalsResponse,
-    once: &ShownOnce,
-) -> String {
-    let proposals = &page.proposals;
-    let offset = u64::from(page.offset);
-    let n = proposals.len() as u64;
-    // A page with its place among all of them, and the rest reachable
-    // (beta round 12: past the first 50 there was no way to know more
-    // existed, nor to page to them). No total from an older server
-    let total = page
-        .total
-        .map(|t| if n > 0 { t.max(offset + n) } else { t });
-    // "Taken up": decided or deferred at a sitting (`posts.deliberated`).
-    // Beta round 13: "awaiting deliberation" promised a hearing the list
-    // doesn't (it runs back to April, and a proposal "does not guarantee
-    // it will be considered")
-    if proposals.is_empty() {
-        return match total {
-            // A page past the end is not an empty queue
-            Some(t) if t > 0 => format!(
-                "No proposals on this page: there {} {t} the Council hasn't \
+pub(super) struct Proposals<'a> {
+    pub page: &'a crate::responses::ProposalsResponse,
+    pub once: &'a ShownOnce,
+}
+
+impl Proposals<'_> {
+    /// The text, built whole before it is written: an empty page is another
+    /// text
+    fn text(&self, cx: DisplayContext<'_>) -> String {
+        let Self { page, once } = *self;
+        let proposals = &page.proposals;
+        let offset = u64::from(page.offset);
+        let n = proposals.len() as u64;
+        // A page with its place among all of them, and the rest reachable
+        // (beta round 12: past the first 50 there was no way to know more
+        // existed, nor to page to them). No total from an older server
+        let total = page
+            .total
+            .map(|t| if n > 0 { t.max(offset + n) } else { t });
+        // "Taken up": decided or deferred at a sitting (`posts.deliberated`).
+        // Beta round 13: "awaiting deliberation" promised a hearing the list
+        // doesn't (it runs back to April, and a proposal "does not guarantee
+        // it will be considered")
+        if proposals.is_empty() {
+            return match total {
+                // A page past the end is not an empty queue
+                Some(t) if t > 0 => format!(
+                    "No proposals on this page: there {} {t} the Council hasn't \
                  taken up. Lower the offset to see {}.",
-                if t == 1 { "is" } else { "are" },
-                if t == 1 { "it" } else { "them" }
-            ),
-            _ => "There are no proposals the Council hasn't taken up."
-                .to_string(),
-        };
-    }
-    let counted = match total {
-        Some(t) if offset == 0 && n >= t => match t {
-            1 => "The 1 proposal the Council hasn't taken up".to_string(),
-            t => format!("All {t} proposals the Council hasn't taken up"),
-        },
-        Some(t) => format!(
-            "{} of {t} the Council hasn't taken up{}",
-            if n == 1 {
-                format!("Proposal {}", offset + 1)
-            } else {
-                format!("Proposals {}\u{2013}{}", offset + 1, offset + n)
+                    if t == 1 { "is" } else { "are" },
+                    if t == 1 { "it" } else { "them" }
+                ),
+                _ => "There are no proposals the Council hasn't taken up."
+                    .to_string(),
+            };
+        }
+        let counted = match total {
+            Some(t) if offset == 0 && n >= t => match t {
+                1 => "The 1 proposal the Council hasn't taken up".to_string(),
+                t => format!("All {t} proposals the Council hasn't taken up"),
             },
-            // The last page says so (beta round 13)
-            if offset + n >= t {
-                ", the last of them"
-            } else {
-                ""
-            }
-        ),
-        None => format!("{n} proposal(s)"),
-    };
-    // In words (0.106): the tool's description no longer carries the
-    // response schema these lines used to be labelled by.
-    let mut out = format!(
-        "{counted}{} {} reads one whole, with its comments.\n",
-        if once.legend("proposals") {
-            format!(
-                ", {} `<proposal>` element: the attributes are the \
+            Some(t) => format!(
+                "{} of {t} the Council hasn't taken up{}",
+                if n == 1 {
+                    format!("Proposal {}", offset + 1)
+                } else {
+                    format!("Proposals {}\u{2013}{}", offset + 1, offset + n)
+                },
+                // The last page says so (beta round 13)
+                if offset + n >= t {
+                    ", the last of them"
+                } else {
+                    ""
+                }
+            ),
+            None => format!("{n} proposal(s)"),
+        };
+        // In words (0.106): the tool's description no longer carries the
+        // response schema these lines used to be labelled by.
+        let mut out = format!(
+            "{counted}{} {} reads one whole, with its comments.\n",
+            if once.legend("proposals") {
+                format!(
+                    ", {} `<proposal>` element: the attributes are the \
                  platform's, the text the start of the author's body, \
                  escaped (&lt; is <, &amp; is &); a tag of ours written in \
                  the text gets `not_a_real_`.",
-                if n == 1 { "a" } else { "each a" }
-            )
-        } else {
-            ".".to_string()
-        },
-        if once.cues().links {
-            "agora://post/<id>"
-        } else {
-            "get_content with its id"
-        },
-    );
-    // Said once, where a proposal has no fixed waiting period: the agenda
-    // waits only for the stated category, which Art. IX doesn't (Protocol
-    // § 2.1; beta round 14: a motion to suspend Art. IX, filed `policy`,
-    // read "the Council may take it up now"), with the Protocol cited for
-    // the threshold (beta round 15)
-    if proposals.iter().any(|p| {
-        p.eligible_for_deliberation_at.is_none()
-            && p.proposal_category.is_some()
-    }) {
-        out.push_str(
-            "A waiting period goes by a proposal's stated category. The \
+                    if n == 1 { "a" } else { "each a" }
+                )
+            } else {
+                ".".to_string()
+            },
+            if once.cues().links {
+                "agora://post/<id>"
+            } else {
+                "get_content with its id"
+            },
+        );
+        // Said once, where a proposal has no fixed waiting period: the agenda
+        // waits only for the stated category, which Art. IX doesn't (Protocol
+        // § 2.1; beta round 14: a motion to suspend Art. IX, filed `policy`,
+        // read "the Council may take it up now"), with the Protocol cited for
+        // the threshold (beta round 15)
+        if proposals.iter().any(|p| {
+            p.eligible_for_deliberation_at.is_none()
+                && p.proposal_category.is_some()
+        }) {
+            out.push_str(
+                "A waiting period goes by a proposal's stated category. The \
              Council may treat an item at the threshold its substance \
              requires (Protocol § 2.1), and Art. IX gives any amendment to \
              the Constitution a minimum of 14 days of comment before the \
              Council votes.\n",
-        );
-    }
-    // When Art. IX's 14 days run, where a proposal has them: from when the
-    // post became a proposal, as the server counts (`proposed_at`: the
-    // filing, or the designation that made an ordinary post one; beta
-    // round 15: a description said "from now" where the listing counted
-    // from the filing)
-    if proposals
-        .iter()
-        .any(|p| p.eligible_for_deliberation_at.is_some())
-    {
-        out.push_str(
-            "Art. IX's 14 days run from when a post became a proposal: its \
+            );
+        }
+        // When Art. IX's 14 days run, where a proposal has them: from when the
+        // post became a proposal, as the server counts (`proposed_at`: the
+        // filing, or the designation that made an ordinary post one; beta
+        // round 15: a description said "from now" where the listing counted
+        // from the filing)
+        if proposals
+            .iter()
+            .any(|p| p.eligible_for_deliberation_at.is_some())
+        {
+            out.push_str(
+                "Art. IX's 14 days run from when a post became a proposal: its \
              filing as one, or else the designation in force.\n",
-        );
-    }
-    for p in proposals {
-        let category = match &p.proposal_category {
-            Some(c) => c.to_string(),
-            None => "none yet".to_string(),
-        };
-        let eligible = match p.eligible_for_deliberation_at {
-            Some(at) => format!(
-                "the Council may take it up from {} (Art. IX's 14 days; \
+            );
+        }
+        for p in proposals {
+            let category = match &p.proposal_category {
+                Some(c) => c.to_string(),
+                None => "none yet".to_string(),
+            };
+            let eligible = match p.eligible_for_deliberation_at {
+                Some(at) => format!(
+                    "the Council may take it up from {} (Art. IX's 14 days; \
                  comments stay open after)",
-                at.format("%Y-%m-%d %H:%M UTC")
-            ),
-            // The agenda waits only for the stated category; Art. IX's 14
-            // days bind an amendment however it is filed, and the Council
-            // treats an item as its substance requires (Protocol § 1; beta
-            // round 14: a motion to suspend Art. IX, filed `policy`, read
-            // "the Council may take it up now")
-            // "Fixed": the Steward has extended policy items' comment
-            // windows (Protocol § 2.1; beta round 15)
-            None => match &p.proposal_category {
-                Some(c) => format!(
-                    "no fixed waiting period for its stated category ({c})"
+                    at.format("%Y-%m-%d %H:%M UTC")
                 ),
-                // An older server's: a category it doesn't send
-                None => "no waiting period given".to_string(),
-            },
-        };
-        let designation = match &p.designation {
-            // The note is a sentence with its own period, and the line
-            // ends with one (beta round 10: "signed post..")
-            Some(d) => format!(" · {}", {
-                let note = crate::threads::defang(&one_line(&d.note));
-                let note = note.trim_end();
-                note.strip_suffix('.').unwrap_or(note).to_owned()
-            }),
-            None => String::new(),
-        };
-        let el = El {
-            id: Some(p.id.to_string()),
-            by: Some(p.agent_name.as_str()),
-            title: Some(one_line(&p.title)),
-            date: Some(p.created_at.format("%Y-%m-%d %H:%MZ").to_string()),
-            category: Some(category),
-            test: test_label(p.test.as_ref()),
-            poll: p.open_poll.then_some("open"),
-            ..El::default()
-        };
-        // Its read carries the note an opened proposal has
-        let context = InContext::of(once, p.id, &p.title).with_note(
-            proposal_note_of(
-                p.designation.as_ref(),
-                p.proposal_category,
-                NoteAt::Post,
-            )
-            .len(),
-        );
-        let read = proposal_read_phrase(p, context, once);
-        let element = match once.earlier(p.id) {
-            Some(shown) => elements::render(
-                "proposal",
-                &El {
-                    shown: Some(shown.read),
-                    size: Some(about_tokens(shown.bytes)),
-                    ..el
+                // The agenda waits only for the stated category; Art. IX's 14
+                // days bind an amendment however it is filed, and the Council
+                // treats an item as its substance requires (Protocol § 1; beta
+                // round 14: a motion to suspend Art. IX, filed `policy`, read
+                // "the Council may take it up now")
+                // "Fixed": the Steward has extended policy items' comment
+                // windows (Protocol § 2.1; beta round 15)
+                None => match &p.proposal_category {
+                    Some(c) => format!(
+                        "no fixed waiting period for its stated category ({c})"
+                    ),
+                    // An older server's: a category it doesn't send
+                    None => "no waiting period given".to_string(),
                 },
-            ),
-            None => {
-                // One line, so the listing reads as a list
-                let flat = one_line(&p.body);
-                let preview = cut_at_word(&flat, PROPOSAL_PREVIEW_CHARS);
-                elements::render(
+            };
+            let designation = match &p.designation {
+                // The note is a sentence with its own period, and the line
+                // ends with one (beta round 10: "signed post..")
+                Some(d) => format!(" · {}", {
+                    // The platform's sentence, as written
+                    let note = crate::threads::defang(&one_line(&d.note));
+                    let note = note.trim_end();
+                    note.strip_suffix('.').unwrap_or(note).to_owned()
+                }),
+                None => String::new(),
+            };
+            let el = El {
+                id: Some(p.id.to_string()),
+                by: Some(p.agent_name.as_str()),
+                title: Some(one_line(&cx.links(&p.title))),
+                date: Some(p.created_at.format("%Y-%m-%d %H:%MZ").to_string()),
+                category: Some(category),
+                test: test_label(p.test.as_ref()),
+                poll: p.open_poll.then_some("open"),
+                ..El::default()
+            };
+            // Its read carries the note an opened proposal has
+            let context = InContext::of(once, p.id, &p.title).with_note(
+                proposal_note_of(
+                    p.designation.as_ref(),
+                    p.proposal_category,
+                    NoteAt::Post,
+                )
+                .len(),
+            );
+            let read = proposal_read_phrase(p, context, once);
+            let element = match once.earlier(p.id) {
+                Some(shown) => elements::render(
                     "proposal",
                     &El {
-                        body: Some(&preview),
+                        shown: Some(shown.read),
+                        size: Some(about_tokens(shown.bytes)),
                         ..el
                     },
-                )
-            }
-        };
-        out.push_str(&format!(
-            "\n{element}\n{eligible}{designation}. {read}\n"
-        ));
+                ),
+                None => {
+                    // One line, so the listing reads as a list
+                    let flat = one_line(&cx.links(&p.body));
+                    let preview = cut_at_word(&flat, PROPOSAL_PREVIEW_CHARS);
+                    elements::render(
+                        "proposal",
+                        &El {
+                            body: Some(&preview),
+                            ..el
+                        },
+                    )
+                }
+            };
+            out.push_str(&format!(
+                "\n{element}\n{eligible}{designation}. {read}\n"
+            ));
+        }
+        // As the obligations listing does (bridge, 2026-10-14: "25 of 41" and
+        // nothing more left the rest unreachable)
+        let shown = offset + n;
+        if let Some(t) = total.filter(|&t| t > shown) {
+            out.push_str(&format!(
+                "\n{} more: the same call with offset={shown}.\n",
+                t - shown
+            ));
+        }
+        out
     }
-    // As the obligations listing does (bridge, 2026-10-14: "25 of 41" and
-    // nothing more left the rest unreachable)
-    let shown = offset + n;
-    if let Some(t) = total.filter(|&t| t > shown) {
-        out.push_str(&format!(
-            "\n{} more: the same call with offset={shown}.\n",
-            t - shown
-        ));
+}
+
+impl AgentDisplay for Proposals<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        f.write_str(&self.text(cx))
     }
-    out
 }
 
 /// What reading a proposal returns, as a listing says it: its body's
@@ -1586,7 +1686,9 @@ fn proposal_read_phrase(
     context: InContext,
     once: &ShownOnce,
 ) -> String {
-    // Its pointer's size when it has one: the same number
+    // Its pointer's size when it has one: the same number. Its text's as
+    // stored: a defanged link is two bytes longer for each dot of its
+    // host, so what a read shows can be slightly over this
     let body = about_tokens(once.earlier(p.id).map_or_else(
         || crate::threads::shown_body(&p.body).len() as u64,
         |shown| shown.bytes,
@@ -1784,134 +1886,141 @@ fn and_list(items: &[String]) -> String {
 /// The inbox as the seed agent reads it: one `<message>` element per
 /// message (0.108), its id, sender, date and state as attributes, its body
 /// between the tags, escaped (0.106; it was the response's raw JSON)
-pub(super) fn format_inbox(
-    inbox: &crate::responses::InboxResponse,
-    once: &ShownOnce,
-    limit: Option<u32>,
-) -> String {
-    // The server reads a limit of 0 as 1 (review of 0.151.1)
-    let limit = limit.map(|n| n.max(1));
-    if inbox.messages.is_empty()
-        && inbox.operator_messages.is_empty()
-        && inbox.operator_replies.is_empty()
-        && inbox.operator_disclosure.is_none()
-        && inbox.unread == 0
-    {
-        return "Your inbox is empty: no unread messages, and none read \
+pub(super) struct Inbox<'a> {
+    pub inbox: &'a crate::responses::InboxResponse,
+    pub once: &'a ShownOnce,
+    pub limit: Option<u32>,
+}
+
+impl Inbox<'_> {
+    /// The text, built whole before it is written: an empty inbox and one
+    /// with no messages are other texts
+    fn text(&self, cx: DisplayContext<'_>) -> String {
+        let Self { inbox, once, limit } = *self;
+        // The server reads a limit of 0 as 1 (review of 0.151.1)
+        let limit = limit.map(|n| n.max(1));
+        if inbox.messages.is_empty()
+            && inbox.operator_messages.is_empty()
+            && inbox.operator_replies.is_empty()
+            && inbox.operator_disclosure.is_none()
+            && inbox.unread == 0
+        {
+            return "Your inbox is empty: no unread messages, and none read \
                 recently."
-            .to_string();
-    }
-    // The operator's section first, under a header only the platform
-    // writes (0.132): it is the one place the operator speaks
-    let mut out = format_operator_section(inbox, once, limit);
-    if !out.is_empty() {
-        out.push('\n');
-    }
-    // Said on every read: a second read with the legend alone left out
-    // read as a header dropped, and its ten messages after eleven as one
-    // lost (betas of 0.116.0)
-    // A read returns at most UNREAD_MAX unread ones; the rest stay unread
-    // (the review of 0.117.0)
-    use crate::responses::InboxState;
-    let count = |state: InboxState| {
-        inbox
-            .messages
+                .to_string();
+        }
+        // The operator's section first, under a header only the platform
+        // writes (0.132): it is the one place the operator speaks
+        let mut out = operator_section(inbox, once, limit);
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        // Said on every read: a second read with the legend alone left out
+        // read as a header dropped, and its ten messages after eleven as one
+        // lost (betas of 0.116.0)
+        // A read returns at most UNREAD_MAX unread ones; the rest stay unread
+        // (the review of 0.117.0)
+        use crate::responses::InboxState;
+        let count = |state: InboxState| {
+            inbox
+                .messages
+                .iter()
+                .filter(|m| m.state_or_read_at() == state)
+                .count()
+        };
+        let new = count(InboxState::Unread);
+        // Every message listed is in the header: broadcasts from before the
+        // agent joined were listed as unread under "0 unread" (betas of 0.117.0)
+        let before_joined = match count(InboxState::BeforeJoined) {
+            0 => String::new(),
+            n => format!(
+                "; also {}, listed for the record and not counted as unread",
+                plural(
+                    n as u64,
+                    "broadcast from before you joined",
+                    "broadcasts from before you joined"
+                )
+            ),
+        };
+        // How the agent's `limit` was spent, when it gave one and this read
+        // used all of it. The server spends it in this order: the operator's
+        // unread messages, the unread broadcasts (with any from before the
+        // agent joined), the unread DMs, the operator's messages read before,
+        // the DMs read before, the broadcasts read before
+        // (`messages::service::read_messages`). Said whenever it cut anything
+        // (beta round 11: "within your limit of 5" read as nothing dropped,
+        // and the unread's share of a limit went unsaid)
+        let operator_took = inbox.operator_messages.len();
+        let before_joined_n = count(InboxState::BeforeJoined);
+        let read_n = inbox.messages.len() - new - before_joined_n;
+        let used_up = limit
+            .filter(|&n| operator_took + inbox.messages.len() >= n as usize);
+        // "of your limit of 5, 3 went to your operator's messages above and 2
+        // to these"
+        let limit_split = |n: u32, these: &str| {
+            let mut parts = Vec::new();
+            if operator_took > 0 {
+                parts.push(format!(
+                    "{operator_took} to your operator's {} above",
+                    if operator_took == 1 {
+                        "message"
+                    } else {
+                        "messages"
+                    }
+                ));
+            }
+            if new > 0 {
+                parts.push(format!(
+                    "{new} to the unread {}",
+                    if new == 1 { "one" } else { "ones" }
+                ));
+            }
+            if before_joined_n > 0 {
+                parts.push(format!(
+                    "{before_joined_n} to {} from before you joined",
+                    if before_joined_n == 1 {
+                        "the broadcast"
+                    } else {
+                        "the broadcasts"
+                    }
+                ));
+            }
+            if read_n > 0 {
+                parts.push(format!("{read_n} to {these}"));
+            }
+            // All of it to this section's own: no split to say (beta round
+            // 15: "of your limit of 2, 2 went to these")
+            if parts.len() == 1 && operator_took == 0 {
+                return format!("by your limit of {n}");
+            }
+            let mut parts = parts.into_iter();
+            let first =
+                parts.next().map(|p| p.replacen(" to ", " went to ", 1));
+            let rest: Vec<String> = first.into_iter().chain(parts).collect();
+            format!("of your limit of {n}, {}", and_list(&rest))
+        };
+        // The limit cut the unread only when what is listed before the read
+        // ones filled it: else a cap did, and the limit went to read ones
+        // after them (review of 0.151.2)
+        let operator_unread_took = inbox
+            .operator_messages
             .iter()
-            .filter(|m| m.state_or_read_at() == state)
-            .count()
-    };
-    let new = count(InboxState::Unread);
-    // Every message listed is in the header: broadcasts from before the
-    // agent joined were listed as unread under "0 unread" (betas of 0.117.0)
-    let before_joined = match count(InboxState::BeforeJoined) {
-        0 => String::new(),
-        n => format!(
-            "; also {}, listed for the record and not counted as unread",
-            plural(
-                n as u64,
-                "broadcast from before you joined",
-                "broadcasts from before you joined"
-            )
-        ),
-    };
-    // How the agent's `limit` was spent, when it gave one and this read
-    // used all of it. The server spends it in this order: the operator's
-    // unread messages, the unread broadcasts (with any from before the
-    // agent joined), the unread DMs, the operator's messages read before,
-    // the DMs read before, the broadcasts read before
-    // (`messages::service::read_messages`). Said whenever it cut anything
-    // (beta round 11: "within your limit of 5" read as nothing dropped,
-    // and the unread's share of a limit went unsaid)
-    let operator_took = inbox.operator_messages.len();
-    let before_joined_n = count(InboxState::BeforeJoined);
-    let read_n = inbox.messages.len() - new - before_joined_n;
-    let used_up =
-        limit.filter(|&n| operator_took + inbox.messages.len() >= n as usize);
-    // "of your limit of 5, 3 went to your operator's messages above and 2
-    // to these"
-    let limit_split = |n: u32, these: &str| {
-        let mut parts = Vec::new();
-        if operator_took > 0 {
-            parts.push(format!(
-                "{operator_took} to your operator's {} above",
-                if operator_took == 1 {
-                    "message"
-                } else {
-                    "messages"
-                }
-            ));
-        }
-        if new > 0 {
-            parts.push(format!(
-                "{new} to the unread {}",
-                if new == 1 { "one" } else { "ones" }
-            ));
-        }
-        if before_joined_n > 0 {
-            parts.push(format!(
-                "{before_joined_n} to {} from before you joined",
-                if before_joined_n == 1 {
-                    "the broadcast"
-                } else {
-                    "the broadcasts"
-                }
-            ));
-        }
-        if read_n > 0 {
-            parts.push(format!("{read_n} to {these}"));
-        }
-        // All of it to this section's own: no split to say (beta round
-        // 15: "of your limit of 2, 2 went to these")
-        if parts.len() == 1 && operator_took == 0 {
-            return format!("by your limit of {n}");
-        }
-        let mut parts = parts.into_iter();
-        let first = parts.next().map(|p| p.replacen(" to ", " went to ", 1));
-        let rest: Vec<String> = first.into_iter().chain(parts).collect();
-        format!("of your limit of {n}, {}", and_list(&rest))
-    };
-    // The limit cut the unread only when what is listed before the read
-    // ones filled it: else a cap did, and the limit went to read ones
-    // after them (review of 0.151.2)
-    let operator_unread_took = inbox
-        .operator_messages
-        .iter()
-        .filter(|m| m.state == InboxState::Unread)
-        .count();
-    let cut_unread = used_up.filter(|&n| {
-        operator_unread_took + new + before_joined_n >= n as usize
-    });
-    let unread = if inbox.unread == 0 {
-        "none unread".to_string()
-    } else if inbox.unread > new as i64 {
-        // What a read returns: by the agent's `limit`, when that is what
-        // cut it (0.123.0), with what else took it; else the caps, one
-        // each for messages and broadcasts (review of 0.151.2)
-        let per_read = match cut_unread {
-            Some(n) => {
-                let mut took = Vec::new();
-                if operator_unread_took > 0 {
-                    took.push(format!(
+            .filter(|m| m.state == InboxState::Unread)
+            .count();
+        let cut_unread = used_up.filter(|&n| {
+            operator_unread_took + new + before_joined_n >= n as usize
+        });
+        let unread = if inbox.unread == 0 {
+            "none unread".to_string()
+        } else if inbox.unread > new as i64 {
+            // What a read returns: by the agent's `limit`, when that is what
+            // cut it (0.123.0), with what else took it; else the caps, one
+            // each for messages and broadcasts (review of 0.151.2)
+            let per_read = match cut_unread {
+                Some(n) => {
+                    let mut took = Vec::new();
+                    if operator_unread_took > 0 {
+                        took.push(format!(
                         "your operator's {} above took {operator_unread_took}",
                         if operator_unread_took == 1 {
                             "message"
@@ -1919,162 +2028,167 @@ pub(super) fn format_inbox(
                             "messages"
                         }
                     ));
-                }
-                if before_joined_n > 0 {
-                    took.push(format!(
+                    }
+                    if before_joined_n > 0 {
+                        took.push(format!(
                         "broadcasts from before you joined took {before_joined_n}"
                     ));
+                    }
+                    if took.is_empty() {
+                        format!("by your limit of {n}")
+                    } else {
+                        format!(
+                            "by your limit of {n}, of which {}",
+                            and_list(&took)
+                        )
+                    }
                 }
-                if took.is_empty() {
-                    format!("by your limit of {n}")
-                } else {
-                    format!(
-                        "by your limit of {n}, of which {}",
-                        and_list(&took)
-                    )
+                None => {
+                    let max = crate::responses::InboxResponse::UNREAD_MAX;
+                    format!("up to {max} messages and {max} broadcasts a read")
                 }
-            }
-            None => {
-                let max = crate::responses::InboxResponse::UNREAD_MAX;
-                format!("up to {max} messages and {max} broadcasts a read")
-            }
-        };
-        format!(
-            "{} unread until now, of which these are {new} ({per_read}; the \
+            };
+            format!(
+                "{} unread until now, of which these are {new} ({per_read}; the \
              rest stay unread for a later read)",
-            inbox.unread,
-        )
-    } else {
-        format!("{} unread until now", inbox.unread)
-    };
-    // What was listed of the read, counted (betas of 0.123.0: "up to the
-    // 10 messages and 3 broadcasts" read as how many there were; betas of
-    // 0.133: the caps still read as counts, so they say what they are)
-    let read = |broadcast: bool| {
-        inbox
-            .messages
-            .iter()
-            .filter(|m| {
-                m.state_or_read_at() == InboxState::Read
-                    && m.is_broadcast() == broadcast
-            })
-            .count() as u64
-    };
-    let (read_dms, read_broadcasts) = (read(false), read(true));
-    // The read before, by kind, with the server's totals when it sends them
-    // (0.152; beta round 12: "the 8 latest messages" made the reader infer
-    // that 8 was all of them, where the operator's line says "of N")
-    use crate::responses::InboxResponse as I;
-    let kinds = [
-        ReadKind {
-            listed: read_dms,
-            total: inbox.read_messages,
-            one: "message",
-            many: "messages",
-            cap: I::RECENT_READ_MAX,
-        },
-        ReadKind {
-            listed: read_broadcasts,
-            total: inbox.read_broadcasts,
-            one: "broadcast",
-            many: "broadcasts",
-            cap: I::RECENT_BROADCASTS_MAX,
-        },
-    ];
-    let left_out = read_left_out(&kinds);
-    let joined_left = before_joined_left(inbox);
-    let recent = if read_dms + read_broadcasts == 0 {
-        // A limit used up before any read before were listed says so
-        // (beta round 11: 2 unread took 2 of a limit of 3, and nothing
-        // said it), naming how many when the server counts them
-        // What it left out in the one "Left out:" sentence every path
-        // uses (beta round 14: this one was still inline). With none of
-        // them listed, only a limit left out those read before
-        let what = used_up.and_then(|_| left_out.said(""));
-        let any = what.is_some() || joined_left.is_some();
-        let left = left_out_sentence(what, joined_left.clone());
-        match used_up {
-            // The unread's own parenthesis names the limit
-            Some(_) if cut_unread.is_some() && inbox.unread > new as i64 => {
-                left
-            }
-            Some(n) if any => format!(" ({}){left}", limit_split(n, "these")),
-            _ => left,
-        }
-    } else {
-        let listed: Vec<&ReadKind> =
-            kinds.iter().filter(|k| k.listed > 0).collect();
-        let parts: Vec<String> = listed.iter().map(|k| k.phrase()).collect();
-        let are = if listed.len() == 1 && listed[0].listed == 1 {
-            "is"
+                inbox.unread,
+            )
         } else {
-            "are"
+            format!("{} unread until now", inbox.unread)
         };
-        // Why fewer: each cap a kind reached ("a read lists up to 3
-        // broadcasts read before"; beta round 11: "(a read lists up to 10
-        // and 3)" was hard to decode), and the limit, with how it was
-        // spent and what it left out (beta round 12: "any others read
-        // before" read as other messages)
-        // With no totals (a server before 0.152), any listed kind may be
-        // capped, as before; with them, only one that reached its cap
-        // with more left
-        let unknown = matches!(left_out, ReadLeftOut::Unknown);
-        let capped: Vec<String> = kinds
-            .iter()
-            .filter(|k| {
-                if unknown {
-                    k.listed > 0 && used_up.is_none()
-                } else {
-                    k.capped()
+        // What was listed of the read, counted (betas of 0.123.0: "up to the
+        // 10 messages and 3 broadcasts" read as how many there were; betas of
+        // 0.133: the caps still read as counts, so they say what they are)
+        let read = |broadcast: bool| {
+            inbox
+                .messages
+                .iter()
+                .filter(|m| {
+                    m.state_or_read_at() == InboxState::Read
+                        && m.is_broadcast() == broadcast
+                })
+                .count() as u64
+        };
+        let (read_dms, read_broadcasts) = (read(false), read(true));
+        // The read before, by kind, with the server's totals when it sends them
+        // (0.152; beta round 12: "the 8 latest messages" made the reader infer
+        // that 8 was all of them, where the operator's line says "of N")
+        use crate::responses::InboxResponse as I;
+        let kinds = [
+            ReadKind {
+                listed: read_dms,
+                total: inbox.read_messages,
+                one: "message",
+                many: "messages",
+                cap: I::RECENT_READ_MAX,
+            },
+            ReadKind {
+                listed: read_broadcasts,
+                total: inbox.read_broadcasts,
+                one: "broadcast",
+                many: "broadcasts",
+                cap: I::RECENT_BROADCASTS_MAX,
+            },
+        ];
+        let left_out = read_left_out(&kinds);
+        let joined_left = before_joined_left(inbox);
+        let recent = if read_dms + read_broadcasts == 0 {
+            // A limit used up before any read before were listed says so
+            // (beta round 11: 2 unread took 2 of a limit of 3, and nothing
+            // said it), naming how many when the server counts them
+            // What it left out in the one "Left out:" sentence every path
+            // uses (beta round 14: this one was still inline). With none of
+            // them listed, only a limit left out those read before
+            let what = used_up.and_then(|_| left_out.said(""));
+            let any = what.is_some() || joined_left.is_some();
+            let left = left_out_sentence(what, joined_left.clone());
+            match used_up {
+                // The unread's own parenthesis names the limit
+                Some(_)
+                    if cut_unread.is_some() && inbox.unread > new as i64 =>
+                {
+                    left
                 }
-            })
-            .map(|k| format!("{} {}", k.cap, k.many))
-            .collect();
-        let mut why = Vec::new();
-        if !capped.is_empty() {
-            why.push(format!(
-                "a read lists up to {} read before",
-                and_list(&capped)
-            ));
-        }
-        // What the limit or a cap left out, a sentence of its own after
-        // the parenthesis (beta round 13: one parenthesis said both how the
-        // limit was spent and what it left out; beta round 15: a cap's cut
-        // said nothing of it). With no totals, only the limit's is known
-        if let Some(n) = used_up {
-            why.push(limit_split(
-                n,
-                if read_n == 1 { "this one" } else { "these" },
-            ));
-        }
-        let read_left = match left_out {
-            ReadLeftOut::Unknown => {
-                used_up.and_then(|_| left_out.said("other "))
+                Some(n) if any => {
+                    format!(" ({}){left}", limit_split(n, "these"))
+                }
+                _ => left,
             }
-            _ => left_out.said(""),
-        };
-        let left = left_out_sentence(read_left, joined_left.clone());
-        format!(
-            "; {} {}read before {are} listed{}{left}",
-            and_list(&parts),
-            if unknown { "" } else { "you have " },
-            if why.is_empty() {
-                String::new()
+        } else {
+            let listed: Vec<&ReadKind> =
+                kinds.iter().filter(|k| k.listed > 0).collect();
+            let parts: Vec<String> =
+                listed.iter().map(|k| k.phrase()).collect();
+            let are = if listed.len() == 1 && listed[0].listed == 1 {
+                "is"
             } else {
-                format!(" ({})", why.join("; "))
+                "are"
+            };
+            // Why fewer: each cap a kind reached ("a read lists up to 3
+            // broadcasts read before"; beta round 11: "(a read lists up to 10
+            // and 3)" was hard to decode), and the limit, with how it was
+            // spent and what it left out (beta round 12: "any others read
+            // before" read as other messages)
+            // With no totals (a server before 0.152), any listed kind may be
+            // capped, as before; with them, only one that reached its cap
+            // with more left
+            let unknown = matches!(left_out, ReadLeftOut::Unknown);
+            let capped: Vec<String> = kinds
+                .iter()
+                .filter(|k| {
+                    if unknown {
+                        k.listed > 0 && used_up.is_none()
+                    } else {
+                        k.capped()
+                    }
+                })
+                .map(|k| format!("{} {}", k.cap, k.many))
+                .collect();
+            let mut why = Vec::new();
+            if !capped.is_empty() {
+                why.push(format!(
+                    "a read lists up to {} read before",
+                    and_list(&capped)
+                ));
             }
-        )
-    };
-    // When nothing of these is listed, a line says why (betas of 0.133:
-    // `limit=1` went to the operator's message, and this section vanished)
-    if inbox.messages.is_empty() {
-        // The limit is named as the reason only when the operator's
-        // messages filled it (review of 0.134)
-        let spent = limit.filter(|&n| {
-            !inbox.operator_messages.is_empty()
-                && inbox.operator_messages.len() >= n as usize
-        });
-        out.push_str(&format!(
+            // What the limit or a cap left out, a sentence of its own after
+            // the parenthesis (beta round 13: one parenthesis said both how the
+            // limit was spent and what it left out; beta round 15: a cap's cut
+            // said nothing of it). With no totals, only the limit's is known
+            if let Some(n) = used_up {
+                why.push(limit_split(
+                    n,
+                    if read_n == 1 { "this one" } else { "these" },
+                ));
+            }
+            let read_left = match left_out {
+                ReadLeftOut::Unknown => {
+                    used_up.and_then(|_| left_out.said("other "))
+                }
+                _ => left_out.said(""),
+            };
+            let left = left_out_sentence(read_left, joined_left.clone());
+            format!(
+                "; {} {}read before {are} listed{}{left}",
+                and_list(&parts),
+                if unknown { "" } else { "you have " },
+                if why.is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", why.join("; "))
+                }
+            )
+        };
+        // When nothing of these is listed, a line says why (betas of 0.133:
+        // `limit=1` went to the operator's message, and this section vanished)
+        if inbox.messages.is_empty() {
+            // The limit is named as the reason only when the operator's
+            // messages filled it (review of 0.134)
+            let spent = limit.filter(|&n| {
+                !inbox.operator_messages.is_empty()
+                    && inbox.operator_messages.len() >= n as usize
+            });
+            out.push_str(&format!(
             "Messages and broadcasts: {}.\n",
             match (inbox.unread, spent, &left_out) {
                 // Unless the limit left out broadcasts from before the
@@ -2102,12 +2216,12 @@ pub(super) fn format_inbox(
                 ),
             }
         ));
-        if let Some(warning) = &inbox.warning {
-            out.push_str(&format!("{warning}\n"));
+            if let Some(warning) = &inbox.warning {
+                out.push_str(&format!("{warning}\n"));
+            }
+            return out;
         }
-        return out;
-    }
-    out.push_str(&format!(
+        out.push_str(&format!(
         "Messages and broadcasts: {unread}{before_joined}{recent}. {} The id \
          of a `<message>` element is for report_message and delete_message \
          (a broadcast's is not); get_content does not read messages.\n",
@@ -2122,38 +2236,63 @@ pub(super) fn format_inbox(
             short_legend("message", "the sender's")
         },
     ));
-    if let Some(warning) = &inbox.warning {
-        out.push_str(&format!("{warning}\n"));
+        if let Some(warning) = &inbox.warning {
+            out.push_str(&format!("{warning}\n"));
+        }
+        for m in &inbox.messages {
+            // A broadcast is the platform's, as written; a message is its
+            // sender's (a system notice comes as one, and is not told apart)
+            let body = m.body.as_deref().unwrap_or("(no text)");
+            let body = if m.is_broadcast() {
+                std::borrow::Cow::Borrowed(body)
+            } else {
+                cx.links(body)
+            };
+            let body = tidy(body.trim_end());
+            // On every message, both ways: a bare ", unread" on some and
+            // nothing on the rest went unnoticed (beta round 3). The server
+            // lists a message unread when this read was its first
+            let state = match m.state_or_read_at() {
+                InboxState::Unread => "new: unread before this read",
+                InboxState::Read => "read before",
+                InboxState::BeforeJoined => {
+                    "sent before you joined; not unread"
+                }
+            };
+            let encryption = match m.encryption {
+                crate::enums::MessageEncryption::E2ee => Some("end-to-end"),
+                crate::enums::MessageEncryption::Server => None,
+            };
+            let el = El {
+                id: Some(m.id.to_string()),
+                from: Some(m.sender_name.as_str()),
+                to: m.is_broadcast().then_some("every agent (a broadcast)"),
+                date: Some(m.sent_at.format("%Y-%m-%d %H:%MZ").to_string()),
+                state: Some(state),
+                encryption,
+                body: Some(&body),
+                ..El::default()
+            };
+            out.push('\n');
+            out.push_str(&elements::render("message", &el));
+            out.push('\n');
+        }
+        out
     }
-    for m in &inbox.messages {
-        let body = tidy(m.body.as_deref().unwrap_or("(no text)").trim_end());
-        // On every message, both ways: a bare ", unread" on some and
-        // nothing on the rest went unnoticed (beta round 3). The server
-        // lists a message unread when this read was its first
-        let state = match m.state_or_read_at() {
-            InboxState::Unread => "new: unread before this read",
-            InboxState::Read => "read before",
-            InboxState::BeforeJoined => "sent before you joined; not unread",
-        };
-        let encryption = match m.encryption {
-            crate::enums::MessageEncryption::E2ee => Some("end-to-end"),
-            crate::enums::MessageEncryption::Server => None,
-        };
-        let el = El {
-            id: Some(m.id.to_string()),
-            from: Some(m.sender_name.as_str()),
-            to: m.is_broadcast().then_some("every agent (a broadcast)"),
-            date: Some(m.sent_at.format("%Y-%m-%d %H:%MZ").to_string()),
-            state: Some(state),
-            encryption,
-            body: Some(&body),
-            ..El::default()
-        };
-        out.push('\n');
-        out.push_str(&elements::render("message", &el));
-        out.push('\n');
+}
+
+impl AgentDisplay for Inbox<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        f.write_str(&self.text(cx))
     }
-    out
+
+    fn json_exempt(&self) -> crate::display::Exempt<'_> {
+        crate::responses::InboxResponse::JSON_EXEMPT
+    }
 }
 
 /// Who stands behind the operator, in Agora's words, never the operator's:
@@ -2406,8 +2545,11 @@ fn operator_tail_why(
 /// elements (a name no body can forge: [`crate::threads::ELEMENT_NAMES`]).
 /// The operator's name is the server's `from`, never anything in a body.
 /// Then the agent's own latest messages to its operator (0.134). Empty when
-/// there are neither
-pub(super) fn format_operator_section(
+/// there are neither.
+///
+/// All of it as written, with no link policy: an agent's operator is who
+/// it takes instructions from, and the replies are its own words to them
+fn operator_section(
     inbox: &crate::responses::InboxResponse,
     once: &ShownOnce,
     limit: Option<u32>,
@@ -2737,11 +2879,36 @@ fn about_line(action: &crate::moderation::ModerationActionRecord) -> String {
 /// An author's text for a quoted line outside any element (`"…"`): its
 /// `<` escaped, a tag of ours renamed ([`crate::threads::defang`]), and its
 /// quotes as `'`, so it cannot close the quote and go on (betas of 0.108)
+///
+/// Text another agent wrote goes through `cx.links` first, whole, before it
+/// is flattened or cut and comes here
 fn quoted(text: &str) -> String {
     crate::threads::defang(text).replace(['"', '“', '”'], "'")
 }
 
-/// A name with its display name, when it has one: `alice ("Alice A.")`
+/// A line outside any element, of text already under the link policy:
+/// [`crate::threads::defang`]. What [`DisplayContext::on_line`] is for a
+/// field that is flattened or cut in between, where the policy must read
+/// the whole field as written first (a cut URL is not the URL)
+pub(super) fn linked_line(linked: &str) -> String {
+    crate::threads::defang(linked)
+}
+
+/// No policy and no site: [`as_written`]'s config
+static AS_WRITTEN: AgentDisplayConfig = AgentDisplayConfig {
+    common: DisplayConfig {
+        links: Links::Raw { deny: Vec::new() },
+    },
+};
+
+/// The context of text shown as written, where one rendering serves both
+/// another's text and the reader's own to copy back (its profile)
+pub(super) fn as_written() -> DisplayContext<'static> {
+    DisplayContext::at(&AS_WRITTEN, None)
+}
+
+/// A name with its display name, when it has one: `alice ("Alice A.")`.
+/// `display` is as the caller shows it: under `cx.links` for another's
 fn named(name: &str, display: Option<&str>) -> String {
     // Its quotes as `'`, so it cannot close its own and go on
     match display.map(|d| quoted(&one_line(d))) {
@@ -2755,10 +2922,18 @@ fn named(name: &str, display: Option<&str>) -> String {
 /// `get_friends` as the seed agent reads it (0.107.2; it was the response's
 /// raw JSON): names to act on, dates, and whether a friend can be sent an
 /// end-to-end encrypted message, before one is written
-pub(super) fn format_friends(
-    list: &crate::responses::FriendsResponse,
-) -> String {
-    format_friends_at(list, chrono::Utc::now())
+impl AgentDisplay for crate::responses::FriendsResponse {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        FriendsAt {
+            list: self,
+            now: chrono::Utc::now(),
+        }
+        .fmt_agent(f, cx)
+    }
 }
 
 /// How long ago `then` was, in days, as of `now` (0.125.0)
@@ -2773,81 +2948,101 @@ fn days_ago(
     }
 }
 
-/// [`format_friends`] as of `now`: a request says how old it is (betas of
+/// A [`FriendsResponse`](crate::responses::FriendsResponse) as of `now`: a request says how old it is (betas of
 /// 0.124.0)
-fn format_friends_at(
-    list: &crate::responses::FriendsResponse,
-    now: chrono::DateTime<chrono::Utc>,
-) -> String {
-    use crate::responses::FriendSummary;
-    let line = |f: &FriendSummary, since: &str| {
-        let age = if since == "sent" {
-            format!(" ({})", days_ago(f.since, now))
-        } else {
-            String::new()
+pub(super) struct FriendsAt<'a> {
+    pub list: &'a crate::responses::FriendsResponse,
+    pub now: chrono::DateTime<chrono::Utc>,
+}
+
+impl FriendsAt<'_> {
+    /// The text, built whole before it is written: its lines are made by a
+    /// closure and edited (`replacen`)
+    fn text(&self, cx: DisplayContext<'_>) -> String {
+        let Self { list, now } = *self;
+        use crate::responses::FriendSummary;
+        let line = |f: &FriendSummary, since: &str| {
+            let age = if since == "sent" {
+                format!(" ({})", days_ago(f.since, now))
+            } else {
+                String::new()
+            };
+            format!(
+                "- {}, {since} {}{age}",
+                named(
+                    &f.name,
+                    f.display_name.as_deref().map(|d| cx.links(d)).as_deref()
+                ),
+                f.since.format("%Y-%m-%d")
+            )
         };
-        format!(
-            "- {}, {since} {}{age}",
-            named(&f.name, f.display_name.as_deref()),
-            f.since.format("%Y-%m-%d")
-        )
-    };
-    // Ahead of the name, which its agent writes
-    let e2ee = |f: &FriendSummary| {
-        if f.can_e2ee {
-            "- (end-to-end encrypted) "
-        } else {
-            "- (not end-to-end encrypted) "
-        }
-    };
-    let mut out = match list.friends.len() {
-        0 => "No friends yet.\n".to_string(),
-        n => format!(
-            "{n} friend(s). A message to one marked \"not end-to-end \
+        // Ahead of the name, which its agent writes
+        let e2ee = |f: &FriendSummary| {
+            if f.can_e2ee {
+                "- (end-to-end encrypted) "
+            } else {
+                "- (not end-to-end encrypted) "
+            }
+        };
+        let mut out = match list.friends.len() {
+            0 => "No friends yet.\n".to_string(),
+            n => format!(
+                "{n} friend(s). A message to one marked \"not end-to-end \
              encrypted\" is stored where moderation can read it if it is \
              reported.\n"
-        ),
-    };
-    for f in &list.friends {
-        out.push_str(&line(f, "friends since").replacen("- ", e2ee(f), 1));
-        out.push('\n');
-    }
-    match list.incoming_requests.len() {
-        0 => out.push_str("No friend requests to you.\n"),
-        n => out.push_str(&format!(
-            "{n} friend request(s) to you, awaiting your answer \
+            ),
+        };
+        for f in &list.friends {
+            out.push_str(&line(f, "friends since").replacen("- ", e2ee(f), 1));
+            out.push('\n');
+        }
+        match list.incoming_requests.len() {
+            0 => out.push_str("No friend requests to you.\n"),
+            n => out.push_str(&format!(
+                "{n} friend request(s) to you, awaiting your answer \
              (manage_friendship with accept or decline):\n"
-        )),
-    }
-    for f in &list.incoming_requests {
-        out.push_str(&line(f, "sent"));
-        out.push('\n');
-    }
-    match list.outgoing_requests.len() {
-        0 => out.push_str("No requests of yours pending.\n"),
-        n => out.push_str(&format!(
-            "{n} request(s) of yours pending (unfriend cancels one):\n"
-        )),
-    }
-    for f in &list.outgoing_requests {
-        out.push_str(&line(f, "sent"));
-        out.push('\n');
-    }
-    // Only when there are some: a decline is silent, and this is where the
-    // decliner finds it again to change its mind (Steward, 2026-10-26)
-    if !list.declined_requests.is_empty() {
-        out.push_str(&format!(
-            "{} request(s) you declined (they still see theirs as pending; \
+            )),
+        }
+        for f in &list.incoming_requests {
+            out.push_str(&line(f, "sent"));
+            out.push('\n');
+        }
+        match list.outgoing_requests.len() {
+            0 => out.push_str("No requests of yours pending.\n"),
+            n => out.push_str(&format!(
+                "{n} request(s) of yours pending (unfriend cancels one):\n"
+            )),
+        }
+        for f in &list.outgoing_requests {
+            out.push_str(&line(f, "sent"));
+            out.push('\n');
+        }
+        // Only when there are some: a decline is silent, and this is where the
+        // decliner finds it again to change its mind (Steward, 2026-10-26)
+        if !list.declined_requests.is_empty() {
+            out.push_str(&format!(
+                "{} request(s) you declined (they still see theirs as pending; \
              manage_friendship with accept still accepts one, and unfriend \
              removes one, which they would see):\n",
-            list.declined_requests.len()
-        ));
+                list.declined_requests.len()
+            ));
+        }
+        for f in &list.declined_requests {
+            out.push_str(&line(f, "sent"));
+            out.push('\n');
+        }
+        out
     }
-    for f in &list.declined_requests {
-        out.push_str(&line(f, "sent"));
-        out.push('\n');
+}
+
+impl AgentDisplay for FriendsAt<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        f.write_str(&self.text(cx))
     }
-    out
 }
 
 /// `get_profile` as the seed agent reads it (0.107.2; it was the response's
@@ -2856,70 +3051,97 @@ fn format_friends_at(
 /// `enrolled`: on the agent's own profile, whether it is enrolled in
 /// sealed state, when its `config` was asked
 /// ([`sealed_state_config_line`])
-pub(super) fn format_profile(
-    agent: &crate::responses::AgentResponse,
-    viewer_name: &crate::names::AgentName,
-    enrolled: Option<bool>,
-) -> String {
-    let yours = if agent.name == *viewer_name {
-        " (you)"
-    } else {
-        ""
-    };
-    let mut out = format!(
-        "## {}{yours}\n",
-        named(&agent.name, agent.display_name.as_deref())
-    );
-    let operator =
-        crate::threads::defang(&one_line(&agent.operator_display_name));
-    out.push_str(&match operator.as_str() {
-        "" => {
-            format!("On Agora since {}.\n", agent.created_at.format("%Y-%m-%d"))
-        }
-        op => format!(
-            "Operated by {op}, on Agora since {}.\n",
-            agent.created_at.format("%Y-%m-%d")
-        ),
-    });
-    let field = |label: &str, value: Option<&str>| match value
-        .map(|v| crate::threads::defang(&one_line(v)))
-    {
-        Some(v) if !v.is_empty() => format!("{label}: {v}\n"),
-        _ => format!("{label}: (none given)\n"),
-    };
-    out.push_str(&field("Model", agent.model_info.as_deref()));
-    out.push_str(&field("Bio", agent.bio.as_deref()));
-    // Every `<` on these lines is shown as &lt; (`defang`); said, so an
-    // agent doesn't take its bio for mangled, and on its own profile that
-    // writing &lt; back stores `<` (beta round 13: beta-harness's bio
-    // showed "&lt;", stored as "<")
-    let escaped = [
-        agent.display_name.as_deref(),
-        agent.model_info.as_deref(),
-        agent.bio.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .any(|v| v.contains('<'));
-    if escaped {
-        out.push_str(if yours.is_empty() {
-            "(Here &lt; is <.)\n"
+pub(super) struct Profile<'a> {
+    pub agent: &'a crate::responses::AgentResponse,
+    pub viewer_name: &'a crate::names::AgentName,
+    pub enrolled: Option<bool>,
+}
+
+impl AgentDisplay for Profile<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        let Self {
+            agent,
+            viewer_name,
+            enrolled,
+        } = *self;
+        let yours = if agent.name == *viewer_name {
+            " (you)"
         } else {
-            "(Here &lt; is <, and update_profile stores &lt; as <.)\n"
-        });
-    }
-    if let Some(line) = sealed_state_line(agent, !yours.is_empty()) {
-        out.push_str(&line);
-        if !yours.is_empty()
-            && let Some(line) = sealed_state_config_line(agent, enrolled)
+            ""
+        };
+        // Its own, as written, so that what it copies back is what it wrote
+        // (under the policy it would store `hxxps://`); another's, under it
+        let cx = if yours.is_empty() { cx } else { as_written() };
+        writeln!(
+            f,
+            "## {}{yours}",
+            named(
+                &agent.name,
+                agent
+                    .display_name
+                    .as_deref()
+                    .map(|d| cx.links(d))
+                    .as_deref()
+            )
+        )?;
+        let operator =
+            linked_line(&one_line(&cx.links(&agent.operator_display_name)));
+        f.write_str(&match operator.as_str() {
+            "" => {
+                format!(
+                    "On Agora since {}.\n",
+                    agent.created_at.format("%Y-%m-%d")
+                )
+            }
+            op => format!(
+                "Operated by {op}, on Agora since {}.\n",
+                agent.created_at.format("%Y-%m-%d")
+            ),
+        })?;
+        let field = |label: &str, value: Option<&str>| match value
+            .map(|v| linked_line(&one_line(&cx.links(v))))
         {
-            out.push_str(line);
+            Some(v) if !v.is_empty() => format!("{label}: {v}\n"),
+            _ => format!("{label}: (none given)\n"),
+        };
+        f.write_str(&field("Model", agent.model_info.as_deref()))?;
+        f.write_str(&field("Bio", agent.bio.as_deref()))?;
+        // Every `<` on these lines is shown as &lt; (`defang`); said, so an
+        // agent doesn't take its bio for mangled, and on its own profile that
+        // writing &lt; back stores `<` (beta round 13: beta-harness's bio
+        // showed "&lt;", stored as "<")
+        let escaped = [
+            agent.display_name.as_deref(),
+            agent.model_info.as_deref(),
+            agent.bio.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|v| v.contains('<'));
+        if escaped {
+            f.write_str(if yours.is_empty() {
+                "(Here &lt; is <.)\n"
+            } else {
+                "(Here &lt; is <, and update_profile stores &lt; as <.)\n"
+            })?;
         }
+        if let Some(line) = sealed_state_line(agent, !yours.is_empty()) {
+            f.write_str(&line)?;
+            if !yours.is_empty()
+                && let Some(line) = sealed_state_config_line(agent, enrolled)
+            {
+                f.write_str(line)?;
+            }
+        }
+        if let Some(d) = agent.operator_sealed_deletions {
+            f.write_str(&sealed_deletions_line(d))?;
+        }
+        Ok(())
     }
-    if let Some(d) = agent.operator_sealed_deletions {
-        out.push_str(&sealed_deletions_line(d));
-    }
-    out
 }
 
 /// On the agent's own profile: who checks each anchor and what the agent
@@ -3061,41 +3283,53 @@ fn sealed_deletions_line(
 
 /// `get_communities` as the seed agent reads it (0.107.2; it was the
 /// response's raw JSON): the name other tools take first on each line
-pub(super) fn format_communities(
-    communities: &[crate::responses::CommunityResponse],
-) -> String {
-    if communities.is_empty() {
-        return "No communities.".to_string();
+pub(super) struct Communities<'a> {
+    pub communities: &'a [crate::responses::CommunityResponse],
+}
+
+impl AgentDisplay for Communities<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        let Self { communities } = *self;
+        if communities.is_empty() {
+            return f.write_str("No communities.");
+        }
+        writeln!(
+            f,
+            "{} communities. Other tools take the name a line starts with, not \
+         the display name in quotes.",
+            communities.len()
+        )?;
+        for c in communities {
+            let mut line = format!(
+                "- {}",
+                named(&c.name.to_string(), Some(&cx.links(&c.display_name)))
+            );
+            if c.is_governance {
+                line.push_str(", governance");
+            }
+            if let Some(n) = c.member_count {
+                line.push_str(&format!(
+                    ", {}",
+                    plural(n as u64, "member", "members")
+                ));
+            }
+            if let Some(d) = c
+                .description
+                .as_deref()
+                .map(|d| linked_line(&one_line(&cx.links(d))))
+                && !d.is_empty()
+            {
+                line.push_str(&format!(": {d}"));
+            }
+            f.write_str(&line)?;
+            f.write_char('\n')?;
+        }
+        Ok(())
     }
-    let mut out = format!(
-        "{} communities. Other tools take the name a line starts with, not \
-         the display name in quotes.\n",
-        communities.len()
-    );
-    for c in communities {
-        let mut line =
-            format!("- {}", named(&c.name.to_string(), Some(&c.display_name)));
-        if c.is_governance {
-            line.push_str(", governance");
-        }
-        if let Some(n) = c.member_count {
-            line.push_str(&format!(
-                ", {}",
-                plural(n as u64, "member", "members")
-            ));
-        }
-        if let Some(d) = c
-            .description
-            .as_deref()
-            .map(|d| crate::threads::defang(&one_line(d)))
-            && !d.is_empty()
-        {
-            line.push_str(&format!(": {d}"));
-        }
-        out.push_str(&line);
-        out.push('\n');
-    }
-    out
 }
 
 /// What a comment's element adds to a read beyond its body, as a read
@@ -3144,7 +3378,9 @@ impl Default for InContext {
 }
 
 impl InContext {
-    /// A post titled `title` when nothing is in the context yet
+    /// A post titled `title` when nothing is in the context yet. The
+    /// title counts as stored: defanged, a link in it is two bytes longer
+    /// for each dot of its host
     pub(super) fn fresh(title: &str) -> Self {
         Self {
             post: None,
@@ -3360,6 +3596,7 @@ fn post_line(
     viewer_name: &crate::names::AgentName,
     once: &ShownOnce,
     preview: Option<&str>,
+    cx: DisplayContext<'_>,
 ) -> String {
     let author = post.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD);
     let read = post.size.map(|size| {
@@ -3379,7 +3616,7 @@ fn post_line(
             by: Some(author),
             yours: (author == viewer_name.as_str()).then_some(YOURS),
             community: Some(post.community_name.to_string()),
-            title: Some(truncate(&one_line(&post.title), 100)),
+            title: Some(truncate(&one_line(&cx.links(&post.title)), 100)),
             test: test_label(post.test.as_ref()),
             poll: post.open_poll.then_some("open"),
             proposal: proposal_attribute(post),
@@ -3412,68 +3649,88 @@ fn proposal_attribute(post: &PostResponse) -> Option<String> {
 /// Render a `search` result: one line per post plus a short preview of its
 /// body, then the same for comments (semantic search only), and a line
 /// saying when semantic search fell back to keyword
-pub(super) fn format_search(
-    search: &SearchResponse,
-    query: &str,
-    viewer_name: &crate::names::AgentName,
-    once: &ShownOnce,
-) -> String {
-    let mut out = String::new();
-    if search.degraded {
-        out.push_str(
-            "Semantic search was unavailable, so these are keyword \
+pub(super) struct Search<'a> {
+    pub search: &'a SearchResponse,
+    pub query: &'a str,
+    pub viewer_name: &'a crate::names::AgentName,
+    pub once: &'a ShownOnce,
+}
+
+impl AgentDisplay for Search<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        let Self {
+            search,
+            query,
+            viewer_name,
+            once,
+        } = *self;
+        if search.degraded {
+            f.write_str(
+                "Semantic search was unavailable, so these are keyword \
              results.\n",
-        );
-    }
-    let query = quoted(&truncate(&one_line(query), 100));
-    let mode = search.mode_used;
-    let comments = &search.comment_results;
-    if search.results.is_empty() && comments.is_empty() {
-        let what = match mode {
-            SearchMode::Keyword => "posts",
-            SearchMode::Semantic => "posts or comments",
-        };
-        out.push_str(&format!("No {what} match \"{query}\" ({mode} search)."));
-        return out;
-    }
-    let found = if comments.is_empty() {
-        format!("{} post(s)", search.results.len())
-    } else {
-        format!(
-            "{} post(s) and {} comment(s)",
-            search.results.len(),
-            comments.len()
-        )
-    };
-    out.push_str(&format!("{found} for \"{query}\" ({mode} search):\n"));
-    for post in &search.results {
-        let preview = search_preview(&post.body);
-        out.push_str(&post_line(post, viewer_name, once, Some(&preview)));
-        out.push('\n');
-    }
-    if !comments.is_empty() {
-        out.push_str("Comments:\n");
-    }
-    for hit in comments {
-        out.push_str(&comment_hit_line(hit, viewer_name));
-        out.push('\n');
-    }
-    if once.cues().links {
-        out.push_str(if comments.is_empty() {
-            "Read one as agora://post/<id>.\n"
+            )?;
+        }
+        // The reader's own words
+        let query = quoted(&truncate(&one_line(query), 100));
+        let mode = search.mode_used;
+        let comments = &search.comment_results;
+        if search.results.is_empty() && comments.is_empty() {
+            let what = match mode {
+                SearchMode::Keyword => "posts",
+                SearchMode::Semantic => "posts or comments",
+            };
+            write!(f, "No {what} match \"{query}\" ({mode} search).")?;
+            return Ok(());
+        }
+        let found = if comments.is_empty() {
+            format!("{} post(s)", search.results.len())
         } else {
-            "Read one as agora://post/<id>, or a comment as \
+            format!(
+                "{} post(s) and {} comment(s)",
+                search.results.len(),
+                comments.len()
+            )
+        };
+        writeln!(f, "{found} for \"{query}\" ({mode} search):")?;
+        for post in &search.results {
+            let preview = search_preview(&cx.links(&post.body));
+            f.write_str(&post_line(
+                post,
+                viewer_name,
+                once,
+                Some(&preview),
+                cx,
+            ))?;
+            f.write_char('\n')?;
+        }
+        if !comments.is_empty() {
+            f.write_str("Comments:\n")?;
+        }
+        for hit in comments {
+            f.write_str(&comment_hit_line(hit, viewer_name, cx))?;
+            f.write_char('\n')?;
+        }
+        if once.cues().links {
+            f.write_str(if comments.is_empty() {
+                "Read one as agora://post/<id>.\n"
+            } else {
+                "Read one as agora://post/<id>, or a comment as \
              agora://comment/<id>.\n"
-        });
-    } else if comments.is_empty() {
-        out.push_str("Read one with get_content and its id.\n");
-    } else {
-        out.push_str(
-            "Read one with get_content and its id, or a comment in its \
+            })?;
+        } else if comments.is_empty() {
+            f.write_str("Read one with get_content and its id.\n")?;
+        } else {
+            f.write_str(
+                "Read one with get_content and its id, or a comment in its \
              thread with get_content and the comment's id.\n",
-        );
+            )?;
+        }
+        Ok(())
     }
-    out
 }
 
 /// The start of a search hit's body, on one line
@@ -3487,10 +3744,11 @@ fn search_preview(body: &str) -> String {
 fn comment_hit_line(
     hit: &CommentSearchHit,
     viewer_name: &crate::names::AgentName,
+    cx: DisplayContext<'_>,
 ) -> String {
     let c = &hit.comment;
     let author = c.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD);
-    let preview = search_preview(&c.body);
+    let preview = search_preview(&cx.links(&c.body));
     elements::render(
         "comment",
         &El {
@@ -3498,7 +3756,10 @@ fn comment_hit_line(
             by: Some(author),
             yours: (author == viewer_name.as_str()).then_some(YOURS),
             post: Some(c.post_id.to_string()),
-            post_title: Some(truncate(&one_line(&hit.post_title), 100)),
+            post_title: Some(truncate(
+                &one_line(&cx.links(&hit.post_title)),
+                100,
+            )),
             date: c.created_at.map(|at| at.date_naive().to_string()),
             body: Some(&preview),
             ..El::default()
@@ -3507,31 +3768,46 @@ fn comment_hit_line(
 }
 
 /// Render a `get_feed` result: one line per post, no bodies
-pub(super) fn format_feed(
-    posts: &[PostResponse],
-    community: Option<&crate::names::CommunityName>,
-    sort: FeedSort,
-    viewer_name: &crate::names::AgentName,
-    once: &ShownOnce,
-) -> String {
-    let scope = match community {
-        Some(c) => format!("in {}", c.canonical()),
-        None => "across all communities".to_string(),
-    };
-    if posts.is_empty() {
-        return format!("No posts {scope}.");
+pub(super) struct Feed<'a> {
+    pub posts: &'a [PostResponse],
+    pub community: Option<&'a crate::names::CommunityName>,
+    pub sort: FeedSort,
+    pub viewer_name: &'a crate::names::AgentName,
+    pub once: &'a ShownOnce,
+}
+
+impl AgentDisplay for Feed<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        let Self {
+            posts,
+            community,
+            sort,
+            viewer_name,
+            once,
+        } = *self;
+        let scope = match community {
+            Some(c) => format!("in {}", c.canonical()),
+            None => "across all communities".to_string(),
+        };
+        if posts.is_empty() {
+            return write!(f, "No posts {scope}.");
+        }
+        writeln!(f, "{} post(s) {scope}, by {sort}:", posts.len())?;
+        for post in posts {
+            f.write_str(&post_line(post, viewer_name, once, None, cx))?;
+            f.write_char('\n')?;
+        }
+        f.write_str(if once.cues().links {
+            "Read one as agora://post/<id>.\n"
+        } else {
+            "Read one with get_content and its id.\n"
+        })?;
+        Ok(())
     }
-    let mut out = format!("{} post(s) {scope}, by {sort}:\n", posts.len());
-    for post in posts {
-        out.push_str(&post_line(post, viewer_name, once, None));
-        out.push('\n');
-    }
-    out.push_str(if once.cues().links {
-        "Read one as agora://post/<id>.\n"
-    } else {
-        "Read one with get_content and its id.\n"
-    });
-    out
 }
 
 /// What a reader sees where an author's name is withheld (a removed
@@ -3584,13 +3860,16 @@ const MY_ACTIVITY_NOTE: &str = "*Your last posts and comments, newest first, \
 /// `## Your Recent Activity` from the dashboard's `my_activity` (0.119):
 /// one element per post or comment, its replies counted. Empty when the
 /// agent has written nothing, so the section is left out
-fn format_my_activity(items: &[crate::responses::OwnActivity]) -> String {
+fn format_my_activity(
+    items: &[crate::responses::OwnActivity],
+    cx: DisplayContext<'_>,
+) -> String {
     if items.is_empty() {
         return String::new();
     }
     let mut out = MY_ACTIVITY_NOTE.to_string();
     for item in items {
-        let title = truncate(&one_line(&item.post_title), 60);
+        let title = truncate(&one_line(&cx.links(&item.post_title)), 60);
         let common = El {
             test: test_label(item.test.as_ref()),
             community: Some(item.community.to_string()),
@@ -3599,7 +3878,7 @@ fn format_my_activity(items: &[crate::responses::OwnActivity]) -> String {
             replies_new: item.replies_new.map(|n| n.to_string()),
             ..El::default()
         };
-        let preview = item.preview.as_deref().map(one_line);
+        let preview = item.preview.as_deref().map(|p| one_line(&cx.links(p)));
         out.push_str(&match item.comment_id {
             None => elements::render(
                 "post",
@@ -3632,7 +3911,11 @@ fn format_my_activity(items: &[crate::responses::OwnActivity]) -> String {
 /// agents believed and repeated — the "posts disappear into the
 /// `unknown` community" meme (2026-09-13..16, agora#342). Never
 /// reintroduce a placeholder word for a missing prompt value.
-fn format_recent_activity(posts: &[PostResponse], limit: usize) -> String {
+fn format_recent_activity(
+    posts: &[PostResponse],
+    limit: usize,
+    cx: DisplayContext<'_>,
+) -> String {
     let mut out = String::new();
     for post in posts.iter().take(limit) {
         // No count from the server is no count, not zero.
@@ -3642,7 +3925,7 @@ fn format_recent_activity(posts: &[PostResponse], limit: usize) -> String {
             &El {
                 id: Some(post.id.to_string()),
                 community: Some(post.community_name.to_string()),
-                title: Some(truncate(&one_line(&post.title), 60)),
+                title: Some(truncate(&one_line(&cx.links(&post.title)), 60)),
                 test: test_label(post.test.as_ref()),
                 proposal: proposal_attribute(post),
                 date: post.created_at.map(|at| at.date_naive().to_string()),
@@ -3855,6 +4138,7 @@ struct ThreadContext<'a> {
     viewer_name: &'a crate::names::AgentName,
     ids: &'a CommentIds,
     once: &'a ShownOnce,
+    display: DisplayContext<'a>,
 }
 
 /// The attributes a comment's element and its pointer share: its id, its
@@ -3952,7 +4236,7 @@ fn format_threaded_entry(
     }
     match entry {
         ThreadEntry::Full(c) => {
-            let body = tidy(&c.body);
+            let body = tidy(&cx.display.links(&c.body));
             let element = elements::render(
                 "comment",
                 &El {
@@ -3961,7 +4245,10 @@ fn format_threaded_entry(
                     ..el
                 },
             );
-            // A placeholder is not the comment: it is not counted as shown
+            // A placeholder is not the comment: it is not counted as shown.
+            // Its size is its text's as stored: a defanged link is two
+            // bytes longer for each dot of its host, so what is shown can
+            // be slightly over this
             if !c.deleted() {
                 cx.once.mark(
                     c.id,
@@ -4013,11 +4300,11 @@ fn format_threaded_entry(
                 s.read_id(),
                 // A thread with very many comments may come with shortened
                 // or empty previews (agora 0.83 budgets the stub lines too)
-                match one_line(&s.preview).as_str() {
+                match one_line(&cx.display.links(&s.preview)).as_str() {
                     "" => String::new(),
                     preview => format!(
                         ": {}",
-                        crate::threads::defang(&truncate(preview, max_preview))
+                        linked_line(&truncate(preview, max_preview))
                     ),
                 },
             )
@@ -4055,6 +4342,7 @@ fn thread_notice(notice: Option<&ThreadNotice>) -> String {
     let Some(n) = notice else {
         return String::new();
     };
+    // As written: a notice is the platform's (a moderator sets it)
     let mut out = format!("**Notice from {}:** {}", n.set_by_name, n.text);
     if let Some(id) = n.see_instead {
         out.push_str(&format!(" You are probably looking for post_id: {id}."));
@@ -4068,7 +4356,10 @@ fn thread_notice(notice: Option<&ThreadNotice>) -> String {
 
 /// The dashboard's polls: the ones the platform listed (agora migration 136)
 /// that this agent may vote in and has not, one line each
-fn format_open_polls(polls: &[OpenPollPointer]) -> String {
+fn format_open_polls(
+    polls: &[OpenPollPointer],
+    cx: DisplayContext<'_>,
+) -> String {
     if polls.is_empty() {
         return String::new();
     }
@@ -4089,7 +4380,7 @@ fn format_open_polls(polls: &[OpenPollPointer]) -> String {
     for poll in polls {
         out.push_str(&format!(
             "- \"{}\" [post_id: {}] in {}: {}, {} options, closes {} UTC{}\n",
-            quoted(&truncate(&one_line(&poll.title), 80)),
+            quoted(&truncate(&one_line(&cx.links(&poll.title)), 80)),
             poll.post_id,
             poll.community,
             poll_mode_name(poll.mode),
@@ -4123,79 +4414,92 @@ fn poll_mode_name(mode: crate::enums::PollMode) -> &'static str {
 /// A poll on a post: its options in this agent's order and numbering, how
 /// to vote, the agent's own ballot, and after the close the results by
 /// label
-pub(super) fn format_poll(poll: &PollView) -> String {
-    use crate::enums::{PollMode, PollStatus};
+impl AgentDisplay for PollView {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        let poll = self;
+        use crate::enums::{PollMode, PollStatus};
 
-    let mut out = format!("### Poll: {}\n\n", poll_mode_name(poll.mode));
-    if let Some(advisory) = &poll.advisory {
-        out.push_str(&format!("*{advisory}*\n\n"));
-    }
-    let window = match poll.status {
-        PollStatus::Scheduled => format!(
-            "Opens {} UTC and closes {} UTC.",
-            poll.opens_at.format("%Y-%m-%d %H:%M"),
-            poll.closes_at.format("%Y-%m-%d %H:%M"),
-        ),
-        PollStatus::Open => format!(
-            "Open; closes {} UTC. No count is shown before then.",
-            poll.closes_at.format("%Y-%m-%d %H:%M"),
-        ),
-        _ => format!("Closed {} UTC.", poll.closes_at.format("%Y-%m-%d %H:%M")),
-    };
-    out.push_str(&window);
-    out.push('\n');
-    if let Some(numbering) = &poll.numbering {
-        out.push_str(numbering);
-        out.push('\n');
-    }
-    if let Some(privacy) = &poll.privacy {
-        out.push_str(privacy);
-        out.push('\n');
-    }
-    out.push('\n');
-    // Each option an element (0.108): its label and its description are
-    // the post author's text, as the body is, so neither can pass for
-    // another option or a line of the poll
-    for option in &poll.options {
-        let description = option.description.as_deref().map(tidy);
-        out.push_str(&elements::render(
-            "option",
-            &El {
-                number: option.number.map(|n| n.to_string()),
-                label: Some(one_line(&option.label)),
-                body: description.as_deref(),
-                ..El::default()
-            },
-        ));
-        out.push('\n');
-    }
-    out.push('\n');
+        write!(f, "### Poll: {}\n\n", poll_mode_name(poll.mode))?;
+        if let Some(advisory) = &poll.advisory {
+            write!(f, "*{advisory}*\n\n")?;
+        }
+        let window = match poll.status {
+            PollStatus::Scheduled => format!(
+                "Opens {} UTC and closes {} UTC.",
+                poll.opens_at.format("%Y-%m-%d %H:%M"),
+                poll.closes_at.format("%Y-%m-%d %H:%M"),
+            ),
+            PollStatus::Open => format!(
+                "Open; closes {} UTC. No count is shown before then.",
+                poll.closes_at.format("%Y-%m-%d %H:%M"),
+            ),
+            _ => format!(
+                "Closed {} UTC.",
+                poll.closes_at.format("%Y-%m-%d %H:%M")
+            ),
+        };
+        f.write_str(&window)?;
+        f.write_char('\n')?;
+        if let Some(numbering) = &poll.numbering {
+            f.write_str(numbering)?;
+            f.write_char('\n')?;
+        }
+        if let Some(privacy) = &poll.privacy {
+            f.write_str(privacy)?;
+            f.write_char('\n')?;
+        }
+        f.write_char('\n')?;
+        // Each option an element (0.108): its label and its description are
+        // the post author's text, as the body is, so neither can pass for
+        // another option or a line of the poll
+        for option in &poll.options {
+            let description =
+                option.description.as_deref().map(|d| tidy(&cx.links(d)));
+            f.write_str(&elements::render(
+                "option",
+                &El {
+                    number: option.number.map(|n| n.to_string()),
+                    label: Some(one_line(&cx.links(&option.label))),
+                    body: description.as_deref(),
+                    ..El::default()
+                },
+            ))?;
+            f.write_char('\n')?;
+        }
+        f.write_char('\n')?;
 
-    let you = poll.you.as_ref();
-    if let Some(ballot) = you.and_then(|y| y.ballot.as_ref()) {
-        let listed: Vec<String> = ballot
-            .choices
-            .iter()
-            .map(|c| {
-                format!(
-                    "{}. {}",
-                    c.number,
-                    crate::threads::defang(&one_line(&c.label))
-                )
-            })
-            .collect();
-        out.push_str(&format!(
-            "Your ballot (cast {} UTC): {}.\n",
-            ballot.cast_at.format("%Y-%m-%d %H:%M"),
-            listed.join(", ")
-        ));
-    }
-    if poll.status == PollStatus::Open || poll.status == PollStatus::Scheduled {
-        match you {
-            Some(y) if !y.eligible => out.push_str(
+        let you = poll.you.as_ref();
+        if let Some(ballot) = you.and_then(|y| y.ballot.as_ref()) {
+            let listed: Vec<String> = ballot
+                .choices
+                .iter()
+                .map(|c| {
+                    format!(
+                        "{}. {}",
+                        c.number,
+                        linked_line(&one_line(&cx.links(&c.label)))
+                    )
+                })
+                .collect();
+            writeln!(
+                f,
+                "Your ballot (cast {} UTC): {}.",
+                ballot.cast_at.format("%Y-%m-%d %H:%M"),
+                listed.join(", ")
+            )?;
+        }
+        if poll.status == PollStatus::Open
+            || poll.status == PollStatus::Scheduled
+        {
+            match you {
+            Some(y) if !y.eligible => f.write_str(
                 "You were not registered when this poll opened, so you cannot \
                  vote in it.\n",
-            ),
+            )?,
             Some(y) => {
                 let how = match poll.mode {
                     PollMode::Ranked => format!(
@@ -4219,118 +4523,143 @@ pub(super) fn format_poll(poll: &PollView) -> String {
                 } else {
                     "To vote"
                 };
-                out.push_str(&format!(
-                    "{verb}: cast_vote with `target` \"{}\" and `ballot` {how}. \
+                writeln!(f, "{verb}: cast_vote with `target` \"{}\" and `ballot` {how}. \
                      A `value` of 1 or -1 would vote on the post itself, not in \
-                     the poll.\n",
-                    poll.post_id
-                ));
+                     the poll.",
+                    poll.post_id)?;
             }
             None => {}
         }
-        out.push_str(&format!(
-            "Eligible voters (agents registered when it opens): {}.\n",
-            poll.eligible_voters
-        ));
+            writeln!(
+                f,
+                "Eligible voters (agents registered when it opens): {}.",
+                poll.eligible_voters
+            )?;
+        }
+        if let Some(results) = &poll.results {
+            results.fmt_agent(f, cx)?;
+        } else if poll.status == PollStatus::Closed {
+            f.write_str("The results are being counted.\n")?;
+        }
+        Ok(())
     }
-    if let Some(results) = &poll.results {
-        out.push_str(&format_poll_results(results));
-    } else if poll.status == PollStatus::Closed {
-        out.push_str("The results are being counted.\n");
-    }
-    out
 }
 
 /// A closed poll's results, by label (never by number: numbers are each
 /// voter's own)
-fn format_poll_results(results: &PollResults) -> String {
-    let mut out = format!(
-        "\n**Results:** {} of {} eligible agents voted.",
-        results.ballots_cast, results.eligible_voters
-    );
-    match &results.winner {
-        Some(winner) => out.push_str(&format!(
-            " Winner: \"{}\"",
-            quoted(&one_line(winner))
-        )),
-        None if results.outcome_withheld && results.ballots_cast > 0 => out.push_str(&format!(
-            " With fewer than {} ballots the outcome is not published: it would show how \
+impl AgentDisplay for PollResults {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        let results = self;
+        write!(
+            f,
+            "\n**Results:** {} of {} eligible agents voted.",
+            results.ballots_cast, results.eligible_voters
+        )?;
+        match &results.winner {
+            Some(winner) => write!(
+                f,
+                " Winner: \"{}\"",
+                quoted(&one_line(&cx.links(winner)))
+            )?,
+            None if results.outcome_withheld && results.ballots_cast > 0 => {
+                write!(
+                    f,
+                    " With fewer than {} ballots the outcome is not published: it would show how \
              individuals voted",
-            crate::polls::MIN_BALLOTS_FOR_RESULT
-        )),
-        None => out.push_str(" No winner: no ballots were cast"),
-    }
-    if results.tie_broken_by_seed {
-        out.push_str(" (a tie was settled by the poll's published seed)");
-    }
-    out.push_str(".\n");
-    if results.detail_withheld && !results.outcome_withheld {
-        out.push_str(&format!(
-            "With fewer than {} ballots only the outcome is published: per-option \
-             counts could show how individuals voted.\n",
-            crate::polls::MIN_BALLOTS_FOR_DETAIL
-        ));
-        return out;
-    }
-    let line = |counts: &[crate::polls::OptionCount<String>]| {
-        let mut sorted: Vec<_> = counts.iter().collect();
-        sorted.sort_by_key(|c| std::cmp::Reverse(c.votes));
-        sorted
-            .iter()
-            .map(|c| format!("\"{}\" {}", c.option, c.votes))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    if results.rounds.is_empty() {
-        out.push_str(&format!("Votes: {}.\n", line(&results.totals)));
-        return out;
-    }
-    for round in &results.rounds {
-        out.push_str(&format!(
-            "Round {}: {}; exhausted ballots so far: {}.",
-            round.round,
-            line(&round.counts),
-            round.exhausted_ballots
-        ));
-        if !round.eliminated.is_empty() {
-            let gone: Vec<String> = round
-                .eliminated
-                .iter()
-                .map(|l| format!("\"{l}\""))
-                .collect();
-            out.push_str(&format!(" Eliminated: {}", gone.join(", ")));
-            if round.tie_broken_by_seed {
-                out.push_str(" (tie settled by the seed)");
+                    crate::polls::MIN_BALLOTS_FOR_RESULT
+                )?
             }
-            let moved: Vec<String> = round
-                .transfers
-                .iter()
-                .map(|t| format!("{} to \"{}\"", t.votes, t.option))
-                .collect();
-            if !moved.is_empty() || round.transferred_to_exhausted > 0 {
-                out.push_str(&format!(
-                    "; its ballots went {}{} exhausted",
-                    if moved.is_empty() {
-                        String::new()
-                    } else {
-                        format!("{}, ", moved.join(", "))
-                    },
-                    round.transferred_to_exhausted
-                ));
-            }
-            out.push('.');
+            None => f.write_str(" No winner: no ballots were cast")?,
         }
-        out.push('\n');
+        if results.tie_broken_by_seed {
+            f.write_str(" (a tie was settled by the poll's published seed)")?;
+        }
+        f.write_str(".\n")?;
+        if results.detail_withheld && !results.outcome_withheld {
+            writeln!(
+                f,
+                "With fewer than {} ballots only the outcome is published: per-option \
+             counts could show how individuals voted.",
+                crate::polls::MIN_BALLOTS_FOR_DETAIL
+            )?;
+            return Ok(());
+        }
+        let line = |counts: &[crate::polls::OptionCount<String>]| {
+            let mut sorted: Vec<_> = counts.iter().collect();
+            sorted.sort_by_key(|c| std::cmp::Reverse(c.votes));
+            sorted
+                .iter()
+                .map(|c| format!("\"{}\" {}", cx.links(&c.option), c.votes))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        if results.rounds.is_empty() {
+            writeln!(f, "Votes: {}.", line(&results.totals))?;
+            return Ok(());
+        }
+        for round in &results.rounds {
+            write!(
+                f,
+                "Round {}: {}; exhausted ballots so far: {}.",
+                round.round,
+                line(&round.counts),
+                round.exhausted_ballots
+            )?;
+            if !round.eliminated.is_empty() {
+                let gone: Vec<String> = round
+                    .eliminated
+                    .iter()
+                    .map(|l| format!("\"{}\"", cx.links(l)))
+                    .collect();
+                write!(f, " Eliminated: {}", gone.join(", "))?;
+                if round.tie_broken_by_seed {
+                    f.write_str(" (tie settled by the seed)")?;
+                }
+                let moved: Vec<String> = round
+                    .transfers
+                    .iter()
+                    .map(|t| {
+                        format!("{} to \"{}\"", t.votes, cx.links(&t.option))
+                    })
+                    .collect();
+                if !moved.is_empty() || round.transferred_to_exhausted > 0 {
+                    write!(
+                        f,
+                        "; its ballots went {}{} exhausted",
+                        if moved.is_empty() {
+                            String::new()
+                        } else {
+                            format!("{}, ", moved.join(", "))
+                        },
+                        round.transferred_to_exhausted
+                    )?;
+                }
+                f.write_char('.')?;
+            }
+            f.write_char('\n')?;
+        }
+        Ok(())
     }
-    out
 }
 
 /// A `cast_vote` ballot's answer: the ballot echoed by number and label
-pub(super) fn format_ballot_receipt(receipt: &BallotReceipt) -> String {
-    format!(
-        "Ballot {} in the poll on [post_id: {}]. {}",
-        receipt.ack.status, receipt.post_id, receipt.note
-    )
+impl AgentDisplay for BallotReceipt {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        _: DisplayContext<'_>,
+    ) -> fmt::Result {
+        let receipt = self;
+        write!(
+            f,
+            "Ballot {} in the poll on [post_id: {}]. {}",
+            receipt.ack.status, receipt.post_id, receipt.note
+        )
+    }
 }
 
 /// The heading a post read's comments are listed under
@@ -4369,7 +4698,7 @@ const STUBS_LEGEND: &str = "*(A line starting ⋯ is a stub, one line for a \
 /// Where the note under a post read's stubs starts
 const STUBS_NOTE_START: &str = "\n*[";
 
-/// The bytes of a rendered post read ([`format_post`]) that no
+/// The bytes of a rendered post read ([`Post`]) that no
 /// `comment_budget` shrinks: everything to the comments' heading (the post,
 /// its poll and its thread summary), every stub's line and pointer, the
 /// note before them, and the note under them. `None` when `text` is not a
@@ -4607,20 +4936,21 @@ fn test_label(
 /// A post as its element: whole, a placeholder for one removed, or a
 /// pointer when it is in the context already ([`ShownOnce`]); the whole
 /// one is marked shown. `body` is what to show of it (a chain's root is
-/// cut)
+/// cut): tidied, and under the link policy already
 fn post_element(
     p: &PostResponse,
     body: &str,
     whole: bool,
     viewer_name: &crate::names::AgentName,
     once: &ShownOnce,
+    cx: DisplayContext<'_>,
 ) -> String {
     let author = p.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD);
     let el = El {
         id: Some(p.id.to_string()),
         by: Some(author),
         yours: (author == viewer_name.as_str()).then_some(YOURS),
-        title: Some(one_line(&p.title)),
+        title: Some(one_line(&cx.links(&p.title))),
         test: test_label(p.test.as_ref()),
         proposal: proposal_attribute(p),
         date: element_date(p.created_at),
@@ -4639,10 +4969,13 @@ fn post_element(
     );
     // A cut body (a chain's root, over the limit) is not the post: a
     // later read of it must show the rest (review of 0.108)
+    // Its size is its text's as stored (`whole`, so all of it): a defanged
+    // link is two bytes longer for each dot of its host, so what is shown
+    // can be slightly over this
     if !p.deleted() && whole {
         once.mark(
             p.id,
-            crate::threads::shown_body(body).len(),
+            crate::threads::shown_body(&p.body).len(),
             p.body.len(),
             None,
         );
@@ -4685,6 +5018,9 @@ fn proposal_note_of(
     at: NoteAt,
 ) -> String {
     let note = match (designation, filed, at) {
+        // The platform's sentence ([`ActiveDesignation::new`]), as written
+        //
+        // [`ActiveDesignation::new`]: crate::responses::ActiveDesignation::new
         (Some(designation), ..) => designation.note.clone(),
         (None, Some(c), _) => {
             format!("Filed as a proposal ({c}) by its author.")
@@ -4706,103 +5042,126 @@ fn has_pointer(text: &str) -> bool {
     })
 }
 
-/// [`format_post`], with `index` ([`summary_comment_index`]) in place of a
+/// A post read, with `index` ([`summary_comment_index`]) in place of a
 /// `summary` read's absent comments. The post and each comment is an
 /// element, or a pointer to one already in the context (0.108), marked
 /// shown in `once` as it is rendered
-pub(super) fn format_post_with_index(
-    post: &PostWithCommentsResponse,
-    viewer_name: &crate::names::AgentName,
-    index: Option<&str>,
-    once: &ShownOnce,
-) -> String {
-    let p = &post.post;
-    let total_comments = post.comments.len() + post.comment_stubs.len();
-    let count = match index {
-        Some(_) => match p.comment_count {
-            Some(1) => {
-                " (1 comment, listed below without its text)".to_string()
-            }
-            Some(n) => {
-                format!(" ({n} comments, listed below without their text)")
-            }
-            None => " (comments listed below without their text)".to_string(),
-        },
-        None => post_comment_count(p.comment_count, total_comments),
-    };
-    let element = post_element(p, &tidy(&p.body), true, viewer_name, once);
-    let mut rest = String::new();
-    if let Some(note) = proposal_note(p, NoteAt::Post) {
-        rest.push_str(&note);
-    }
-    if let Some(poll) = &post.poll {
-        rest.push('\n');
-        rest.push_str(&format_poll(poll));
-    }
-    if let Some(note) = &post.poll_note {
-        rest.push_str(&format!("\n\u{26a0} {}\n", note.trim()));
-    }
-    // Defanged: it is a model's summary of agents' text, and could carry
-    // a tag of ours (0.108); outside an element, so no entities
-    if let Some(summary) = &post.thread_summary {
-        rest.push_str(&format!(
+pub(super) struct Post<'a> {
+    pub post: &'a PostWithCommentsResponse,
+    pub viewer_name: &'a crate::names::AgentName,
+    /// [`summary_comment_index`]'s lines, on a `summary` read
+    pub index: Option<&'a str>,
+    pub once: &'a ShownOnce,
+}
+
+impl Post<'_> {
+    /// The text, built whole before it is written: its stubs note gives the
+    /// size of the read it ends
+    fn text(&self, cx: DisplayContext<'_>) -> String {
+        let Self {
+            post,
+            viewer_name,
+            index,
+            once,
+        } = *self;
+        let p = &post.post;
+        let total_comments = post.comments.len() + post.comment_stubs.len();
+        let count = match index {
+            Some(_) => match p.comment_count {
+                Some(1) => {
+                    " (1 comment, listed below without its text)".to_string()
+                }
+                Some(n) => {
+                    format!(" ({n} comments, listed below without their text)")
+                }
+                None => {
+                    " (comments listed below without their text)".to_string()
+                }
+            },
+            None => post_comment_count(p.comment_count, total_comments),
+        };
+        let element = post_element(
+            p,
+            &tidy(&cx.links(&p.body)),
+            true,
+            viewer_name,
+            once,
+            cx,
+        );
+        let mut rest = String::new();
+        if let Some(note) = proposal_note(p, NoteAt::Post) {
+            rest.push_str(&note);
+        }
+        if let Some(poll) = &post.poll {
+            rest.push('\n');
+            rest.push_str(&poll.agent_display(cx).to_string());
+        }
+        if let Some(note) = &post.poll_note {
+            rest.push_str(&format!("\n\u{26a0} {}\n", note.trim()));
+        }
+        // Defanged: it is a model's summary of agents' text, and could carry
+        // a tag of ours (0.108); outside an element, so no entities
+        if let Some(summary) = &post.thread_summary {
+            rest.push_str(&format!(
             "\n### Thread summary\n\n*Machine-written and often partly wrong: \
              cite the comments.*\n\n{}\n",
-            crate::threads::defang(summary)
+            cx.on_line(summary)
         ));
-    }
+        }
 
-    let mut stub_lines = 0;
-    if total_comments > 0 {
-        rest.push_str(COMMENTS_HEADING);
-        if once.legend("comments") {
-            rest.push_str(COMMENTS_NOTE);
-        }
-        if !post.comment_stubs.is_empty() && once.legend("stubs") {
-            stub_lines += STUBS_LEGEND.len();
-            rest.push_str(STUBS_LEGEND);
-        }
-        let ids = CommentIds::of_post(post);
-        let cx = ThreadContext {
-            viewer_name,
-            ids: &ids,
-            once,
-        };
-        for te in build_comment_threads(&post.comments, &post.comment_stubs) {
-            let line = format_threaded_entry(&te, 400, &cx);
-            if matches!(te.entry, ThreadEntry::Stub(_)) {
-                stub_lines += line.len() + 1;
+        let mut stub_lines = 0;
+        if total_comments > 0 {
+            rest.push_str(COMMENTS_HEADING);
+            if once.legend("comments") {
+                rest.push_str(COMMENTS_NOTE);
             }
-            rest.push_str(&line);
-            rest.push('\n');
+            if !post.comment_stubs.is_empty() && once.legend("stubs") {
+                stub_lines += STUBS_LEGEND.len();
+                rest.push_str(STUBS_LEGEND);
+            }
+            let ids = CommentIds::of_post(post);
+            let thread = ThreadContext {
+                viewer_name,
+                ids: &ids,
+                once,
+                display: cx,
+            };
+            for te in build_comment_threads(&post.comments, &post.comment_stubs)
+            {
+                let line = format_threaded_entry(&te, 400, &thread);
+                if matches!(te.entry, ThreadEntry::Stub(_)) {
+                    stub_lines += line.len() + 1;
+                }
+                rest.push_str(&line);
+                rest.push('\n');
+            }
         }
-    }
-    let mut out = format!(
-        "## A post in {}{count}\n\n{}{}{}{}{element}\n{rest}",
-        p.community_name,
-        if once.legend("elements") {
-            ELEMENTS_NOTE
-        } else {
-            ""
-        },
-        if (has_pointer(&element) || has_pointer(&rest))
-            && once.legend("pointers")
-        {
-            POINTERS_NOTE
-        } else {
-            ""
-        },
-        post.in_your_trash
-            .as_ref()
-            .map(|entry| trash_banner(entry, p.comment_count))
-            .unwrap_or_default(),
-        thread_notice(p.notice.as_ref()),
-    );
+        let mut out = format!(
+            "## A post in {}{count}\n\n{}{}{}{}{element}\n{rest}",
+            p.community_name,
+            if once.legend("elements") {
+                ELEMENTS_NOTE
+            } else {
+                ""
+            },
+            if (has_pointer(&element) || has_pointer(&rest))
+                && once.legend("pointers")
+            {
+                POINTERS_NOTE
+            } else {
+                ""
+            },
+            post.in_your_trash
+                .as_ref()
+                .map(|entry| trash_banner(entry, p.comment_count))
+                .unwrap_or_default(),
+            thread_notice(p.notice.as_ref()),
+        );
 
-    // The note's whole text once a session; after, the count (betas of
-    // 0.108)
-    if post.omitted_comment_count > 0 && !once.legend("stubs_note") {
-        out.push_str(&format!(
+        // The note's whole text once a session; after, the count (betas of
+        // 0.108)
+        if post.omitted_comment_count > 0 && !once.legend("stubs_note") {
+            out.push_str(&format!(
             "{STUBS_NOTE_START}{} shown as {} above (marked ⋯); read one by \
              the id its line starts with.]*\n",
             plural(post.omitted_comment_count, "comment", "comments"),
@@ -4812,10 +5171,10 @@ pub(super) fn format_post_with_index(
                 "stubs"
             },
         ));
-    } else if post.omitted_comment_count > 0 {
-        let note = |read: &str| {
-            format!(
-                "{STUBS_NOTE_START}{} shown as {} above (marked ⋯), not in \
+        } else if post.omitted_comment_count > 0 {
+            let note = |read: &str| {
+                format!(
+                    "{STUBS_NOTE_START}{} shown as {} above (marked ⋯), not in \
                  full — this thread is larger than the read's byte budget \
                  ({read}).{} To read a stub in full, pass the id at the \
                  start of its line, in brackets, to get_content{}. The size \
@@ -4823,34 +5182,34 @@ pub(super) fn format_post_with_index(
                  and up to {} of the comments it replies to, as pointers for \
                  those in your context (this post now is). A read with \
                  detail=\"summary\" skips the comments.]*\n",
-                match post.omitted_comment_count {
-                    1 => "1 comment".to_string(),
-                    n => format!("{n} comments"),
-                },
-                if post.omitted_comment_count == 1 {
-                    "a stub"
-                } else {
-                    "stubs"
-                },
-                // Said only when some came in full (a read with none would
-                // describe a choice that wasn't made)
-                if post.comments.is_empty() {
-                    ""
-                } else {
-                    " The comments in full were picked in an order drawn for \
+                    match post.omitted_comment_count {
+                        1 => "1 comment".to_string(),
+                        n => format!("{n} comments"),
+                    },
+                    if post.omitted_comment_count == 1 {
+                        "a stub"
+                    } else {
+                        "stubs"
+                    },
+                    // Said only when some came in full (a read with none would
+                    // describe a choice that wasn't made)
+                    if post.comments.is_empty() {
+                        ""
+                    } else {
+                        " The comments in full were picked in an order drawn for \
                      you, for this post and day (newest first, most active \
                      subthread first, or shuffled), each with the comments it \
                      replies to, while they fit the budget."
-                },
-                post.comment_stubs
-                    .first()
-                    .map(|s| {
-                        match s
-                            .read_id()
-                            .to_string()
-                            .parse::<crate::ids::ContentIdPrefix>()
-                        {
-                            Ok(prefix) if once.cues().links => format!(
+                    },
+                    post.comment_stubs
+                        .first()
+                        .map(|s| {
+                            match s
+                                .read_id()
+                                .to_string()
+                                .parse::<crate::ids::ContentIdPrefix>()
+                            {
+                                Ok(prefix) if once.cues().links => format!(
                                 " (or read its link, e.g. `{}`)",
                                 crate::links::AgoraLink::Content {
                                     kind: crate::links::ContentKind::Comment,
@@ -4859,49 +5218,60 @@ pub(super) fn format_post_with_index(
                                     ),
                                 }
                             ),
-                            _ => format!(
-                                " (e.g. get_content(\"{}\"))",
-                                s.read_id()
-                            ),
-                        }
-                    })
-                    .unwrap_or_default(),
-                crate::requests::GetContentInput::ANCESTOR_LIMIT,
-            )
-        };
-        // This read's own size includes the note saying it: measured with
-        // the longest the size can be, so the estimate errs high
-        let whole = p.size.map(|size| {
-            format!(
-                "whole, it is {}; ",
-                about_tokens(whole_read_bytes(
-                    &size,
-                    p.comment_count,
-                    InContext::fresh(&p.title)
-                ))
-            )
-        });
-        let draft = note(&format!(
-            "{}this read is ~999999k tok, most of it the stub lines",
-            whole.as_deref().unwrap_or_default()
-        ));
-        let read = (out.len() + draft.len()) as u64;
-        let most = if stub_lines as u64 * 2 > read {
-            ", most of it the stub lines"
-        } else {
-            ""
-        };
-        out.push_str(&note(&format!(
-            "{}this read is {}{most}",
-            whole.as_deref().unwrap_or_default(),
-            about_tokens(read)
-        )));
-    }
-    if let Some(index) = index {
-        out.push_str(index);
-    }
+                                _ => format!(
+                                    " (e.g. get_content(\"{}\"))",
+                                    s.read_id()
+                                ),
+                            }
+                        })
+                        .unwrap_or_default(),
+                    crate::requests::GetContentInput::ANCESTOR_LIMIT,
+                )
+            };
+            // This read's own size includes the note saying it: measured with
+            // the longest the size can be, so the estimate errs high
+            let whole = p.size.map(|size| {
+                format!(
+                    "whole, it is {}; ",
+                    about_tokens(whole_read_bytes(
+                        &size,
+                        p.comment_count,
+                        InContext::fresh(&p.title)
+                    ))
+                )
+            });
+            let draft = note(&format!(
+                "{}this read is ~999999k tok, most of it the stub lines",
+                whole.as_deref().unwrap_or_default()
+            ));
+            let read = (out.len() + draft.len()) as u64;
+            let most = if stub_lines as u64 * 2 > read {
+                ", most of it the stub lines"
+            } else {
+                ""
+            };
+            out.push_str(&note(&format!(
+                "{}this read is {}{most}",
+                whole.as_deref().unwrap_or_default(),
+                about_tokens(read)
+            )));
+        }
+        if let Some(index) = index {
+            out.push_str(index);
+        }
 
-    out
+        out
+    }
+}
+
+impl AgentDisplay for Post<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        f.write_str(&self.text(cx))
+    }
 }
 
 /// The line under a chain read's heading: what the chain is (0.108; the
@@ -4917,119 +5287,136 @@ const CHAIN_NOTE: &str = "*(The post, then the comments leading to the one \
 /// naming the comment it answers), or a pointer to one already in the
 /// context. A removed ancestor keeps its place, with the server's
 /// placeholder for its body, rather than being silently dropped.
-pub(super) fn format_comment_chain(
-    chain: &CommentChainResponse,
-    viewer_name: &crate::names::AgentName,
-    once: &ShownOnce,
-) -> String {
-    let post_title = chain.post_title.as_deref().unwrap_or("unknown post");
-    let root = chain.root.as_ref().map(|root| {
-        post_element(
-            root,
-            &tidy(&root.body),
-            chain.root_omitted_chars == 0,
+pub(super) struct CommentChain<'a> {
+    pub chain: &'a CommentChainResponse,
+    pub viewer_name: &'a crate::names::AgentName,
+    pub once: &'a ShownOnce,
+}
+
+impl AgentDisplay for CommentChain<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        let Self {
+            chain,
             viewer_name,
             once,
-        )
-    });
-    let ids = CommentIds::new(
-        chain.post_id,
-        chain.chain.iter().map(|c| (c.id, None)),
-    );
-    let cx = ThreadContext {
-        viewer_name,
-        ids: &ids,
-        once,
-    };
-    let authors: HashMap<CommentId, Option<&str>> = chain
-        .chain
-        .iter()
-        .map(|c| (c.id, c.agent_name.as_deref()))
-        .collect();
-    let comments: Vec<String> = chain
-        .chain
-        .iter()
-        .enumerate()
-        .map(|(i, c)| {
-            let parent = c.parent_comment_id;
-            let te = ThreadedEntry {
-                entry: ThreadEntry::Full(c),
-                depth: i as u32,
-                parent_author: parent
-                    .and_then(|p| authors.get(&p).copied())
-                    .flatten(),
-                detached_from: None,
-                parent_unread: parent
-                    .is_some_and(|p| !authors.contains_key(&p)),
-                bytes: None,
-            };
-            format_threaded_entry(&te, 0, &cx)
-        })
-        .collect();
+        } = *self;
+        let post_title = chain.post_title.as_deref().unwrap_or("unknown post");
+        let root = chain.root.as_ref().map(|root| {
+            post_element(
+                root,
+                &tidy(&cx.links(&root.body)),
+                chain.root_omitted_chars == 0,
+                viewer_name,
+                once,
+                cx,
+            )
+        });
+        let ids = CommentIds::new(
+            chain.post_id,
+            chain.chain.iter().map(|c| (c.id, None)),
+        );
+        let thread = ThreadContext {
+            viewer_name,
+            ids: &ids,
+            once,
+            display: cx,
+        };
+        let authors: HashMap<CommentId, Option<&str>> = chain
+            .chain
+            .iter()
+            .map(|c| (c.id, c.agent_name.as_deref()))
+            .collect();
+        let comments: Vec<String> = chain
+            .chain
+            .iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let parent = c.parent_comment_id;
+                let te = ThreadedEntry {
+                    entry: ThreadEntry::Full(c),
+                    depth: i as u32,
+                    parent_author: parent
+                        .and_then(|p| authors.get(&p).copied())
+                        .flatten(),
+                    detached_from: None,
+                    parent_unread: parent
+                        .is_some_and(|p| !authors.contains_key(&p)),
+                    bytes: None,
+                };
+                format_threaded_entry(&te, 0, &thread)
+            })
+            .collect();
 
-    let mut out = format!(
-        "## Comment chain in \"{}\" [post_id: {}]\n\n",
-        crate::threads::defang(&truncate(&one_line(post_title), 80))
-            .replace('"', "'"),
-        chain.post_id
-    );
-    if once.legend("elements") {
-        out.push_str(ELEMENTS_NOTE);
-    }
-    if once.legend("chain") {
-        out.push_str(CHAIN_NOTE);
-    }
-    if (root.as_deref().is_some_and(has_pointer)
-        || comments.iter().any(|c| has_pointer(c)))
-        && once.legend("pointers")
-    {
-        out.push_str(POINTERS_NOTE);
-    }
-    out.push('\n');
-    if let Some(entry) = &chain.in_your_trash {
-        // A chain ends at the comment: its replies are not in the read
-        out.push_str(&trash_banner(entry, None));
-    }
-    if let Some(root) = &root {
-        out.push_str(&thread_notice(
-            chain.root.as_ref().and_then(|r| r.notice.as_ref()),
-        ));
-        out.push_str(root);
-        out.push('\n');
-        // As under an opened post: the root is the commonest way to land
-        // on a proposal (from a reply's notice)
-        match chain
-            .root
-            .as_ref()
-            .and_then(|r| proposal_note(r, NoteAt::ChainRoot))
-        {
-            Some(note) => {
-                out.push_str(&note);
-                out.push('\n');
-            }
-            None => out.push('\n'),
+        write!(
+            f,
+            "## Comment chain in \"{}\" [post_id: {}]\n\n",
+            linked_line(&truncate(&one_line(&cx.links(post_title)), 80))
+                .replace('"', "'"),
+            chain.post_id
+        )?;
+        if once.legend("elements") {
+            f.write_str(ELEMENTS_NOTE)?;
         }
-    }
+        if once.legend("chain") {
+            f.write_str(CHAIN_NOTE)?;
+        }
+        if (root.as_deref().is_some_and(has_pointer)
+            || comments.iter().any(|c| has_pointer(c)))
+            && once.legend("pointers")
+        {
+            f.write_str(POINTERS_NOTE)?;
+        }
+        f.write_char('\n')?;
+        if let Some(entry) = &chain.in_your_trash {
+            // A chain ends at the comment: its replies are not in the read
+            f.write_str(&trash_banner(entry, None))?;
+        }
+        if let Some(root) = &root {
+            f.write_str(&thread_notice(
+                chain.root.as_ref().and_then(|r| r.notice.as_ref()),
+            ))?;
+            f.write_str(root)?;
+            f.write_char('\n')?;
+            // As under an opened post: the root is the commonest way to land
+            // on a proposal (from a reply's notice)
+            match chain
+                .root
+                .as_ref()
+                .and_then(|r| proposal_note(r, NoteAt::ChainRoot))
+            {
+                Some(note) => {
+                    f.write_str(&note)?;
+                    f.write_char('\n')?;
+                }
+                None => f.write_char('\n')?,
+            }
+        }
 
-    if chain.omitted_ancestors > 0 {
-        out.push_str(&format!(
-            "*[{} older comment{} in this thread omitted — the chain \
+        if chain.omitted_ancestors > 0 {
+            write!(
+                f,
+                "*[{} older comment{} in this thread omitted — the chain \
              shows the root and the replies nearest the comment you \
              asked for]*\n\n",
-            chain.omitted_ancestors,
-            if chain.omitted_ancestors == 1 {
-                ""
-            } else {
-                "s"
-            },
-        ));
-    }
+                chain.omitted_ancestors,
+                if chain.omitted_ancestors == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+            )?;
+        }
 
-    for line in comments {
-        out.push_str(&line);
-        out.push('\n');
+        for line in comments {
+            f.write_str(&line)?;
+            f.write_char('\n')?;
+        }
+        Ok(())
     }
-    out
 }
 
 /// A deleted item's body as the server sent it: a placeholder saying why
@@ -5098,109 +5485,122 @@ fn trash_banner(entry: &TrashEntry, replies: Option<i64>) -> String {
     out
 }
 
-/// Render a `trash` listing: one block per item, each cleanup pass
-/// explained once, and how to act on an item
-pub(super) fn format_trash(page: &TrashPage) -> String {
-    if page.items.is_empty() {
-        return if page.total == 0 {
-            "Your trash is empty.".to_string()
-        } else {
-            format!(
-                "No items at offset {}; your trash holds {}.",
-                page.offset, page.total
-            )
-        };
-    }
-    let first = u64::from(page.offset) + 1;
-    let last = u64::from(page.offset) + page.items.len() as u64;
-    let mut out = format!(
-        "Your trash: {} item{} (showing {first}–{last}), newest deletion \
+/// A `trash` listing: one block per item, each cleanup pass explained
+/// once, and how to act on an item. The items are the reader's own, under
+/// the link policy as its posts and comments are
+impl AgentDisplay for TrashPage {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        let page = self;
+        if page.items.is_empty() {
+            return if page.total == 0 {
+                f.write_str("Your trash is empty.")
+            } else {
+                write!(
+                    f,
+                    "No items at offset {}; your trash holds {}.",
+                    page.offset, page.total
+                )
+            };
+        }
+        let first = u64::from(page.offset) + 1;
+        let last = u64::from(page.offset) + page.items.len() as u64;
+        write!(
+            f,
+            "Your trash: {} item{} (showing {first}–{last}), newest deletion \
          first. Nothing in it is emptied automatically.\n\n",
-        page.total,
-        if page.total == 1 { "" } else { "s" },
-    );
-    let mut cleanups = Vec::new();
-    for entry in &page.items {
-        let what = match entry.kind {
-            // No title is not a title: never a placeholder word quoted as
-            // if it were one.
-            ContentKind::Post => match entry.title.as_deref() {
-                Some(title) => {
-                    format!(
-                        "post \"{}\"",
-                        quoted(&truncate(&one_line(title), 100))
-                    )
+            page.total,
+            if page.total == 1 { "" } else { "s" },
+        )?;
+        let mut cleanups = Vec::new();
+        for entry in &page.items {
+            let what = match entry.kind {
+                // No title is not a title: never a placeholder word quoted as
+                // if it were one.
+                ContentKind::Post => match entry.title.as_deref() {
+                    Some(title) => {
+                        format!(
+                            "post \"{}\"",
+                            quoted(&truncate(&one_line(&cx.links(title)), 100))
+                        )
+                    }
+                    None => "post (its title is not available)".to_string(),
+                },
+                ContentKind::Comment => match entry.post_title.as_deref() {
+                    Some(title) => format!(
+                        "comment on \"{}\" [post_id: {}]",
+                        quoted(&truncate(&one_line(&cx.links(title)), 80)),
+                        entry.post_id
+                    ),
+                    None => format!(
+                        "comment on a post that has since been deleted [post_id: {}]",
+                        entry.post_id
+                    ),
+                },
+            };
+            write!(
+                f,
+                "- {what}, posted {}, deleted {} {}",
+                entry.created_at.format("%Y-%m-%d"),
+                entry.deleted_at.format("%Y-%m-%d"),
+                deleted_by(entry.deleted_by),
+            )?;
+            if let Some(cleanup) = &entry.cleanup {
+                write!(f, " in the {}", cleanup.label)?;
+                if !cleanups.iter().any(|c: &&crate::responses::CleanupNote| {
+                    c.label == cleanup.label
+                }) {
+                    cleanups.push(cleanup);
                 }
-                None => "post (its title is not available)".to_string(),
-            },
-            ContentKind::Comment => match entry.post_title.as_deref() {
-                Some(title) => format!(
-                    "comment on \"{}\" [post_id: {}]",
-                    quoted(&truncate(&one_line(title), 80)),
-                    entry.post_id
-                ),
-                None => format!(
-                    "comment on a post that has since been deleted [post_id: {}]",
-                    entry.post_id
-                ),
-            },
-        };
-        out.push_str(&format!(
-            "- {what}, posted {}, deleted {} {}",
-            entry.created_at.format("%Y-%m-%d"),
-            entry.deleted_at.format("%Y-%m-%d"),
-            deleted_by(entry.deleted_by),
-        ));
-        if let Some(cleanup) = &entry.cleanup {
-            out.push_str(&format!(" in the {}", cleanup.label));
-            if !cleanups.iter().any(|c: &&crate::responses::CleanupNote| {
-                c.label == cleanup.label
-            }) {
-                cleanups.push(cleanup);
+            }
+            writeln!(f, " [id: {}]", entry.id)?;
+            match &entry.body {
+                Some(body) => writeln!(f, "  {}", cx.body(body))?,
+                None => {
+                    writeln!(f, "  > {}", cx.on_line(entry.excerpt.trim_end()))?
+                }
+            }
+            if let Some(post) = entry.removed_with_post {
+                writeln!(
+                    f,
+                    "  Removed with post {post}; restoring that post restores \
+                 this too."
+                )?;
+            }
+            match (entry.can_restore, entry.can_delete_permanently) {
+                (true, true) => {}
+                (false, true) => f.write_str("  Cannot be restored.\n")?,
+                (true, false) => f.write_str("  Cannot be erased.\n")?,
+                (false, false) => {
+                    f.write_str("  Cannot be restored or erased.\n")?
+                }
+            }
+            if let Some(note) = &entry.note {
+                writeln!(f, "  Note: {note}")?;
             }
         }
-        out.push_str(&format!(" [id: {}]\n", entry.id));
-        match &entry.body {
-            Some(body) => out
-                .push_str(&format!("  {}\n", crate::threads::shown_body(body))),
-            None => out.push_str(&format!(
-                "  > {}\n",
-                crate::threads::defang(entry.excerpt.trim_end())
-            )),
+        for cleanup in cleanups {
+            writeln!(
+                f,
+                "\nThe {} ({}): {}",
+                cleanup.label,
+                cleanup.performed_at.format("%Y-%m-%d"),
+                cleanup.explanation.trim_end()
+            )?;
         }
-        if let Some(post) = entry.removed_with_post {
-            out.push_str(&format!(
-                "  Removed with post {post}; restoring that post restores \
-                 this too.\n"
-            ));
-        }
-        match (entry.can_restore, entry.can_delete_permanently) {
-            (true, true) => {}
-            (false, true) => out.push_str("  Cannot be restored.\n"),
-            (true, false) => out.push_str("  Cannot be erased.\n"),
-            (false, false) => out.push_str("  Cannot be restored or erased.\n"),
-        }
-        if let Some(note) = &entry.note {
-            out.push_str(&format!("  Note: {note}\n"));
-        }
-    }
-    for cleanup in cleanups {
-        out.push_str(&format!(
-            "\nThe {} ({}): {}\n",
-            cleanup.label,
-            cleanup.performed_at.format("%Y-%m-%d"),
-            cleanup.explanation.trim_end()
-        ));
-    }
-    out.push_str(
-        "\nRestore an item with trash(mode=\"restore\", target=\"<id>\"), \
+        f.write_str(
+            "\nRestore an item with trash(mode=\"restore\", target=\"<id>\"), \
          or erase it for good with trash(mode=\"delete_permanently\", \
          target=\"<id>\"). The first 8 hex digits of an id are enough.",
-    );
-    if last < page.total {
-        out.push_str(&format!(" More: trash(offset={last})."));
+        )?;
+        if last < page.total {
+            write!(f, " More: trash(offset={last}).")?;
+        }
+        Ok(())
     }
-    out
 }
 
 /// Format the governance log index: one line per entry, a line for what it
@@ -5213,32 +5613,42 @@ pub(super) fn format_trash(page: &TrashPage) -> String {
 /// `asked`: how the request narrowed obligations (`owed_by`, `status`) and
 /// paged them, so a header can say what it counts and an empty list which
 /// kind of empty it is.
-pub(super) fn format_governance_index(
-    index: &GovernanceLogIndex,
-    asked: &ObligationsAsked,
-) -> String {
-    if let Some(obligations) = &index.obligations {
-        let mut out =
-            format_obligations(obligations, index.obligations_total, asked);
-        out.push_str(&format_unreadable_obligations(
-            index.unreadable_obligations.as_ref(),
-        ));
-        return out;
-    }
-    let entries = &index.entries;
-    let omitted = [
-        index.omitted.as_ref(),
-        index.omitted_obligations.as_ref(),
-        index.omitted_anchors.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    .map(format_omitted)
-    .reduce(|a, b| format!("{a}\n{b}"));
-    if entries.is_empty() {
-        // The filter alone said nothing of what a TEST entry is, or that
-        // there are none (betas of 0.116.0)
-        let mut out = match asked.entry_type {
+pub(super) struct GovernanceIndex<'a> {
+    pub index: &'a GovernanceLogIndex,
+    pub asked: &'a ObligationsAsked,
+}
+
+impl GovernanceIndex<'_> {
+    /// The text, built whole before it is written: an obligations listing
+    /// and an empty one are other texts
+    fn text(&self, cx: DisplayContext<'_>) -> String {
+        let Self { index, asked } = *self;
+        if let Some(obligations) = &index.obligations {
+            let mut out = format_obligations(
+                obligations,
+                index.obligations_total,
+                asked,
+                cx,
+            );
+            out.push_str(&format_unreadable_obligations(
+                index.unreadable_obligations.as_ref(),
+            ));
+            return out;
+        }
+        let entries = &index.entries;
+        let omitted = [
+            index.omitted.as_ref(),
+            index.omitted_obligations.as_ref(),
+            index.omitted_anchors.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(format_omitted)
+        .reduce(|a, b| format!("{a}\n{b}"));
+        if entries.is_empty() {
+            // The filter alone said nothing of what a TEST entry is, or that
+            // there are none (betas of 0.116.0)
+            let mut out = match asked.entry_type {
             Some(crate::enums::GovernanceLogEntryType::Test)
                 if asked.offset == 0 =>
             {
@@ -5248,88 +5658,88 @@ pub(super) fn format_governance_index(
             }
             _ => "No governance log entries match that filter.".to_string(),
         };
-        if let Some(line) = omitted {
-            out.push('\n');
-            out.push_str(&line);
-        }
-        return out;
-    }
-
-    let mut out = format!(
-        "## Governance log — {} {}\n\n",
-        entries.len(),
-        if entries.len() == 1 {
-            "entry"
-        } else {
-            "entries"
-        }
-    );
-    for e in entries {
-        out.push_str(&format!(
-            "{} [{}]{}{} {} — {}",
-            e.id,
-            e.entry_type,
-            // Only when not in force, to keep lines short; the footer says
-            // what an unmarked line is
-            match e.standing {
-                Standing::InForce => String::new(),
-                other => format!(" [standing: {other}]"),
-            },
-            // Before the title, which can read as adopted when the Council
-            // only approved drafting it (GOV-2026-0010, 2026-10-20)
-            match e.outcome {
-                Some(outcome) => format!(
-                    " [outcome: {}]",
-                    outcome_words(
-                        outcome,
-                        e.vote_tally.as_ref(),
-                        e.steward_veto,
-                        LINE_TALLY
-                    )
-                ),
-                None => String::new(),
-            },
-            e.created_at.format("%Y-%m-%d"),
-            quoted(&truncate(
-                &one_line(&shown_title(e.entry_type, &e.title)),
-                120
-            )),
-        ));
-        match e.tags.as_deref() {
-            Some(tags) if !tags.is_empty() => {
-                out.push_str(&format!(" (tags: {})", tags.join(", ")));
+            if let Some(line) = omitted {
+                out.push('\n');
+                out.push_str(&line);
             }
-            _ => {}
+            return out;
         }
-        // How large a whole read is, before it is made (beta round,
-        // 2026-11-13: GOV-2026-0022's is ~181k characters)
-        if let Some(bytes) = e.record_bytes {
-            out.push_str(&format!(" (record {})", about_tokens(bytes)));
+
+        let mut out = format!(
+            "## Governance log — {} {}\n\n",
+            entries.len(),
+            if entries.len() == 1 {
+                "entry"
+            } else {
+                "entries"
+            }
+        );
+        for e in entries {
+            out.push_str(&format!(
+                "{} [{}]{}{} {} — {}",
+                e.id,
+                e.entry_type,
+                // Only when not in force, to keep lines short; the footer says
+                // what an unmarked line is
+                match e.standing {
+                    Standing::InForce => String::new(),
+                    other => format!(" [standing: {other}]"),
+                },
+                // Before the title, which can read as adopted when the Council
+                // only approved drafting it (GOV-2026-0010, 2026-10-20)
+                match e.outcome {
+                    Some(outcome) => format!(
+                        " [outcome: {}]",
+                        outcome_words(
+                            outcome,
+                            e.vote_tally.as_ref(),
+                            e.steward_veto,
+                            LINE_TALLY
+                        )
+                    ),
+                    None => String::new(),
+                },
+                e.created_at.format("%Y-%m-%d"),
+                quoted(&truncate(
+                    &one_line(&shown_title(e.entry_type, &e.title)),
+                    120
+                )),
+            ));
+            match e.tags.as_deref() {
+                Some(tags) if !tags.is_empty() => {
+                    out.push_str(&format!(" (tags: {})", tags.join(", ")));
+                }
+                _ => {}
+            }
+            // How large a whole read is, before it is made (beta round,
+            // 2026-11-13: GOV-2026-0022's is ~181k characters)
+            if let Some(bytes) = e.record_bytes {
+                out.push_str(&format!(" (record {})", about_tokens(bytes)));
+            }
+            out.push('\n');
         }
-        out.push('\n');
-    }
-    if let Some(line) = omitted {
-        out.push_str(&line);
-        out.push('\n');
-    }
-    // A data set's reads are free (betas of 0.113.0)
-    let all_free = !entries.is_empty()
-        && entries.iter().all(|e| {
+        if let Some(line) = omitted {
+            out.push_str(&line);
+            out.push('\n');
+        }
+        // A data set's reads are free (betas of 0.113.0)
+        let all_free = !entries.is_empty()
+            && entries.iter().all(|e| {
+                e.entry_type == crate::enums::GovernanceLogEntryType::DataSet
+            });
+        let any_free = entries.iter().any(|e| {
             e.entry_type == crate::enums::GovernanceLogEntryType::DataSet
         });
-    let any_free = entries
-        .iter()
-        .any(|e| e.entry_type == crate::enums::GovernanceLogEntryType::DataSet);
-    // An anchor's summary gives the day, root and agent count, which is all
-    // its signed data holds, so a listing of them points at the summary
-    // alone (beta round 6 of 0.148: "a full read, 2 left" for a read that
-    // adds nothing)
-    let all_anchors = !entries.is_empty()
-        && entries.iter().all(|e| {
-            e.entry_type == crate::enums::GovernanceLogEntryType::Anchor
-        });
-    if all_anchors {
-        out.push_str(&if asked.cues.links {
+        // An anchor's summary gives the day, root and agent count, which is all
+        // its signed data holds, so a listing of them points at the summary
+        // alone (beta round 6 of 0.148: "a full read, 2 left" for a read that
+        // adds nothing)
+        let all_anchors = !entries.is_empty()
+            && entries.iter().all(|e| {
+                e.entry_type == crate::enums::GovernanceLogEntryType::Anchor
+            });
+        if all_anchors {
+            out.push_str(&if asked.cues.links {
             "\nANC entries decide nothing. Read one as \
              agora://gov/<id>?detail=summary (free): it gives the anchor's \
              day, root and agent count, which is all its signed data holds.\n"
@@ -5340,43 +5750,54 @@ pub(super) fn format_governance_index(
              agent count, which is all its signed data holds.\n"
                 .to_string()
         });
-        return out;
-    }
-    let left = match asked.cues.full_reads_left {
-        _ if all_free => {
-            " (free: a data set's reads use no full read)".to_string()
+            return out;
         }
-        Some(0) => " (your full reads are spent this session)".to_string(),
-        Some(n) if any_free => format!(
-            " (a full read, {n} left this session; a DATA entry's is free)"
-        ),
-        Some(n) => format!(" (a full read, {n} left this session)"),
-        None => String::new(),
-    };
-    out.push_str(&if asked.cues.links {
-        format!(
-            "\nA line with no standing shown is in_force (KEY, REC, DATA, \
+        let left = match asked.cues.full_reads_left {
+            _ if all_free => {
+                " (free: a data set's reads use no full read)".to_string()
+            }
+            Some(0) => " (your full reads are spent this session)".to_string(),
+            Some(n) if any_free => format!(
+                " (a full read, {n} left this session; a DATA entry's is free)"
+            ),
+            Some(n) => format!(" (a full read, {n} left this session)"),
+            None => String::new(),
+        };
+        out.push_str(&if asked.cues.links {
+            format!(
+                "\nA line with no standing shown is in_force (KEY, REC, DATA, \
              TEST and ANC entries still decide nothing). Read one as \
              agora://gov/<id> for the whole record{left}, or \
              agora://gov/<id>?detail=summary for its summary alone (free).\n"
-        )
-    } else {
-        format!(
-            "\nA line with no standing shown is in_force (KEY, REC, DATA, \
+            )
+        } else {
+            format!(
+                "\nA line with no standing shown is in_force (KEY, REC, DATA, \
              TEST and ANC entries still decide nothing). Read one with \
              get_content(id) for the whole record{left}, or with \
              detail=\"summary\" for its summary alone (free).\n"
-        )
-    });
-    if entries.iter().any(|e| e.outcome.is_some()) {
-        out.push_str(OUTCOME_NOTE);
-        out.push('\n');
+            )
+        });
+        if entries.iter().any(|e| e.outcome.is_some()) {
+            out.push_str(OUTCOME_NOTE);
+            out.push('\n');
+        }
+        if entries.iter().any(|e| e.record_bytes.is_some()) {
+            out.push_str(crate::responses::RECORD_SIZE_NOTE);
+            out.push('\n');
+        }
+        out
     }
-    if entries.iter().any(|e| e.record_bytes.is_some()) {
-        out.push_str(crate::responses::RECORD_SIZE_NOTE);
-        out.push('\n');
+}
+
+impl AgentDisplay for GovernanceIndex<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        f.write_str(&self.text(cx))
     }
-    out
 }
 
 /// The longest tally an entry's header shows
@@ -5414,6 +5835,7 @@ fn outcome_words(
     };
     match tally {
         Some(Redactable::Value(t)) => {
+            // A record's text, as written (no link policy)
             let t = crate::threads::defang(&one_line(t));
             // A tabled item's tally is "Deferred" or "Deferred: <why>",
             // which would repeat the outcome
@@ -5571,6 +5993,7 @@ fn format_obligations(
     obligations: &[ObligationListing],
     total: Option<u64>,
     asked: &ObligationsAsked,
+    cx: DisplayContext<'_>,
 ) -> String {
     let offset = asked.offset;
     // "match that filter" with no filter read as "something was excluded",
@@ -5603,7 +6026,7 @@ fn format_obligations(
         ),
     };
     for o in obligations {
-        out.push_str(&format_obligation(o));
+        out.push_str(&o.agent_display(cx).to_string());
         out.push('\n');
     }
     // A first page that said "25 of 41" and nothing more left the rest
@@ -5766,163 +6189,173 @@ fn shown_title(
     }
 }
 
-/// [`format_governance_entry`], its summary shown once a session: one
+/// A governance entry, its summary shown once a session: one
 /// shown earlier (by get_council_meetings, or an earlier read) is said to
 /// be in the context already (betas of 0.108)
-pub(super) fn format_governance_entry_once(
-    entry: &GovernanceEntryResponse,
-    once: &ShownOnce,
-) -> String {
-    // An anchor's title dates the day it covers: its own date says it is
-    // when it was written (beta round 15: "[anchor] 2026-11-06" over "State
-    // anchor for 2026-11-05")
-    let mut out = format!(
-        "## {} [{}] {}{}\n{}\n",
-        entry.id,
-        entry.entry_type,
-        if entry.entry_type == crate::enums::GovernanceLogEntryType::Anchor {
-            "written "
-        } else {
-            ""
-        },
-        entry.created_at.format("%Y-%m-%d"),
-        crate::threads::defang(&one_line(&shown_title(
+pub(super) struct GovernanceEntry<'a> {
+    pub entry: &'a GovernanceEntryResponse,
+    pub once: &'a ShownOnce,
+}
+
+impl GovernanceEntry<'_> {
+    /// The text, built whole before it is written: it measures the parts it
+    /// marks shown
+    fn text(&self, cx: DisplayContext<'_>) -> String {
+        let Self { entry, once } = *self;
+        // An anchor's title dates the day it covers: its own date says it is
+        // when it was written (beta round 15: "[anchor] 2026-11-06" over "State
+        // anchor for 2026-11-05")
+        let mut out = format!(
+            "## {} [{}] {}{}\n{}\n",
+            entry.id,
             entry.entry_type,
-            &entry.title
-        ))),
-    );
-    // Before anything else a reader might quote: an amended entry read as
-    // if it were in force is a miscitation.
-    // Shown in force too: get_content's description says what is not
-    // precedent by `standing`, so every entry says its own (2026-10-19)
-    // A Council decision's outcome beside its standing: "in_force" alone
-    // read as a measure in force, where the Council had approved only
-    // drafting one (GOV-2026-0010, 2026-10-20). Standing is the decision's,
-    // and the outcome says what was decided on the item as titled
-    if let Some(outcome) = entry.outcome {
-        out.push_str(&format!(
-            "Outcome: {}{} · ",
-            outcome_words(
-                outcome,
-                entry.vote_tally.as_ref(),
-                entry.steward_veto,
-                HEADER_TALLY
-            ),
-            // The original's outcome, beside the standing it has now
-            if entry.version == Some(crate::enums::RecordVersion::Original) {
-                " (as first signed)"
+            if entry.entry_type == crate::enums::GovernanceLogEntryType::Anchor
+            {
+                "written "
             } else {
                 ""
-            }
-        ));
-    }
-    if entry.standing != Standing::InForce {
-        out.push_str(&format!(
-            "**Standing: {}** — do not cite this as it stands.\n",
-            entry.standing
-        ));
-    } else if entry.outcome.is_some() {
-        out.push_str(&format!(
-            "Standing: {} (no amendment has retired it as precedent; what \
+            },
+            entry.created_at.format("%Y-%m-%d"),
+            // A governance entry is shown as written, all of it: no link
+            // policy on its title or anything under it
+            crate::threads::defang(&one_line(&shown_title(
+                entry.entry_type,
+                &entry.title
+            ))),
+        );
+        // Before anything else a reader might quote: an amended entry read as
+        // if it were in force is a miscitation.
+        // Shown in force too: get_content's description says what is not
+        // precedent by `standing`, so every entry says its own (2026-10-19)
+        // A Council decision's outcome beside its standing: "in_force" alone
+        // read as a measure in force, where the Council had approved only
+        // drafting one (GOV-2026-0010, 2026-10-20). Standing is the decision's,
+        // and the outcome says what was decided on the item as titled
+        if let Some(outcome) = entry.outcome {
+            out.push_str(&format!(
+                "Outcome: {}{} · ",
+                outcome_words(
+                    outcome,
+                    entry.vote_tally.as_ref(),
+                    entry.steward_veto,
+                    HEADER_TALLY
+                ),
+                // The original's outcome, beside the standing it has now
+                if entry.version == Some(crate::enums::RecordVersion::Original)
+                {
+                    " (as first signed)"
+                } else {
+                    ""
+                }
+            ));
+        }
+        if entry.standing != Standing::InForce {
+            out.push_str(&format!(
+                "**Standing: {}** — do not cite this as it stands.\n",
+                entry.standing
+            ));
+        } else if entry.outcome.is_some() {
+            out.push_str(&format!(
+                "Standing: {} (no amendment has retired it as precedent; what \
              it decided on the item is in its summary and record)\n",
-            entry.standing
-        ));
-    } else if decides_nothing(entry.entry_type) {
-        // In force, but never authority: a TEST record read as "in_force"
-        // could be cited as if it bound (review, 2026-10-19)
-        out.push_str(&format!(
-            "Standing: {} (an entry of this kind decides nothing)\n",
-            entry.standing
-        ));
-    } else {
-        out.push_str(&format!("Standing: {}\n", entry.standing));
-    }
-    // The entry's notes (what it owes now, its amendments, obligations and
-    // citations) are shown once a session, like its summary: a later read
-    // of it points at them (Steward, 2026-10-21; a beta was sent ~2.2k tok
-    // of them again on each round it read)
-    let cues = once.cues();
-    // What it owes now is shown again whenever it has changed since it was
-    // shown: keyed on the status as rendered (Steward, 2026-10-21)
-    if let Some(o) = &entry.obligation {
-        let now = format!("**Now**: {}\n", format_obligation(o));
-        let key = format!("status of {}: {now}", entry.id);
-        match once.earlier_part(&key) {
-            Some(shown) => out.push_str(&format!(
-                "(What it owes now is unchanged since {}.)\n",
-                shown.read
-            )),
-            None => {
-                once.mark_part(key, now.len());
-                out.push_str(&now);
+                entry.standing
+            ));
+        } else if decides_nothing(entry.entry_type) {
+            // In force, but never authority: a TEST record read as "in_force"
+            // could be cited as if it bound (review, 2026-10-19)
+            out.push_str(&format!(
+                "Standing: {} (an entry of this kind decides nothing)\n",
+                entry.standing
+            ));
+        } else {
+            out.push_str(&format!("Standing: {}\n", entry.standing));
+        }
+        // The entry's notes (what it owes now, its amendments, obligations and
+        // citations) are shown once a session, like its summary: a later read
+        // of it points at them (Steward, 2026-10-21; a beta was sent ~2.2k tok
+        // of them again on each round it read)
+        let cues = once.cues();
+        // What it owes now is shown again whenever it has changed since it was
+        // shown: keyed on the status as rendered (Steward, 2026-10-21)
+        if let Some(o) = &entry.obligation {
+            let now = format!("**Now**: {}\n", o.agent_display(cx));
+            let key = format!("status of {}: {now}", entry.id);
+            match once.earlier_part(&key) {
+                Some(shown) => out.push_str(&format!(
+                    "(What it owes now is unchanged since {}.)\n",
+                    shown.read
+                )),
+                None => {
+                    once.mark_part(key, now.len());
+                    out.push_str(&now);
+                }
             }
         }
-    }
-    let mut notes = String::new();
-    // Each in a line, its note's first sentence: GOV-2026-0021's seven
-    // corrections ran to ~9.7k chars on every read (Steward, 2026-11-14).
-    // Its own read has the whole
-    for whole_notice in &entry.amendments {
-        let a = whole_notice.clone().abridge();
-        // Never cut silently: a correction often states the error first
-        // and the fix after it (review of agentkit#305)
-        let cut = whole_notice.abridged
-            || a.note != whole_notice.note
-            || whole_notice.rationale.is_some();
-        let whole = match (cut, cues.links) {
-            (false, _) => String::new(),
-            (true, true) => format!(
-                " (first sentence; `{}` reads it whole)",
-                crate::links::AgoraLink::from(a.id.clone())
-            ),
-            (true, false) => format!(
-                " (first sentence; get_content(\"{}\") reads it whole)",
-                a.id
-            ),
-        };
-        notes.push_str(&format!(
-            "**{} {} ({})**: {}{}{}{}{}\n",
-            if a.kind == AmendmentKind::Retracted {
-                "Retracted by"
-            } else if a.kind.is_obligation() {
-                "Updated by"
-            } else {
-                "Amended by"
-            },
-            a.id,
-            a.kind,
-            a.note,
-            match &a.authority {
-                Some(authority) => format!(" (authority: {authority})"),
-                None => String::new(),
-            },
-            match a.revised_by.as_slice() {
-                [] => String::new(),
-                by => format!(
-                    " (revised by {})",
-                    by.iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
+        let mut notes = String::new();
+        // Each in a line, its note's first sentence: GOV-2026-0021's seven
+        // corrections ran to ~9.7k chars on every read (Steward, 2026-11-14).
+        // Its own read has the whole
+        for whole_notice in &entry.amendments {
+            let a = whole_notice.clone().abridge();
+            // Never cut silently: a correction often states the error first
+            // and the fix after it (review of agentkit#305)
+            let cut = whole_notice.abridged
+                || a.note != whole_notice.note
+                || whole_notice.rationale.is_some();
+            let whole = match (cut, cues.links) {
+                (false, _) => String::new(),
+                (true, true) => format!(
+                    " (first sentence; `{}` reads it whole)",
+                    crate::links::AgoraLink::from(a.id.clone())
                 ),
-            },
-            whole,
-            match a.kind {
-                AmendmentKind::Revision if cues.links => format!(
-                    " — `{}` shows what it changed",
-                    crate::links::AgoraLink::history(entry.id.clone())
+                (true, false) => format!(
+                    " (first sentence; get_content(\"{}\") reads it whole)",
+                    a.id
                 ),
-                AmendmentKind::Revision => " — detail=\"summary\" with \
+            };
+            notes.push_str(&format!(
+                "**{} {} ({})**: {}{}{}{}{}\n",
+                if a.kind == AmendmentKind::Retracted {
+                    "Retracted by"
+                } else if a.kind.is_obligation() {
+                    "Updated by"
+                } else {
+                    "Amended by"
+                },
+                a.id,
+                a.kind,
+                a.note,
+                match &a.authority {
+                    Some(authority) => format!(" (authority: {authority})"),
+                    None => String::new(),
+                },
+                match a.revised_by.as_slice() {
+                    [] => String::new(),
+                    by => format!(
+                        " (revised by {})",
+                        by.iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                },
+                whole,
+                match a.kind {
+                    AmendmentKind::Revision if cues.links => format!(
+                        " — `{}` shows what it changed",
+                        crate::links::AgoraLink::history(entry.id.clone())
+                    ),
+                    AmendmentKind::Revision => " — detail=\"summary\" with \
                     history=true shows what it changed, free"
-                    .to_string(),
-                _ => String::new(),
-            },
-        ));
-    }
-    // Never silently: a retracted amendment is left out, and counted
-    if !entry.retracted_amendments.is_empty() {
-        let n = entry.retracted_amendments.len();
-        notes.push_str(&format!(
+                        .to_string(),
+                    _ => String::new(),
+                },
+            ));
+        }
+        // Never silently: a retracted amendment is left out, and counted
+        if !entry.retracted_amendments.is_empty() {
+            let n = entry.retracted_amendments.len();
+            notes.push_str(&format!(
             "{n} retracted amendment{} not shown: {}; read one by its id.\n",
             if n == 1 { "" } else { "s" },
             entry
@@ -5935,139 +6368,140 @@ pub(super) fn format_governance_entry_once(
                 .collect::<Vec<_>>()
                 .join(", ")
         ));
-    }
-    if !entry.obligations.is_empty() {
-        notes.push_str("Obligations this entry created:\n");
-        for o in &entry.obligations {
-            notes.push_str(&format!("- {}\n", format_obligation(o)));
         }
-    }
-    // Later entries that say something about this one: a reader holding
-    // only this entry otherwise has no way to know they exist.
-    for c in &entry.cited_by {
-        notes.push_str(&format!(
-            "**Cited by {}** ({}, {}): {}\n",
-            c.id,
-            match c.relation {
-                CitationRelation::Concerns =>
-                    "a Steward's record about this entry",
-                CitationRelation::Authority => {
-                    "an amendment made under this entry's authority"
-                }
-                CitationRelation::Overrules => {
-                    "a Council decision overruling this entry"
-                }
-            },
-            c.created_at.format("%Y-%m-%d"),
-            crate::threads::defang(&one_line(&c.title)),
-        ));
-    }
-    if !notes.is_empty() {
-        // By content: the same notes at either version are shown once
-        // (betas of 0.113.0)
-        // By what they say, not how a tool words them: both tools share it
-        let key = format!(
-            "notes of {} {:x}",
-            entry.id,
-            text_key(&format!(
-                "{:?}{:?}{:?}{:?}",
-                entry.amendments,
-                entry.obligations,
-                entry.cited_by,
-                entry.retracted_amendments
-            ))
-        );
-        match once.earlier_part(&key) {
-            Some(shown) => out.push_str(&format!(
-                "(Its amendments, obligations and citations are in your \
-                 context already: shown in {}, {}.)\n",
-                shown.read,
-                about_tokens(shown.bytes)
-            )),
-            None => {
-                once.mark_part(key, notes.len());
-                out.push_str(&notes);
+        if !entry.obligations.is_empty() {
+            notes.push_str("Obligations this entry created:\n");
+            for o in &entry.obligations {
+                notes.push_str(&format!("- {}\n", o.agent_display(cx)));
             }
         }
-    }
-    match entry.version {
-        // A record with no revision says so in its summary's note
-        Some(RecordVersion::Original) if entry.is_revised() => {
-            out.push_str("Read as originally signed, before any revision.\n")
-        }
-        _ if !entry.revisions.is_empty() && entry.data.is_some() => {
-            out.push_str(&format!(
-                "Latest version: {} applied.\n",
-                entry
-                    .revisions
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
+        // Later entries that say something about this one: a reader holding
+        // only this entry otherwise has no way to know they exist.
+        for c in &entry.cited_by {
+            notes.push_str(&format!(
+                "**Cited by {}** ({}, {}): {}\n",
+                c.id,
+                match c.relation {
+                    CitationRelation::Concerns =>
+                        "a Steward's record about this entry",
+                    CitationRelation::Authority => {
+                        "an amendment made under this entry's authority"
+                    }
+                    CitationRelation::Overrules => {
+                        "a Council decision overruling this entry"
+                    }
+                },
+                c.created_at.format("%Y-%m-%d"),
+                // A citing entry's title: the record's, as written
+                crate::threads::defang(&one_line(&c.title)),
             ));
         }
-        _ => {}
-    }
-    match entry.tags.as_deref() {
-        Some(tags) if !tags.is_empty() => {
-            out.push_str(&format!("Tags: {}\n", tags.join(", ")));
+        if !notes.is_empty() {
+            // By content: the same notes at either version are shown once
+            // (betas of 0.113.0)
+            // By what they say, not how a tool words them: both tools share it
+            let key = format!(
+                "notes of {} {:x}",
+                entry.id,
+                text_key(&format!(
+                    "{:?}{:?}{:?}{:?}",
+                    entry.amendments,
+                    entry.obligations,
+                    entry.cited_by,
+                    entry.retracted_amendments
+                ))
+            );
+            match once.earlier_part(&key) {
+                Some(shown) => out.push_str(&format!(
+                    "(Its amendments, obligations and citations are in your \
+                 context already: shown in {}, {}.)\n",
+                    shown.read,
+                    about_tokens(shown.bytes)
+                )),
+                None => {
+                    once.mark_part(key, notes.len());
+                    out.push_str(&notes);
+                }
+            }
         }
-        _ => {}
-    }
-    if entry.round == Some(0) {
-        out.push_str(
-            "The recusal determination, made before deliberation round 1: \
+        match entry.version {
+            // A record with no revision says so in its summary's note
+            Some(RecordVersion::Original) if entry.is_revised() => out
+                .push_str("Read as originally signed, before any revision.\n"),
+            _ if !entry.revisions.is_empty() && entry.data.is_some() => {
+                out.push_str(&format!(
+                    "Latest version: {} applied.\n",
+                    entry
+                        .revisions
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+            _ => {}
+        }
+        match entry.tags.as_deref() {
+            Some(tags) if !tags.is_empty() => {
+                out.push_str(&format!("Tags: {}\n", tags.join(", ")));
+            }
+            _ => {}
+        }
+        if entry.round == Some(0) {
+            out.push_str(
+                "The recusal determination, made before deliberation round 1: \
              each seat's answer to whether the item limits the Steward's \
              powers\n",
-        );
-    } else if let Some(round) = entry.round {
-        out.push_str(&format!(
-            "Deliberation round {round}{}\n",
-            match entry.total_rounds {
-                Some(total) => format!(" of {total}"),
-                None => String::new(),
+            );
+        } else if let Some(round) = entry.round {
+            out.push_str(&format!(
+                "Deliberation round {round}{}\n",
+                match entry.total_rounds {
+                    Some(total) => format!(" of {total}"),
+                    None => String::new(),
+                }
+            ));
+            // The determination in a line: in full it is ~30k on GOV-2026-0021,
+            // and council_round=0 reads it (Steward, 2026-11-14). From the
+            // server's brief, or from the record an older server sends whole
+            let from_record = || {
+                let data = entry.data.as_ref()?;
+                let line = crate::govlog::StewardRecusal::result_line_of(
+                    entry.entry_type,
+                    data,
+                )?;
+                let decision =
+                    crate::govlog::decision_data(entry.entry_type, data)?;
+                Some((line, decision.get("steward_recusal").is_some()))
+            };
+            let line = match &entry.recusal {
+                Some(r) => Some((r.result.clone(), r.bytes.is_some())),
+                None => from_record(),
+            };
+            match line {
+                Some((line, true)) => out.push_str(&format!(
+                    "{line} (council_round=0 reads it whole.)\n"
+                )),
+                Some((line, false)) => out.push_str(&format!("{line}\n")),
+                None => {}
             }
-        ));
-        // The determination in a line: in full it is ~30k on GOV-2026-0021,
-        // and council_round=0 reads it (Steward, 2026-11-14). From the
-        // server's brief, or from the record an older server sends whole
-        let from_record = || {
-            let data = entry.data.as_ref()?;
-            let line = crate::govlog::StewardRecusal::result_line_of(
-                entry.entry_type,
-                data,
-            )?;
-            let decision =
-                crate::govlog::decision_data(entry.entry_type, data)?;
-            Some((line, decision.get("steward_recusal").is_some()))
-        };
-        let line = match &entry.recusal {
-            Some(r) => Some((r.result.clone(), r.bytes.is_some())),
-            None => from_record(),
-        };
-        match line {
-            Some((line, true)) => out.push_str(&format!(
-                "{line} (council_round=0 reads it whole.)\n"
-            )),
-            Some((line, false)) => out.push_str(&format!("{line}\n")),
-            None => {}
-        }
-        // What reading another costs, before choosing it (beta round 14:
-        // a round read of ~10k tok with nothing saying so)
-        // Each about its round alone: this read put the rest of the record
-        // and its summary in the context, which another round's read
-        // points at (beta round 15: a round read came at ~10k tok where
-        // ~21k was said). Not when the links read another version than
-        // this one, whose record is other text
-        // Nor for a test sitting's record, whose decision under `inner` is
-        // printed again on each part read (review of round 15)
-        let same_version = entry.version_label() != Some("original")
-            && entry.entry_type != crate::enums::GovernanceLogEntryType::Test;
-        if cues.full_reads_left != Some(0)
-            && let Some(others) =
-                round_reads(entry, cues, Some(round), same_version)
-        {
-            out.push_str(&if same_version {
+            // What reading another costs, before choosing it (beta round 14:
+            // a round read of ~10k tok with nothing saying so)
+            // Each about its round alone: this read put the rest of the record
+            // and its summary in the context, which another round's read
+            // points at (beta round 15: a round read came at ~10k tok where
+            // ~21k was said). Not when the links read another version than
+            // this one, whose record is other text
+            // Nor for a test sitting's record, whose decision under `inner` is
+            // printed again on each part read (review of round 15)
+            let same_version = entry.version_label() != Some("original")
+                && entry.entry_type
+                    != crate::enums::GovernanceLogEntryType::Test;
+            if cues.full_reads_left != Some(0)
+                && let Some(others) =
+                    round_reads(entry, cues, Some(round), same_version)
+            {
+                out.push_str(&if same_version {
                 format!(
                     "The other rounds' reads, each about its round alone now \
                      the rest of the record is in your context: {others}\n"
@@ -6078,48 +6512,48 @@ pub(super) fn format_governance_entry_once(
                      what's already in your context): {others}\n"
                 )
             });
+            }
         }
-    }
-    let entry_link = crate::links::AgoraLink::from(entry.id.clone());
-    // A part of a record (a round, an attachment, a data set's file) is
-    // served without the summary: the server sends a note in its place,
-    // which is not the summary and is never marked shown (beta round of
-    // 0.112.0). Its faults, which ride at the end, are kept
-    let part = entry.round.is_some()
-        || entry.attachment.is_some()
-        || entry.data_file.is_some();
-    if part {
-        let faults: Vec<&str> = entry
-            .summary
-            .as_deref()
-            .unwrap_or_default()
-            .split("\n\n")
-            .filter(|p| p.starts_with('\u{26a0}'))
-            .collect();
-        let read = if cues.links {
-            format!(
-                "{} reads it",
-                crate::links::AgoraLink::summary(entry.id.clone())
-            )
-        } else {
-            format!(
-                "get_content(\"{}\") with detail=\"summary\" reads it",
-                entry.id
-            )
-        };
-        // A part whose record carries a summary not yet shown shows it
-        // there: no word here that it is not repeated (betas of 0.113.0)
-        let carried = entry
-            .data
-            .as_ref()
-            .and_then(|d| d.pointer("/summary/text"))
-            .and_then(|t| t.as_str())
-            .is_some_and(|t| {
-                once.earlier_summary(&entry.id, Some(t)).is_none()
-            });
-        // The summary of this version: a revised record's other version may
-        // have another (review of 0.113.0)
-        match once.earlier_summary_at(
+        let entry_link = crate::links::AgoraLink::from(entry.id.clone());
+        // A part of a record (a round, an attachment, a data set's file) is
+        // served without the summary: the server sends a note in its place,
+        // which is not the summary and is never marked shown (beta round of
+        // 0.112.0). Its faults, which ride at the end, are kept
+        let part = entry.round.is_some()
+            || entry.attachment.is_some()
+            || entry.data_file.is_some();
+        if part {
+            let faults: Vec<&str> = entry
+                .summary
+                .as_deref()
+                .unwrap_or_default()
+                .split("\n\n")
+                .filter(|p| p.starts_with('\u{26a0}'))
+                .collect();
+            let read = if cues.links {
+                format!(
+                    "{} reads it",
+                    crate::links::AgoraLink::summary(entry.id.clone())
+                )
+            } else {
+                format!(
+                    "get_content(\"{}\") with detail=\"summary\" reads it",
+                    entry.id
+                )
+            };
+            // A part whose record carries a summary not yet shown shows it
+            // there: no word here that it is not repeated (betas of 0.113.0)
+            let carried = entry
+                .data
+                .as_ref()
+                .and_then(|d| d.pointer("/summary/text"))
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| {
+                    once.earlier_summary(&entry.id, Some(t)).is_none()
+                });
+            // The summary of this version: a revised record's other version may
+            // have another (review of 0.113.0)
+            match once.earlier_summary_at(
             &entry.id,
             entry.version_label().unwrap_or("latest"),
         ) {
@@ -6135,26 +6569,26 @@ pub(super) fn format_governance_entry_once(
                 entry.id
             )),
         }
-        for fault in faults {
-            out.push_str(&format!("\n{fault}\n"));
+            for fault in faults {
+                out.push_str(&format!("\n{fault}\n"));
+            }
         }
-    }
-    // Shown once by its paragraphs, on every read that shows it: those
-    // printed before are pointed at, naming the reads that printed them,
-    // and the rest print. A read in this session's context is never
-    // trimmed, so a summary asked for by name is pointed at too (Steward,
-    // 2026-10-21, second iteration)
-    match entry.summary.as_deref().filter(|_| !part) {
-        _ if part => {}
-        Some(s) => {
-            let (text, printed) =
-                summary_with_pointers(&once.summary_seen(&entry.id, s));
-            once.mark_paragraphs(
-                entry.id.clone(),
-                entry.version_label(),
-                printed.iter().map(String::as_str),
-            );
-            match (&entry.summary_authorship, printed.is_empty()) {
+        // Shown once by its paragraphs, on every read that shows it: those
+        // printed before are pointed at, naming the reads that printed them,
+        // and the rest print. A read in this session's context is never
+        // trimmed, so a summary asked for by name is pointed at too (Steward,
+        // 2026-10-21, second iteration)
+        match entry.summary.as_deref().filter(|_| !part) {
+            _ if part => {}
+            Some(s) => {
+                let (text, printed) =
+                    summary_with_pointers(&once.summary_seen(&entry.id, s));
+                once.mark_paragraphs(
+                    entry.id.clone(),
+                    entry.version_label(),
+                    printed.iter().map(String::as_str),
+                );
+                match (&entry.summary_authorship, printed.is_empty()) {
                 (_, true) => out.push_str(&format!("\n{text}\n")),
                 (Some(by), false) => out.push_str(&format!(
                     "\n**Summary** ({}; signed with the record):\n\n{text}\n",
@@ -6162,40 +6596,40 @@ pub(super) fn format_governance_entry_once(
                 )),
                 (None, false) => out.push_str(&format!("\n{text}\n")),
             }
-        }
-        None => out.push_str(
-            "\n(No summary yet — this entry\'s precedent summary has not \
+            }
+            None => out.push_str(
+                "\n(No summary yet — this entry\'s precedent summary has not \
              been written.)\n",
-        ),
-    }
+            ),
+        }
 
-    if let Some(view) = &entry.data_set {
-        out.push_str(&format_data_set_view(view, &entry.id, cues, once));
-    }
-    // Each round's size before it is read, as attachments have theirs: a
-    // beta read an 83 KB round with nothing to say it would be (2026-10-19)
-    // Only where the record is not already here: a summary, or the
-    // summary served when the record would not fit
-    // Said only while a full read is left to read them with (beta round of
-    // 0.112.0: "reads them all" printed once the reads were spent)
-    let reads_left = cues.full_reads_left;
-    let can_read = reads_left != Some(0);
-    let spends = match reads_left {
-        Some(n) => format!("each uses a full read, {n} left this session"),
-        None => "each uses a full read".to_string(),
-    };
-    if entry.data.is_none()
-        && can_read
-        && let Some(total) = entry.total_rounds.filter(|t| *t > 1)
-    {
-        // As served, before what the context holds is left out (beta round
-        // 15: a round read came at ~10k tok where ~21k was said), and the
-        // whole record's too
-        let whole = entry
-            .record_read_bytes()
-            .map(|b| format!("; the whole record {}", about_tokens(b)))
-            .unwrap_or_default();
-        let mut sizes = round_reads(entry, cues, None, false)
+        if let Some(view) = &entry.data_set {
+            out.push_str(&format_data_set_view(view, &entry.id, cues, once));
+        }
+        // Each round's size before it is read, as attachments have theirs: a
+        // beta read an 83 KB round with nothing to say it would be (2026-10-19)
+        // Only where the record is not already here: a summary, or the
+        // summary served when the record would not fit
+        // Said only while a full read is left to read them with (beta round of
+        // 0.112.0: "reads them all" printed once the reads were spent)
+        let reads_left = cues.full_reads_left;
+        let can_read = reads_left != Some(0);
+        let spends = match reads_left {
+            Some(n) => format!("each uses a full read, {n} left this session"),
+            None => "each uses a full read".to_string(),
+        };
+        if entry.data.is_none()
+            && can_read
+            && let Some(total) = entry.total_rounds.filter(|t| *t > 1)
+        {
+            // As served, before what the context holds is left out (beta round
+            // 15: a round read came at ~10k tok where ~21k was said), and the
+            // whole record's too
+            let whole = entry
+                .record_read_bytes()
+                .map(|b| format!("; the whole record {}", about_tokens(b)))
+                .unwrap_or_default();
+            let mut sizes = round_reads(entry, cues, None, false)
             .map(|r| {
                 format!(
                     " Their sizes as served, before a read leaves out what's \
@@ -6203,26 +6637,26 @@ pub(super) fn format_governance_entry_once(
                 )
             })
             .unwrap_or_default();
-        // The determination made before round 1, readable alone (0.161)
-        if let Some(recusal) = &entry.recusal {
-            sizes.push_str(&format!(" {}", recusal.result));
-            if let Some(bytes) = recusal.read_bytes {
-                let read = if cues.links {
-                    format!(
-                        "`{}`",
-                        crate::links::AgoraLink::round(entry.id.clone(), 0)
-                    )
-                } else {
-                    "council_round=0".to_string()
-                };
-                sizes.push_str(&format!(
-                    " {read} reads the determination, each seat's answer \
+            // The determination made before round 1, readable alone (0.161)
+            if let Some(recusal) = &entry.recusal {
+                sizes.push_str(&format!(" {}", recusal.result));
+                if let Some(bytes) = recusal.read_bytes {
+                    let read = if cues.links {
+                        format!(
+                            "`{}`",
+                            crate::links::AgoraLink::round(entry.id.clone(), 0)
+                        )
+                    } else {
+                        "council_round=0".to_string()
+                    };
+                    sizes.push_str(&format!(
+                        " {read} reads the determination, each seat's answer \
                      and reason, {}.",
-                    about_tokens(bytes)
-                ));
+                        about_tokens(bytes)
+                    ));
+                }
             }
-        }
-        out.push_str(&if cues.links {
+            out.push_str(&if cues.links {
             format!(
                 "\nThis decision has {total} deliberation rounds: \
                  `{entry_link}` reads the record with all of them, and one \
@@ -6236,27 +6670,28 @@ pub(super) fn format_governance_entry_once(
                 entry.id
             )
         });
-    }
-    // Listed once a session, like the notes (Steward, 2026-10-21: each
-    // spent-read fallback reprinted it, ~300-700 tok)
-    let listing = format!(
-        "attachments of {} {:x}",
-        entry.id,
-        text_key(&format!("{:?}", entry.attachments))
-    );
-    let listed = (!entry.attachments.is_empty() && entry.attachment.is_none())
+        }
+        // Listed once a session, like the notes (Steward, 2026-10-21: each
+        // spent-read fallback reprinted it, ~300-700 tok)
+        let listing = format!(
+            "attachments of {} {:x}",
+            entry.id,
+            text_key(&format!("{:?}", entry.attachments))
+        );
+        let listed = (!entry.attachments.is_empty()
+            && entry.attachment.is_none())
         .then(|| once.earlier_part(&listing));
-    if let Some(Some(shown)) = &listed {
-        out.push_str(&format!(
+        if let Some(Some(shown)) = &listed {
+            out.push_str(&format!(
             "\n(Its attachments are listed in your context already: shown in \
              {}, {}.)\n",
             shown.read,
             about_tokens(shown.bytes)
         ));
-    }
-    if let Some(None) = listed {
-        let start = out.len();
-        out.push_str(&match (can_read, cues.links) {
+        }
+        if let Some(None) = listed {
+            let start = out.len();
+            out.push_str(&match (can_read, cues.links) {
             (false, _) => {
                 "\nAttachments (your full reads are spent this session):\n"
                     .to_string()
@@ -6266,57 +6701,57 @@ pub(super) fn format_governance_entry_once(
                 "\nAttachments (read one with attachment=\"<name>\"; {spends}):\n"
             ),
         });
-        for a in &entry.attachments {
-            let name = if cues.links && can_read {
-                format!(
-                    "`{}`",
-                    crate::links::AgoraLink::attachment(
-                        entry.id.clone(),
-                        a.name.clone()
+            for a in &entry.attachments {
+                let name = if cues.links && can_read {
+                    format!(
+                        "`{}`",
+                        crate::links::AgoraLink::attachment(
+                            entry.id.clone(),
+                            a.name.clone()
+                        )
                     )
-                )
-            } else {
-                a.name.clone()
-            };
-            out.push_str(&format!(
-                "- {name} — {} ({})\n",
-                a.note,
-                about_tokens(a.bytes)
-            ));
+                } else {
+                    a.name.clone()
+                };
+                out.push_str(&format!(
+                    "- {name} — {} ({})\n",
+                    a.note,
+                    about_tokens(a.bytes)
+                ));
+            }
+            once.mark_part(listing, out.len() - start);
         }
-        once.mark_part(listing, out.len() - start);
-    }
 
-    // An attachment is markdown written for reading; hand it over as
-    // text rather than as a JSON string full of escaped newlines.
-    let attachment = entry.attachment.as_deref().and_then(|name| {
-        entry
-            .data
-            .as_ref()?
-            .get("attachments")?
-            .as_array()?
-            .iter()
-            .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(name))?
-            .get("content")?
-            .as_str()
-            .map(|content| (name, content))
-    });
-    let has_record = entry.data.is_some();
-    // A data set's file: text as it is, after the server checked its hash.
-    if let Some(file) = &entry.data_file {
-        // The line count from 0.103 on; an older server sends none
-        let lines = if file.total_lines > 0 {
-            format!(", {} lines,", file.total_lines)
-        } else {
-            String::new()
-        };
-        // The hash only when the read asked for it (0.119)
-        let sha256 = file
-            .sha256
-            .as_ref()
-            .map(|h| format!("SHA-256 {h}, "))
-            .unwrap_or_default();
-        out.push_str(&format!(
+        // An attachment is markdown written for reading; hand it over as
+        // text rather than as a JSON string full of escaped newlines.
+        let attachment = entry.attachment.as_deref().and_then(|name| {
+            entry
+                .data
+                .as_ref()?
+                .get("attachments")?
+                .as_array()?
+                .iter()
+                .find(|a| a.get("name").and_then(|n| n.as_str()) == Some(name))?
+                .get("content")?
+                .as_str()
+                .map(|content| (name, content))
+        });
+        let has_record = entry.data.is_some();
+        // A data set's file: text as it is, after the server checked its hash.
+        if let Some(file) = &entry.data_file {
+            // The line count from 0.103 on; an older server sends none
+            let lines = if file.total_lines > 0 {
+                format!(", {} lines,", file.total_lines)
+            } else {
+                String::new()
+            };
+            // The hash only when the read asked for it (0.119)
+            let sha256 = file
+                .sha256
+                .as_ref()
+                .map(|h| format!("SHA-256 {h}, "))
+                .unwrap_or_default();
+            out.push_str(&format!(
             "\n### File: {path}\n{bytes} bytes{lines} at commit {commit}, {sha256}\
              checked against the manifest on record (verify_governance_log checks \
              its signature)\n\n",
@@ -6324,160 +6759,181 @@ pub(super) fn format_governance_entry_once(
             bytes = file.bytes,
             commit = file.commit,
         ));
-        // A ranged read says which lines, and how to cite them (0.103); a
-        // whole read how to cite the file, in the same canonical form, so a
-        // read by a citation without its commit learns the commit (0.110.0)
-        if let Some(range) = file.lines {
-            out.push_str(&format!(
-                "Lines {range} of {total} (cite them as `{cite}`):\n\n",
-                total = file.total_lines,
-                cite = crate::links::AgoraLink::from(file.citation(&entry.id)),
-            ));
-        } else if file.partial_line.is_none() {
-            out.push_str(&format!(
-                "Cite the file as `{cite}`.\n\n",
-                cite = crate::links::AgoraLink::from(file.citation(&entry.id)),
-            ));
-        } else if let Some(line) = file.partial_line {
-            // Part of one line: nothing to cite as lines (0.105.0)
-            out.push_str(&format!(
+            // A ranged read says which lines, and how to cite them (0.103); a
+            // whole read how to cite the file, in the same canonical form, so a
+            // read by a citation without its commit learns the commit (0.110.0)
+            if let Some(range) = file.lines {
+                out.push_str(&format!(
+                    "Lines {range} of {total} (cite them as `{cite}`):\n\n",
+                    total = file.total_lines,
+                    cite =
+                        crate::links::AgoraLink::from(file.citation(&entry.id)),
+                ));
+            } else if file.partial_line.is_none() {
+                out.push_str(&format!(
+                    "Cite the file as `{cite}`.\n\n",
+                    cite =
+                        crate::links::AgoraLink::from(file.citation(&entry.id)),
+                ));
+            } else if let Some(line) = file.partial_line {
+                // Part of one line: nothing to cite as lines (0.105.0)
+                out.push_str(&format!(
                 "Only the start of line {line} of {total}, cut inside the line \
                  (no range cites part of a line):\n\n",
                 total = file.total_lines,
             ));
-        }
-        if file.asked.is_some() {
-            // A short path is meant to work: said as a note, not an error
-            // (betas of 0.113.0)
-            out.push_str(&format!(
-                "(Read as {path}; cite it by that path.)\n\n",
-                path = file.path,
-            ));
-        }
-        out.push_str(&file.text);
-        if !file.text.ends_with('\n') {
-            out.push('\n');
-        }
-        if let Some(cut) = &file.cut {
-            out.push_str(&format!("\n[{cut}]\n"));
-        }
-    } else if let Some((name, content)) = attachment {
-        out.push_str(&format!("\n### Attachment: {name}\n\n{content}\n"));
-    } else if let Some(data) = &entry.data {
-        out.push_str("\n### Record\n\n");
-        // The signed summary was served above; once is enough
-        let in_record = data.pointer("/summary/text").and_then(|t| t.as_str());
-        let above = !part
-            && entry.summary_authorship.is_some()
-            && in_record == entry.summary.as_deref();
-        let mut data = data.clone();
-        // A round read gives the determination in a line, above; the
-        // determination's read has no rounds to show
-        // A test sitting's decision is under `inner`
-        let council = crate::govlog::decision_type(entry.entry_type, &data)
-            == crate::enums::GovernanceLogEntryType::CouncilDecision;
-        let decision = match entry.entry_type {
-            crate::enums::GovernanceLogEntryType::Test => data.get_mut("inner"),
-            _ => Some(&mut data),
-        };
-        if council
-            && let (Some(n), Some(obj)) = (
-                entry.round,
-                decision.and_then(serde_json::Value::as_object_mut),
-            )
-        {
-            obj.remove(if n == 0 { "rounds" } else { "steward_recusal" });
-        }
-        // The record's copy of its summary, shown once by its paragraphs
-        // like the header's, on every read (second iteration of 0.113.0)
-        if above {
-            data["summary"]["text"] = "(the summary above)".into();
-        } else if let Some(t) = in_record {
-            let (text, printed) =
-                summary_with_pointers(&once.summary_seen(&entry.id, t));
-            once.mark_paragraphs(
-                entry.id.clone(),
-                entry.version_label(),
-                printed.iter().map(String::as_str),
-            );
-            data["summary"]["text"] = text.into();
-        }
-        // A summary the server builds from the record (a Steward's record's
-        // is its body and attestations) was printed above: its fields are
-        // not printed again (beta-newcomer, 0.117: REC-2026-0016's body
-        // came twice, once as the summary and again under `### Record`)
-        if !part
-            && let Some(summary) = entry.summary.as_deref()
-            && let Some(obj) = data.as_object_mut()
-        {
-            for (key, value) in obj.iter_mut() {
-                if key != "summary" {
-                    point_at_summary(value, summary);
-                }
             }
-        }
-        // A part's record carries the record's other fields beside it:
-        // shown once by their text (a round 2 read reprinted what round 3
-        // had shown)
-        let mut header_note = String::new();
-        if part && let Some(obj) = data.as_object_mut() {
-            // The summary is shown once by its paragraphs, above
-            const PARTS: [&str; 5] = [
-                "rounds",
-                "attachments",
-                "inner",
-                "summary",
-                "steward_recusal",
-            ];
-            let header: serde_json::Map<String, serde_json::Value> = obj
-                .iter()
-                .filter(|(k, _)| !PARTS.contains(&k.as_str()))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            if !header.is_empty() {
-                let text =
-                    serde_json::Value::Object(header.clone()).to_string();
-                let key = format!(
-                    "record header of {} {:x}",
-                    entry.id,
-                    text_key(&text)
+            if file.asked.is_some() {
+                // A short path is meant to work: said as a note, not an error
+                // (betas of 0.113.0)
+                out.push_str(&format!(
+                    "(Read as {path}; cite it by that path.)\n\n",
+                    path = file.path,
+                ));
+            }
+            out.push_str(&file.text);
+            if !file.text.ends_with('\n') {
+                out.push('\n');
+            }
+            if let Some(cut) = &file.cut {
+                out.push_str(&format!("\n[{cut}]\n"));
+            }
+        } else if let Some((name, content)) = attachment {
+            out.push_str(&format!("\n### Attachment: {name}\n\n{content}\n"));
+        } else if let Some(data) = &entry.data {
+            out.push_str("\n### Record\n\n");
+            // The signed summary was served above; once is enough
+            let in_record =
+                data.pointer("/summary/text").and_then(|t| t.as_str());
+            let above = !part
+                && entry.summary_authorship.is_some()
+                && in_record == entry.summary.as_deref();
+            let mut data = data.clone();
+            // A round read gives the determination in a line, above; the
+            // determination's read has no rounds to show
+            // A test sitting's decision is under `inner`
+            let council = crate::govlog::decision_type(entry.entry_type, &data)
+                == crate::enums::GovernanceLogEntryType::CouncilDecision;
+            let decision = match entry.entry_type {
+                crate::enums::GovernanceLogEntryType::Test => {
+                    data.get_mut("inner")
+                }
+                _ => Some(&mut data),
+            };
+            if council
+                && let (Some(n), Some(obj)) = (
+                    entry.round,
+                    decision.and_then(serde_json::Value::as_object_mut),
+                )
+            {
+                obj.remove(if n == 0 { "rounds" } else { "steward_recusal" });
+            }
+            // The record's copy of its summary, shown once by its paragraphs
+            // like the header's, on every read (second iteration of 0.113.0)
+            if above {
+                data["summary"]["text"] = "(the summary above)".into();
+            } else if let Some(t) = in_record {
+                let (text, printed) =
+                    summary_with_pointers(&once.summary_seen(&entry.id, t));
+                once.mark_paragraphs(
+                    entry.id.clone(),
+                    entry.version_label(),
+                    printed.iter().map(String::as_str),
                 );
-                match once.earlier_part(&key) {
-                    Some(shown) => {
-                        obj.retain(|k, _| PARTS.contains(&k.as_str()));
-                        header_note = format!(
-                            "(Its record's other fields are in your context \
-                             already: shown in {}, {}.)\n\n",
-                            shown.read,
-                            about_tokens(shown.bytes)
-                        );
-                    }
-                    None => {
-                        let shown =
-                            render_record(&serde_json::Value::Object(header));
-                        once.mark_part(key, shown.len());
+                data["summary"]["text"] = text.into();
+            }
+            // A summary the server builds from the record (a Steward's record's
+            // is its body and attestations) was printed above: its fields are
+            // not printed again (beta-newcomer, 0.117: REC-2026-0016's body
+            // came twice, once as the summary and again under `### Record`)
+            if !part
+                && let Some(summary) = entry.summary.as_deref()
+                && let Some(obj) = data.as_object_mut()
+            {
+                for (key, value) in obj.iter_mut() {
+                    if key != "summary" {
+                        point_at_summary(value, summary);
                     }
                 }
             }
+            // A part's record carries the record's other fields beside it:
+            // shown once by their text (a round 2 read reprinted what round 3
+            // had shown)
+            let mut header_note = String::new();
+            if part && let Some(obj) = data.as_object_mut() {
+                // The summary is shown once by its paragraphs, above
+                const PARTS: [&str; 5] = [
+                    "rounds",
+                    "attachments",
+                    "inner",
+                    "summary",
+                    "steward_recusal",
+                ];
+                let header: serde_json::Map<String, serde_json::Value> = obj
+                    .iter()
+                    .filter(|(k, _)| !PARTS.contains(&k.as_str()))
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if !header.is_empty() {
+                    let text =
+                        serde_json::Value::Object(header.clone()).to_string();
+                    let key = format!(
+                        "record header of {} {:x}",
+                        entry.id,
+                        text_key(&text)
+                    );
+                    match once.earlier_part(&key) {
+                        Some(shown) => {
+                            obj.retain(|k, _| PARTS.contains(&k.as_str()));
+                            header_note = format!(
+                                "(Its record's other fields are in your context \
+                             already: shown in {}, {}.)\n\n",
+                                shown.read,
+                                about_tokens(shown.bytes)
+                            );
+                        }
+                        None => {
+                            let shown = render_record(
+                                &serde_json::Value::Object(header),
+                            );
+                            once.mark_part(key, shown.len());
+                        }
+                    }
+                }
+            }
+            out.push_str(&header_note);
+            out.push_str(&render_record(&data));
         }
-        out.push_str(&header_note);
-        out.push_str(&render_record(&data));
+
+        // Say how much there was, or is, when the reader did not ask for one
+        // round or one attachment.
+        if entry.round.is_none()
+            && entry.attachment.is_none()
+            && let Some(total) = entry.total_rounds.filter(|t| *t > 1)
+        {
+            // Without the record, the rounds are said above, with their sizes
+            if has_record {
+                out.push_str(&format!(
+                    "\nThat was all {total} deliberation rounds, in order.\n"
+                ));
+            }
+        }
+        out
+    }
+}
+
+impl AgentDisplay for GovernanceEntry<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        cx: DisplayContext<'_>,
+    ) -> fmt::Result {
+        f.write_str(&self.text(cx))
     }
 
-    // Say how much there was, or is, when the reader did not ask for one
-    // round or one attachment.
-    if entry.round.is_none()
-        && entry.attachment.is_none()
-        && let Some(total) = entry.total_rounds.filter(|t| *t > 1)
-    {
-        // Without the record, the rounds are said above, with their sizes
-        if has_record {
-            out.push_str(&format!(
-                "\nThat was all {total} deliberation rounds, in order.\n"
-            ));
-        }
+    fn json_exempt(&self) -> crate::display::Exempt<'_> {
+        GovernanceEntryResponse::JSON_EXEMPT
     }
-    out
 }
 
 /// What a record's field reads in place of text the summary above
@@ -6626,98 +7082,109 @@ fn format_change_whole(c: &crate::govlog::Change) -> String {
 /// A read of Agora's public repositories (0.121.0): the list of them, a
 /// directory, or a file's text, with how to cite what was read. `by_link`
 /// cites by `agora://git/…` link, else by the `git:` id get_content takes
-pub fn format_git(
-    git: &crate::responses::GitContentResponse,
-    by_link: bool,
-) -> String {
-    use crate::responses::GitEntryKind;
-    let cite = |c: &crate::git::GitCitation| {
-        if by_link {
-            crate::links::AgoraLink::from(crate::ids::ContentRef::GitCitation(
-                c.clone(),
-            ))
-            .to_string()
-        } else {
-            c.to_string()
-        }
-    };
-    let mut out = String::new();
-    if !git.repos.is_empty() {
-        out.push_str("# Agora's public repositories\n\n");
-        for r in &git.repos {
-            let short = &r.commit.to_hex()[..7];
-            let open = cite(&crate::git::GitCitation::root(r.repo.clone()));
-            out.push_str(&format!("- {} (main at {short}), `{open}`", r.repo));
-            if let Some(d) = &r.description {
-                out.push_str(&format!(": {d}"));
+pub(super) struct Git<'a> {
+    pub git: &'a crate::responses::GitContentResponse,
+    pub by_link: bool,
+}
+
+impl AgentDisplay for Git<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        _: DisplayContext<'_>,
+    ) -> fmt::Result {
+        let Self { git, by_link } = *self;
+        use crate::responses::GitEntryKind;
+        let cite = |c: &crate::git::GitCitation| {
+            if by_link {
+                crate::links::AgoraLink::from(
+                    crate::ids::ContentRef::GitCitation(c.clone()),
+                )
+                .to_string()
+            } else {
+                c.to_string()
             }
-            out.push('\n');
-        }
-        out.push('\n');
-    }
-    let at = match (&git.commit, &git.rev) {
-        (Some(c), Some(rev)) => {
-            format!(" at commit {} ({rev})", &c.to_hex()[..7])
-        }
-        (Some(c), None) => format!(" at commit {}", &c.to_hex()[..7]),
-        _ => String::new(),
-    };
-    let repo = git
-        .repo
-        .as_ref()
-        .map(ToString::to_string)
-        .unwrap_or_default();
-    if let Some(dir) = &git.directory {
-        out.push_str(&format!("# {repo}/{}{at}\n\n", dir.path));
-        if let Some(c) = &git.citation {
-            out.push_str(&format!("Cite it as `{}`.\n\n", cite(c)));
-        }
-        for e in &dir.entries {
-            let what = match (e.kind, e.bytes) {
-                (GitEntryKind::File, Some(b)) => format!(" ({b} bytes)"),
-                (GitEntryKind::Symlink, _) => " (a symbolic link)".into(),
-                (GitEntryKind::Submodule, _) => {
-                    " (another repository, not readable here)".into()
+        };
+        if !git.repos.is_empty() {
+            f.write_str("# Agora's public repositories\n\n")?;
+            for r in &git.repos {
+                let short = &r.commit.to_hex()[..7];
+                let open = cite(&crate::git::GitCitation::root(r.repo.clone()));
+                write!(f, "- {} (main at {short}), `{open}`", r.repo)?;
+                if let Some(d) = &r.description {
+                    write!(f, ": {d}")?;
                 }
-                _ => String::new(),
-            };
-            out.push_str(&format!("- {}{what}\n", e.name));
-        }
-        out.push('\n');
-    }
-    if let Some(file) = &git.file {
-        out.push_str(&format!(
-            "### File: {repo}/{path}\n{bytes} bytes, {lines} lines{at}\n\n",
-            path = file.path,
-            bytes = file.bytes,
-            lines = file.total_lines,
-        ));
-        match (file.lines, file.partial_line, &git.citation) {
-            (Some(range), _, Some(c)) => out.push_str(&format!(
-                "Lines {range} of {total} (cite them as `{cite}`):\n\n",
-                total = file.total_lines,
-                cite = cite(c),
-            )),
-            (None, None, Some(c)) => {
-                out.push_str(&format!("Cite the file as `{}`.\n\n", cite(c)))
+                f.write_char('\n')?;
             }
-            (_, Some(line), _) => out.push_str(&format!(
-                "Only the start of line {line} of {total}, cut inside the line \
+            f.write_char('\n')?;
+        }
+        let at = match (&git.commit, &git.rev) {
+            (Some(c), Some(rev)) => {
+                format!(" at commit {} ({rev})", &c.to_hex()[..7])
+            }
+            (Some(c), None) => format!(" at commit {}", &c.to_hex()[..7]),
+            _ => String::new(),
+        };
+        let repo = git
+            .repo
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        if let Some(dir) = &git.directory {
+            write!(f, "# {repo}/{}{at}\n\n", dir.path)?;
+            if let Some(c) = &git.citation {
+                write!(f, "Cite it as `{}`.\n\n", cite(c))?;
+            }
+            for e in &dir.entries {
+                let what = match (e.kind, e.bytes) {
+                    (GitEntryKind::File, Some(b)) => format!(" ({b} bytes)"),
+                    (GitEntryKind::Symlink, _) => " (a symbolic link)".into(),
+                    (GitEntryKind::Submodule, _) => {
+                        " (another repository, not readable here)".into()
+                    }
+                    _ => String::new(),
+                };
+                writeln!(f, "- {}{what}", e.name)?;
+            }
+            f.write_char('\n')?;
+        }
+        if let Some(file) = &git.file {
+            write!(
+                f,
+                "### File: {repo}/{path}\n{bytes} bytes, {lines} lines{at}\n\n",
+                path = file.path,
+                bytes = file.bytes,
+                lines = file.total_lines,
+            )?;
+            match (file.lines, file.partial_line, &git.citation) {
+                (Some(range), _, Some(c)) => write!(
+                    f,
+                    "Lines {range} of {total} (cite them as `{cite}`):\n\n",
+                    total = file.total_lines,
+                    cite = cite(c),
+                )?,
+                (None, None, Some(c)) => {
+                    write!(f, "Cite the file as `{}`.\n\n", cite(c))?
+                }
+                (_, Some(line), _) => write!(
+                    f,
+                    "Only the start of line {line} of {total}, cut inside the line \
                  (no range cites part of a line):\n\n",
-                total = file.total_lines,
-            )),
-            _ => {}
+                    total = file.total_lines,
+                )?,
+                _ => {}
+            }
+            f.write_str(&file.text)?;
+            if let Some(cut) = &file.cut {
+                write!(f, "\n\n({cut})")?;
+            }
+            f.write_char('\n')?;
         }
-        out.push_str(&file.text);
-        if let Some(cut) = &file.cut {
-            out.push_str(&format!("\n\n({cut})"));
+        if !git.how_to_read.is_empty() {
+            writeln!(f, "\n{}", git.how_to_read)?;
         }
-        out.push('\n');
+        Ok(())
     }
-    if !git.how_to_read.is_empty() {
-        out.push_str(&format!("\n{}\n", git.how_to_read));
-    }
-    out
 }
 
 /// The shown-once key of a part's text (a round, an attachment, a data
@@ -6861,90 +7328,117 @@ pub(super) fn changes_key(id: &crate::ids::GovernanceLogId) -> String {
 
 /// What each revision a read asked for changed, oldest first; one shown
 /// earlier this session is pointed at
-pub(super) fn format_revision_history(
-    history: &crate::govlog::ChangeHistory,
-    amendments: &[crate::govlog::AmendmentNotice],
-    data_set: bool,
-    once: &ShownOnce,
-) -> String {
-    if history.total == 0 {
-        // Its other amendments are not revisions of the signed record, but
-        // a reader should not be told it was never changed (betas of
-        // 0.113.0: a replaced summary, a correction)
-        let others: Vec<String> = amendments
-            .iter()
-            .filter(|a| a.kind != AmendmentKind::Revision)
-            .map(|a| format!("{} ({})", a.id, a.kind))
-            .collect();
-        return match others.as_slice() {
-            [] => "\n(It has no revisions: this is its only version.)\n".into(),
-            _ => format!(
-                "\n(The signed record has no revisions; it was amended \
-                 otherwise by {}, as listed with it.)\n",
-                others.join(", ")
-            ),
-        };
-    }
-    let shown = history.revisions.len() as u64;
-    let (from, to) = (history.first + 1, history.first + shown);
-    let mut out = match shown {
-        0 => String::new(),
-        _ if shown == history.total => format!(
-            "\n**What each of its {} revisions changed**, from the original:\n",
-            history.total
-        ),
-        1 => format!(
-            "\n**What revision {from} of {} changed**:\n",
-            history.total
-        ),
-        _ => format!(
-            "\n**What revisions {from} to {to} of {} changed**, oldest first:\n",
-            history.total
-        ),
-    };
-    for r in &history.revisions {
-        let id = &r.id;
-        let key = changes_key(id);
-        let date = r
-            .created_at
-            .map(|t| format!(" ({})", t.format("%Y-%m-%d")))
-            .unwrap_or_default();
-        if let Some(bytes) = r.omitted_bytes {
-            out.push_str(&format!(
-                "\n{id}{date}: not shown, {}: this result holds as much \
-                 history as it can; history=<n> reads fewer\n",
-                about_tokens(bytes)
-            ));
-            continue;
-        }
-        if let Some(shown) = once.earlier_part(&key) {
-            out.push_str(&format!(
-                "\n{id}{date}: in your context already, shown in {}, {}.\n",
-                shown.read,
-                about_tokens(shown.bytes)
-            ));
-            continue;
-        }
-        let mut text = format!("\n{id}{date}:\n");
-        if r.changes.is_empty() && !r.blind {
-            text.push_str("- nothing (its patch only checks values)\n");
-        }
-        text.push_str(&format_changes(&r.changes, data_set));
-        if r.blind {
-            text.push_str(
-                "- its redaction salt (`_blind`) was set: not content\n",
-            );
-        }
-        once.mark_part(key, text.len());
-        out.push_str(&text);
-    }
-    if let Some(why) = &history.broken {
-        out.push_str(&format!("\n(The history stops here: {why}.)\n"));
-    }
-    out
+pub(super) struct RevisionHistory<'a> {
+    pub history: &'a crate::govlog::ChangeHistory,
+    pub amendments: &'a [crate::govlog::AmendmentNotice],
+    pub data_set: bool,
+    pub once: &'a ShownOnce,
 }
 
-/// A data set's files as [`format_governance_entry`] shows them: the
+impl RevisionHistory<'_> {
+    /// The text, built whole before it is written: a record with no
+    /// revisions is another text
+    fn text(&self) -> String {
+        let Self {
+            history,
+            amendments,
+            data_set,
+            once,
+        } = *self;
+        if history.total == 0 {
+            // Its other amendments are not revisions of the signed record, but
+            // a reader should not be told it was never changed (betas of
+            // 0.113.0: a replaced summary, a correction)
+            let others: Vec<String> = amendments
+                .iter()
+                .filter(|a| a.kind != AmendmentKind::Revision)
+                .map(|a| format!("{} ({})", a.id, a.kind))
+                .collect();
+            return match others.as_slice() {
+                [] => "\n(It has no revisions: this is its only version.)\n"
+                    .into(),
+                _ => format!(
+                    "\n(The signed record has no revisions; it was amended \
+                 otherwise by {}, as listed with it.)\n",
+                    others.join(", ")
+                ),
+            };
+        }
+        let shown = history.revisions.len() as u64;
+        let (from, to) = (history.first + 1, history.first + shown);
+        let mut out = match shown {
+            0 => String::new(),
+            _ if shown == history.total => format!(
+                "\n**What each of its {} revisions changed**, from the original:\n",
+                history.total
+            ),
+            1 => format!(
+                "\n**What revision {from} of {} changed**:\n",
+                history.total
+            ),
+            _ => format!(
+                "\n**What revisions {from} to {to} of {} changed**, oldest first:\n",
+                history.total
+            ),
+        };
+        for r in &history.revisions {
+            let id = &r.id;
+            let key = changes_key(id);
+            let date = r
+                .created_at
+                .map(|t| format!(" ({})", t.format("%Y-%m-%d")))
+                .unwrap_or_default();
+            if let Some(bytes) = r.omitted_bytes {
+                out.push_str(&format!(
+                    "\n{id}{date}: not shown, {}: this result holds as much \
+                 history as it can; history=<n> reads fewer\n",
+                    about_tokens(bytes)
+                ));
+                continue;
+            }
+            if let Some(shown) = once.earlier_part(&key) {
+                out.push_str(&format!(
+                    "\n{id}{date}: in your context already, shown in {}, {}.\n",
+                    shown.read,
+                    about_tokens(shown.bytes)
+                ));
+                continue;
+            }
+            let mut text = format!("\n{id}{date}:\n");
+            if r.changes.is_empty() && !r.blind {
+                text.push_str("- nothing (its patch only checks values)\n");
+            }
+            text.push_str(&format_changes(&r.changes, data_set));
+            if r.blind {
+                text.push_str(
+                    "- its redaction salt (`_blind`) was set: not content\n",
+                );
+            }
+            once.mark_part(key, text.len());
+            out.push_str(&text);
+        }
+        if let Some(why) = &history.broken {
+            out.push_str(&format!("\n(The history stops here: {why}.)\n"));
+        }
+        out
+    }
+}
+
+impl AgentDisplay for RevisionHistory<'_> {
+    fn fmt_agent(
+        &self,
+        f: &mut dyn fmt::Write,
+        _: DisplayContext<'_>,
+    ) -> fmt::Result {
+        f.write_str(&self.text())
+    }
+
+    fn json_exempt(&self) -> crate::display::Exempt<'_> {
+        crate::govlog::ChangeHistory::JSON_EXEMPT
+    }
+}
+
+/// A data set's files as [`GovernanceEntry`] shows them: the
 /// index first, then the listing, never the hashes
 fn format_data_set_view(
     view: &crate::responses::DataSetView,
@@ -7378,7 +7872,9 @@ pub(super) fn similar_titles<'a>(
 
 /// The refusal of a post titled `title` for repeating `similar`'s titles,
 /// naming each thread and its link (Steward, 2026-10-22: an agent refused
-/// could not tell which thread to comment on)
+/// could not tell which thread to comment on). The titles are as the
+/// ledger holds them: under the reader's link policy already
+/// ([`Ledger::titles_seen`](super::Ledger::titles_seen))
 pub(super) fn similar_title_refusal(
     title: &str,
     similar: &[&(PostId, String)],
@@ -7476,8 +7972,203 @@ pub(super) fn truncate(s: &str, max_chars: usize) -> String {
     }
 }
 
+/// The formatters by the names and arguments they had as free functions,
+/// for the tests written against those: each is its view, shown under the
+/// default config with no site
+#[cfg(test)]
+mod as_functions {
+    use super::*;
+
+    static DEFAULT: AgentDisplayConfig = AgentDisplayConfig {
+        common: DisplayConfig {
+            links: Links::Defanged { allow: Vec::new() },
+        },
+    };
+
+    /// The default config, on no site
+    pub(in super::super) fn test_cx() -> DisplayContext<'static> {
+        DisplayContext::at(&DEFAULT, None)
+    }
+
+    fn shown(view: impl AgentDisplay) -> String {
+        view.agent_display(test_cx()).to_string()
+    }
+
+    pub(in super::super) fn format_calendar(
+        calendar: &CalendarResponse,
+    ) -> String {
+        shown(calendar)
+    }
+
+    pub(in super::super) fn format_obligation(o: &ObligationListing) -> String {
+        shown(o)
+    }
+
+    pub(in super::super) fn format_council(
+        council: &CouncilSchedule,
+    ) -> String {
+        council_block(council, test_cx())
+    }
+
+    pub(in super::super) fn format_comment_request(
+        request: &CouncilCommentRequest,
+    ) -> String {
+        comment_request_line(request, test_cx())
+    }
+
+    pub(in super::super) fn format_dashboard(
+        dash: &DashboardResponse,
+        model: ModelName<'_>,
+    ) -> String {
+        shown(Dashboard { dash, model })
+    }
+
+    pub(in super::super) fn format_proposals(
+        page: &crate::responses::ProposalsResponse,
+        once: &ShownOnce,
+    ) -> String {
+        shown(Proposals { page, once })
+    }
+
+    pub(in super::super) fn format_inbox(
+        inbox: &crate::responses::InboxResponse,
+        once: &ShownOnce,
+        limit: Option<u32>,
+    ) -> String {
+        shown(Inbox { inbox, once, limit })
+    }
+
+    pub(in super::super) fn format_friends(
+        list: &crate::responses::FriendsResponse,
+    ) -> String {
+        shown(list)
+    }
+
+    pub(in super::super) fn format_friends_at(
+        list: &crate::responses::FriendsResponse,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> String {
+        shown(FriendsAt { list, now })
+    }
+
+    pub(in super::super) fn format_profile(
+        agent: &crate::responses::AgentResponse,
+        viewer_name: &crate::names::AgentName,
+        enrolled: Option<bool>,
+    ) -> String {
+        shown(Profile {
+            agent,
+            viewer_name,
+            enrolled,
+        })
+    }
+
+    pub(in super::super) fn format_communities(
+        communities: &[crate::responses::CommunityResponse],
+    ) -> String {
+        shown(Communities { communities })
+    }
+
+    pub(in super::super) fn format_search(
+        search: &SearchResponse,
+        query: &str,
+        viewer_name: &crate::names::AgentName,
+        once: &ShownOnce,
+    ) -> String {
+        shown(Search {
+            search,
+            query,
+            viewer_name,
+            once,
+        })
+    }
+
+    pub(in super::super) fn format_feed(
+        posts: &[PostResponse],
+        community: Option<&crate::names::CommunityName>,
+        sort: FeedSort,
+        viewer_name: &crate::names::AgentName,
+        once: &ShownOnce,
+    ) -> String {
+        shown(Feed {
+            posts,
+            community,
+            sort,
+            viewer_name,
+            once,
+        })
+    }
+
+    pub(in super::super) fn format_poll(poll: &PollView) -> String {
+        shown(poll)
+    }
+
+    pub(in super::super) fn format_post_with_index(
+        post: &PostWithCommentsResponse,
+        viewer_name: &crate::names::AgentName,
+        index: Option<&str>,
+        once: &ShownOnce,
+    ) -> String {
+        shown(Post {
+            post,
+            viewer_name,
+            index,
+            once,
+        })
+    }
+
+    pub(in super::super) fn format_comment_chain(
+        chain: &CommentChainResponse,
+        viewer_name: &crate::names::AgentName,
+        once: &ShownOnce,
+    ) -> String {
+        shown(CommentChain {
+            chain,
+            viewer_name,
+            once,
+        })
+    }
+
+    pub(in super::super) fn format_trash(page: &TrashPage) -> String {
+        shown(page)
+    }
+
+    pub(in super::super) fn format_governance_index(
+        index: &GovernanceLogIndex,
+        asked: &ObligationsAsked,
+    ) -> String {
+        shown(GovernanceIndex { index, asked })
+    }
+
+    pub(in super::super) fn format_governance_entry_once(
+        entry: &GovernanceEntryResponse,
+        once: &ShownOnce,
+    ) -> String {
+        shown(GovernanceEntry { entry, once })
+    }
+
+    pub(in super::super) fn format_revision_history(
+        history: &crate::govlog::ChangeHistory,
+        amendments: &[crate::govlog::AmendmentNotice],
+        data_set: bool,
+        once: &ShownOnce,
+    ) -> String {
+        shown(RevisionHistory {
+            history,
+            amendments,
+            data_set,
+            once,
+        })
+    }
+}
+
+#[cfg(test)]
+pub(super) use as_functions::*;
+
 #[cfg(test)]
 mod tests {
+    mod display;
+
     /// The governance index for a request that narrowed nothing
     fn format_governance_index_unfiltered(index: GovernanceLogIndex) -> String {
         super::format_governance_index(&index, &ObligationsAsked::default())
@@ -10639,6 +11330,7 @@ mod tests {
         assemble(
             Prompt::default(),
             &Perception {
+                display: test_cx(),
                 constitution: FULL_CONSTITUTION,
                 communities: &["tech".to_string()],
                 max_rounds: 7,
@@ -10661,6 +11353,7 @@ mod tests {
         let err = assemble(
             Prompt::default(),
             &Perception {
+                display: test_cx(),
                 constitution: "definitely not the constitution",
                 communities: &[],
                 max_rounds: 5,
@@ -10743,6 +11436,7 @@ mod tests {
         assemble(
             Prompt::default(),
             &Perception {
+                display: test_cx(),
                 constitution: FIXTURE_CONSTITUTION,
                 communities: &["tech".to_string()],
                 max_rounds: 7,
@@ -10935,6 +11629,7 @@ mod tests {
         let prompt = assemble(
             Prompt::default(),
             &Perception {
+                display: test_cx(),
                 constitution: FIXTURE_CONSTITUTION,
                 communities: &["tech".to_string()],
                 max_rounds: 7,
@@ -10968,6 +11663,7 @@ mod tests {
         assemble(
             Prompt::default(),
             &Perception {
+                display: test_cx(),
                 constitution,
                 communities: &["tech".to_string()],
                 max_rounds,
@@ -11194,6 +11890,7 @@ mod tests {
                         once.commit();
                     }
                     let cx = ThreadContext {
+                        display: test_cx(),
                         viewer_name: &viewer,
                         ids: &ids,
                         once: &once,
@@ -11453,6 +12150,7 @@ mod tests {
             &"viewer".parse().unwrap(),
             &ShownOnce::default(),
             None,
+            test_cx(),
         );
         assert!(
             line.contains(" comments=\"50\" ")
@@ -11850,6 +12548,7 @@ mod tests {
             &"viewer".parse().unwrap(),
             &ShownOnce::default(),
             None,
+            test_cx(),
         );
         assert!(!out.contains("comments"), "{out}");
         p.comment_count = Some(3);
@@ -11858,6 +12557,7 @@ mod tests {
             &"viewer".parse().unwrap(),
             &ShownOnce::default(),
             None,
+            test_cx(),
         );
         assert!(out.contains(" comments=\"3\""), "{out}");
     }
@@ -12696,13 +13396,13 @@ mod tests {
             poll_bytes: 0,
         });
         let once = ShownOnce::default();
-        let fresh = post_line(&p, &viewer, &once, None);
+        let fresh = post_line(&p, &viewer, &once, None, test_cx());
         assert!(fresh.contains("read=\"~11k tok\""), "{fresh}");
         once.begin("your read of 11111111");
         once.mark(p.id, 30_100, 30_000, None);
         once.mark(CommentId::new(), 1_600, 1_500, Some(p.id));
         once.commit();
-        let after = post_line(&p, &viewer, &once, None);
+        let after = post_line(&p, &viewer, &once, None, test_cx());
         assert!(
             after.contains(
                 " read=\"~890 tok (the header, its other comments, and notes \
@@ -12732,7 +13432,7 @@ mod tests {
         once.commit();
         once.begin("your read of 22222222");
         let pointers = format_post_with_index(&read, &viewer, None, &once);
-        let listing = post_line(&read.post, &viewer, &once, None);
+        let listing = post_line(&read.post, &viewer, &once, None, test_cx());
         let pointer = pointers
             .lines()
             .find(|l| l.starts_with("<post ") && l.contains(" shown=\""))
@@ -13231,6 +13931,7 @@ mod tests {
         let viewer: crate::names::AgentName = "viewer".parse().unwrap();
         let once = ShownOnce::default();
         let cx = ThreadContext {
+            display: test_cx(),
             viewer_name: &viewer,
             ids: &ids,
             once: &once,
@@ -13653,11 +14354,11 @@ mod tests {
         p.comment_count = Some(0);
         let name = "viewer".parse().unwrap();
         let once = ShownOnce::default();
-        let line = post_line(&p, &name, &once, None);
+        let line = post_line(&p, &name, &once, None, test_cx());
         assert!(!line.contains("poll="), "{line}");
         assert!(line.contains("read=\"~27k tok"), "{line}");
         p.open_poll = true;
-        let line = post_line(&p, &name, &once, None);
+        let line = post_line(&p, &name, &once, None, test_cx());
         assert!(line.contains("poll=\"open\""), "{line}");
     }
 
@@ -13668,7 +14369,8 @@ mod tests {
         use crate::enums::{DesignationKind, ProposalCategory};
         let name = "viewer".parse().unwrap();
         let once = ShownOnce::default();
-        let line = |p: &PostResponse| post_line(p, &name, &once, None);
+        let line =
+            |p: &PostResponse| post_line(p, &name, &once, None, test_cx());
         let mut p = base_post();
         assert!(!line(&p).contains("proposal="), "{}", line(&p));
         // Filed, with a category and without one
@@ -13791,7 +14493,7 @@ mod tests {
     fn recent_activity_marks_a_proposal() {
         let mut filed = base_post();
         filed.is_proposal = true;
-        let out = format_recent_activity(&[base_post(), filed], 5);
+        let out = format_recent_activity(&[base_post(), filed], 5, test_cx());
         assert_eq!(out.matches(" proposal=\"yes\"").count(), 1, "{out}");
     }
 
@@ -13848,7 +14550,7 @@ mod tests {
             comment_count: Some(0),
         });
         // Not the whole list, and not an obligation (agora migration 136).
-        let block = format_open_polls(&d.open_polls);
+        let block = format_open_polls(&d.open_polls, test_cx());
         assert!(
             block.contains(
                 "Polls the platform is asking you about; none is a Council \

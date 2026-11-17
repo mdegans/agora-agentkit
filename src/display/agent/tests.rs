@@ -107,7 +107,7 @@ fn a_config_is_a_context() {
     let want = format!("litmus wrote:\n<post>\n{DEFANGED}\n</post>");
     assert_eq!(note.agent_display(&config).to_string(), want);
     assert_eq!(
-        Content::from_iter(note.agent_display_blocks(&config)),
+        Content::from_iter(note.agent_display_blocks((&config).into())),
         Content::from(want)
     );
     assert_eq!(note.agent_display_json(&config).unwrap()["body"], DEFANGED);
@@ -138,14 +138,18 @@ impl AgentDisplay for Captioned {
 
     fn agent_display_blocks<'a>(
         &'a self,
-        cx: impl Into<DisplayContext<'a>>,
-    ) -> impl Iterator<Item = Block> {
-        let cx = cx.into();
-        [
-            Block::text(self.agent_display(cx).to_string()),
-            Block::text(format!("Caption by {}", cx.on_line(self.0.author))),
-        ]
-        .into_iter()
+        cx: DisplayContext<'a>,
+    ) -> Box<dyn Iterator<Item = Block> + 'a> {
+        Box::new(
+            [
+                Block::text(self.agent_display(cx).to_string()),
+                Block::text(format!(
+                    "Caption by {}",
+                    cx.on_line(self.0.author)
+                )),
+            ]
+            .into_iter(),
+        )
     }
 }
 
@@ -291,15 +295,78 @@ fn references_boxes_and_trait_objects() {
     let twice: &&Note = &&note;
     assert_eq!(shown(twice, cx), NOTE_TEXT);
 
-    // The trait is object safe for the text and the exemptions
+    // The trait is object safe: the text, the blocks and the exemptions
     let object: &dyn AgentDisplay = &note;
+    assert_eq!(object.agent_text(cx).to_string(), NOTE_TEXT);
     assert_eq!(AgentText::new(object, cx).to_string(), NOTE_TEXT);
     assert_eq!(object.json_exempt().verbatim, ["record"]);
+    assert_eq!(
+        object.agent_display_blocks(cx).collect::<Vec<_>>(),
+        [Block::text(NOTE_TEXT)]
+    );
+    // A reference to one, and a box of one, are views themselves
+    assert_eq!(shown(object, cx), NOTE_TEXT);
     let boxed: Box<dyn AgentDisplay> = Box::new(note);
-    assert_eq!(AgentText::new(&*boxed, cx).to_string(), NOTE_TEXT);
+    assert_eq!(boxed.agent_display(cx).to_string(), NOTE_TEXT);
+    assert_eq!(boxed.agent_text(cx).to_string(), NOTE_TEXT);
+    assert_eq!(shown(&boxed, cx), NOTE_TEXT);
+    assert_eq!(shown(boxed, cx), NOTE_TEXT);
 
     let boxed: Box<Note> = Box::new(self::note());
     assert_eq!(shown(boxed, cx), NOTE_TEXT);
+}
+
+/// A mixed list of views, one of which shows more than its text, into
+/// one message
+#[test]
+fn a_list_of_trait_objects_extends_one_content() {
+    let config = AgentDisplayConfig::default();
+    let site = site();
+    let cx = DisplayContext::at(&config, Some(&site));
+    let short = Note {
+        body: "Short.",
+        ..note()
+    };
+    let views: Vec<Box<dyn AgentDisplay>> = vec![
+        Box::new(Captioned(note())),
+        Box::new(NoteFor {
+            note: &short,
+            viewer: "litmus",
+        }),
+    ];
+    let mut message = Content::text("Before.");
+    for view in &views {
+        message.extend(view.agent_display_blocks(cx));
+    }
+    let yours = "(yours) litmus wrote:\n<post>\nShort.\n</post>";
+    assert_eq!(
+        message.0,
+        [
+            Block::text("Before."),
+            Block::text(NOTE_TEXT),
+            Block::text("Caption by litmus"),
+            Block::text(yours),
+        ]
+    );
+    // The text of each, through the object: the boxed one, and a borrowed
+    let texts: Vec<String> = views
+        .iter()
+        .map(|view| view.agent_display(cx).to_string())
+        .collect();
+    assert_eq!(texts, [NOTE_TEXT, yours]);
+    let borrowed: Vec<&dyn AgentDisplay> =
+        views.iter().map(|view| &**view).collect();
+    for (view, text) in borrowed.iter().zip(&texts) {
+        assert_eq!(view.agent_text(cx).to_string(), *text);
+        assert_eq!(AgentText::new(*view, cx).to_string(), *text);
+    }
+    // And a slice of borrowed ones, into a content
+    let all = Content::from_iter(
+        borrowed
+            .iter()
+            .flat_map(|view| view.agent_display_blocks(cx)),
+    );
+    assert_eq!(all.0, message.0[1..]);
 }
 
 // ── Text someone else wrote: the policy, then the escaping ──────────────

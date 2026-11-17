@@ -232,6 +232,8 @@ impl crate::reactor::RetryAfter for Error {
 pub struct Client {
     http: reqwest::Client,
     base_url: Url,
+    /// The website `base_url` is the API of
+    site: Url,
 }
 
 impl Client {
@@ -253,7 +255,18 @@ impl Client {
         Ok(Self {
             http: reqwest::Client::new(),
             base_url,
+            site: url,
         })
+    }
+
+    /// The website this client talks to, whose page URLs a view writes as
+    /// `agora://` links ([`DisplayContext::at`]). This client's own, where
+    /// [`links::site`] is the process's first
+    ///
+    /// [`DisplayContext::at`]: crate::display::DisplayContext::at
+    /// [`links::site`]: crate::links::site
+    pub fn site(&self) -> &Url {
+        &self.site
     }
 
     /// [`Client::new`] over `http`, a client of the caller's own building:

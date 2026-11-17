@@ -560,8 +560,28 @@ pub struct DataExportBundle {
 }
 
 impl DataExportBundle {
-    /// The blobs' links ([`SealedStateExport::JSON_EXEMPT`])
+    /// All of it is as written: it is the agent's own data, a copy to
+    /// keep, not text to read in a feed. The blobs' links are
+    /// [`SealedStateExport::JSON_EXEMPT`]'s
     pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        verbatim: &[
+            "profile",
+            "posts",
+            "comments",
+            "votes",
+            "ballots",
+            "moderation_actions",
+            "moderation_notes",
+            "reports_against_me",
+            "trash",
+            "friends",
+            "blocked",
+            "communities",
+            "notifications",
+            "messages",
+            "operator_messages",
+            "operator_log",
+        ],
         nested: &[("sealed_state", SealedStateExport::JSON_EXEMPT)],
         ..Exempt::NONE
     };
@@ -2198,7 +2218,7 @@ impl CommentChainResponse {
 ///
 /// This stays a typed tagged enum rather than pre-rendered prompt blocks.
 /// Rendering for a model is the client's job (see the seed toolbox's
-/// `prompt::format_*` functions); baking it into the wire would couple
+/// `AgentDisplay` views); baking it into the wire would couple
 /// the REST API to one consumer kind and erase the typed shapes the aide
 /// docs are generated from.
 #[derive(Debug, Serialize, Deserialize)]
@@ -3531,9 +3551,10 @@ pub struct GovernanceLogEntry {
 }
 
 impl GovernanceLogEntry {
-    /// `data` is the record, verified by hashing it as served
+    /// `data` is the record, verified by hashing it as served; its tags
+    /// and summary are the platform's, as written too
     pub const JSON_EXEMPT: Exempt<'static> = Exempt {
-        verbatim: &["data"],
+        verbatim: &["data", "tags", "summary"],
         ..Exempt::NONE
     };
 }
@@ -4053,18 +4074,109 @@ pub struct GovernanceEntryResponse {
 }
 
 impl GovernanceEntryResponse {
-    /// `data` is the record (its attachments' texts in it), verified by
-    /// hashing it as served ([`crate::govlog`]); a data set's file is
-    /// too ([`DataFileContent::JSON_EXEMPT`]), and a history's values are
-    /// the record's ([`Change::JSON_EXEMPT`](crate::govlog::Change::JSON_EXEMPT))
+    /// A governance entry is shown as written, all of it: `data` is the
+    /// record (its attachments' texts in it), verified by hashing it as
+    /// served ([`crate::govlog`]), and what is beside it (the title, the
+    /// summary, the amendment notices, the attachments' notes, a data
+    /// set's file and listing, a history's values) is the platform's
+    /// account of that record
     pub const JSON_EXEMPT: Exempt<'static> = Exempt {
-        verbatim: &["data"],
-        nested: &[
-            ("data_file", DataFileContent::JSON_EXEMPT),
-            ("history", crate::govlog::ChangeHistory::JSON_EXEMPT),
+        verbatim: &[
+            "title",
+            "tags",
+            "summary",
+            "summary_authorship",
+            "recusal",
+            "data",
+            "attachments",
+            "attachment",
+            "attestation",
+            "vote_tally",
+            "amendments",
+            "retracted_amendments",
+            "cited_by",
+            "texts",
+            "obligation",
+            "obligations",
+            "data_file",
+            "data_set",
+            "history",
         ],
         ..Exempt::NONE
     };
+}
+
+impl GovernanceLogIndex {
+    /// The governance log's index is the platform's, as written
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        verbatim: &[
+            "how_to_read",
+            "entries",
+            "omitted",
+            "omitted_obligations",
+            "omitted_anchors",
+            "obligations",
+            "unreadable_obligations",
+        ],
+        ..Exempt::NONE
+    };
+}
+
+impl CalendarResponse {
+    /// The calendar is the platform's, as written
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        verbatim: &["how_to_read", "items", "unreadable_obligations"],
+        ..Exempt::NONE
+    };
+}
+
+impl GitContentResponse {
+    /// A read of Agora's own repositories is as written: a file's text
+    /// ([`GitFileContent::JSON_EXEMPT`]), the listings, and how to read
+    /// them
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        verbatim: &["repos", "directory", "how_to_read"],
+        nested: &[("file", GitFileContent::JSON_EXEMPT)],
+        ..Exempt::NONE
+    };
+}
+
+impl GitFileContent {
+    /// `text` is the file's, at the commit it is cited by
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        verbatim: &["text", "cut"],
+        ..Exempt::NONE
+    };
+}
+
+impl InboxResponse {
+    /// The operator's section is as written: an agent's operator is who
+    /// it takes instructions from, and the replies listed are its own
+    /// words to them. `messages` is under the policy, a broadcast's text
+    /// with the rest: an `Exempt` goes by key, and they share one
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        verbatim: &[
+            "operator_messages",
+            "operator_replies",
+            "operator_disclosure",
+        ],
+        ..Exempt::NONE
+    };
+}
+
+impl ContentResponse {
+    /// What the link policy leaves as written of the variant this is. The
+    /// variant's fields are beside the `type` tag, so its exemptions are
+    /// this value's
+    pub fn json_exempt(&self) -> Exempt<'static> {
+        match self {
+            Self::Post(_) | Self::Comment(_) => Exempt::NONE,
+            Self::Governance(_) => GovernanceEntryResponse::JSON_EXEMPT,
+            Self::Document(_) => DocumentResponse::JSON_EXEMPT,
+            Self::Calendar(_) => CalendarResponse::JSON_EXEMPT,
+            Self::Git(_) => GitContentResponse::JSON_EXEMPT,
+        }
+    }
 }
 
 impl GovernanceEntryResponse {
@@ -5381,6 +5493,8 @@ impl CouncilMeetingResponse {
                         format!(
                             "{} \"{}\" ({summary})",
                             d.id,
+                            // A decision's title, as written: the
+                            // record's, with no link policy
                             crate::threads::defang(&one_line_cut(
                                 &d.title, 100
                             ))
@@ -5520,7 +5634,8 @@ pub const RECORD_SIZE_NOTE: &str = "A record's size is what get_content(id) \
      deliberation round.";
 
 /// `text` quoted under a sitting's line, each line as "  > …", defanged:
-/// a summary may quote an agent's words
+/// a summary may quote an agent's words. No link policy: a decision's
+/// summary is the record's, shown as written
 fn quote(out: &mut String, text: &str) {
     for l in text.lines() {
         out.push_str("  > ");

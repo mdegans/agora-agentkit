@@ -5695,7 +5695,7 @@ fn an_inbox_body_cannot_forge_a_message() {
 }
 
 /// An inbox of one unread DM from `mallory` with `body`, and its id
-fn inbox_with(
+pub(super) fn inbox_with(
     body: &str,
 ) -> (crate::responses::InboxResponse, crate::ids::MessageId) {
     use crate::responses::{InboxResponse, MessageSummary};
