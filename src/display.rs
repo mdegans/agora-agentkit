@@ -21,12 +21,17 @@ use crate::links::AgoraLink;
 use crate::threads;
 
 mod agent;
+mod domains;
 mod json;
 #[cfg(test)]
 pub(crate) mod oracle;
 mod profiles;
 
 pub use agent::{AgentDisplay, AgentText, DisplayContext};
+pub use domains::{
+    DomainChange, DomainFilter, DomainNote, NotSent, ServerTool, ToolDomains,
+    Widening,
+};
 pub use json::{AgentJson, Exempt, json_view};
 pub use profiles::{
     AgentDisplayProfiles, DisplaySelection, ProfileName, ProfileNameError,

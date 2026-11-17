@@ -2021,3 +2021,491 @@ fn what_is_not_a_link_is_untouched() {
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+// ── The policy as the server tools' domain filters ──────────────────────
+
+fn sent(domains: &ToolDomains) -> &[String] {
+    match domains.filter() {
+        DomainFilter::Allowed(list) | DomainFilter::Blocked(list) => list,
+        other => panic!("nothing sent: {other:?}"),
+    }
+}
+
+/// `(rule, change)` per note, the rule as written
+fn notes(domains: &ToolDomains) -> Vec<(String, DomainChange)> {
+    domains
+        .notes()
+        .iter()
+        .map(|n| (n.rule.to_string(), n.change.clone()))
+        .collect()
+}
+
+fn widened(entry: &str, by: &[Widening]) -> DomainChange {
+    DomainChange::Widened {
+        entry: entry.to_string(),
+        by: by.to_vec(),
+    }
+}
+
+fn strings(list: &[&str]) -> Vec<String> {
+    list.iter().map(|s| s.to_string()).collect()
+}
+
+/// Anthropic's matching: the entry's domain or a subdomain of it, and for a
+/// web search entry with a path, a URL path that begins with it
+fn anthropic_matches(entry: &str, url: &Url) -> bool {
+    let (domain, path) = entry.split_at(entry.find('/').unwrap_or(entry.len()));
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let on_domain = host == domain
+        || host
+            .strip_suffix(domain)
+            .is_some_and(|sub| sub.ends_with('.'));
+    on_domain && url.path().starts_with(path)
+}
+
+#[test]
+fn fetch_allow_sends_each_domain_sorted_once() {
+    let links = allow(&[
+        "https://docs.rs",
+        "http://example.org",
+        "https://docs.rs/serde",
+        "https://Example.ORG.",
+    ]);
+    let domains = links.fetch_domains();
+    assert_eq!(domains.tool(), ServerTool::WebFetch);
+    assert_eq!(sent(&domains), strings(&["docs.rs", "example.org"]));
+    assert_eq!(
+        notes(&domains),
+        [(
+            "https://docs.rs/serde".to_string(),
+            widened("docs.rs", &[Widening::Path])
+        )]
+    );
+}
+
+#[test]
+fn fetch_allow_widens_path_port_and_apex() {
+    let links = allow(&[
+        "https://en.wikipedia.org/wiki",
+        "https://example.net:8443/a",
+        "https://*.example.org",
+    ]);
+    let domains = links.fetch_domains();
+    assert_eq!(
+        sent(&domains),
+        strings(&["en.wikipedia.org", "example.net", "example.org"])
+    );
+    assert_eq!(
+        notes(&domains),
+        [
+            (
+                "https://en.wikipedia.org/wiki".to_string(),
+                widened("en.wikipedia.org", &[Widening::Path])
+            ),
+            (
+                "https://example.net:8443/a".to_string(),
+                widened("example.net", &[Widening::Path, Widening::Port])
+            ),
+            (
+                "https://*.example.org".to_string(),
+                widened("example.org", &[Widening::Apex])
+            ),
+        ]
+    );
+    // The rule itself does not allow the apex, which the entry covers
+    assert!(
+        !rule("https://*.example.org").allows(&url("https://example.org/"))
+    );
+}
+
+#[test]
+fn a_wildcard_with_its_apex_ruled_is_not_widened() {
+    let links = allow(&["https://*.example.org", "https://example.org"]);
+    let domains = links.fetch_domains();
+    assert_eq!(sent(&domains), strings(&["example.org"]));
+    assert_eq!(notes(&domains), []);
+}
+
+#[test]
+fn an_empty_allow_list_is_no_filter() {
+    for domains in [
+        Links::default().fetch_domains(),
+        Links::default().search_domains(),
+    ] {
+        assert_eq!(domains.filter(), &DomainFilter::Unfiltered);
+        assert_eq!(notes(&domains), []);
+    }
+    assert_eq!(
+        Links::default().fetch_domains().to_string(),
+        "web fetch: no domain filter (no link is allowed; the tool is as \
+         configured)\n"
+    );
+}
+
+#[test]
+fn hosts_no_tool_takes_are_not_sent() {
+    let links = allow(&[
+        "https://127.0.0.1",
+        "http://[::1]:8080",
+        "http://localhost",
+        "https://a_b.example.org",
+        "https://bücher.example",
+    ]);
+    for domains in [links.fetch_domains(), links.search_domains()] {
+        // The internationalised name is sent as the parse wrote it, ASCII
+        assert_eq!(sent(&domains), strings(&["xn--bcher-kva.example"]));
+        assert_eq!(
+            notes(&domains),
+            [
+                (
+                    "https://127.0.0.1".to_string(),
+                    DomainChange::NotSent(NotSent::IpAddress)
+                ),
+                (
+                    "http://[::1]:8080".to_string(),
+                    DomainChange::NotSent(NotSent::IpAddress)
+                ),
+                (
+                    "http://localhost".to_string(),
+                    DomainChange::NotSent(NotSent::SingleLabel)
+                ),
+                (
+                    "https://a_b.example.org".to_string(),
+                    DomainChange::NotSent(NotSent::NotHostName)
+                ),
+            ]
+        );
+        for entry in sent(&domains) {
+            assert!(entry.is_ascii() && !entry.contains(['*', ':', '_']));
+        }
+    }
+}
+
+#[test]
+fn allow_rules_none_of_which_can_be_sent_offer_no_tool() {
+    let links = allow(&["https://127.0.0.1", "http://localhost"]);
+    let domains = links.fetch_domains();
+    assert_eq!(domains.filter(), &DomainFilter::NoDomain);
+    assert_eq!(domains.notes().len(), 2);
+    assert_eq!(
+        domains.to_string(),
+        "web fetch: nothing can be allowed (no allow rule can be sent), so \
+         offer no web fetch tool\n\
+         \x20 not sent: https://127.0.0.1: an IP address; the tool takes \
+         domain names (shown as written, not reached)\n\
+         \x20 not sent: http://localhost: a single label; the tool takes \
+         domain names of two or more (shown as written, not reached)\n"
+    );
+}
+
+#[test]
+fn fetch_deny_sends_only_whole_hosts() {
+    let links = deny(&[
+        "https://evil.example",
+        "https://legit.example/evil",
+        "https://ports.example:8080",
+        "https://*.tracker.example",
+        "https://evil.example/also",
+        "http://*.sub.evil.example",
+    ]);
+    let domains = links.fetch_domains();
+    assert_eq!(sent(&domains), strings(&["evil.example"]));
+    assert_eq!(
+        notes(&domains),
+        [
+            (
+                "https://legit.example/evil".to_string(),
+                DomainChange::NotSent(NotSent::DenyPath)
+            ),
+            (
+                "https://ports.example:8080".to_string(),
+                DomainChange::NotSent(NotSent::DenyPort)
+            ),
+            (
+                "https://*.tracker.example".to_string(),
+                DomainChange::NotSent(NotSent::DenyApex)
+            ),
+        ]
+    );
+}
+
+#[test]
+fn raw_with_nothing_sendable_is_no_filter() {
+    assert_eq!(
+        deny(&[]).fetch_domains().filter(),
+        &DomainFilter::Unfiltered
+    );
+    let domains = deny(&["https://legit.example/evil"]).fetch_domains();
+    assert_eq!(domains.filter(), &DomainFilter::Unfiltered);
+    assert_eq!(
+        domains.to_string(),
+        "web fetch: no domain filter (no deny rule can be sent)\n\
+         \x20 not sent: https://legit.example/evil: it has a path, and \
+         blocking the domain would block its other pages too (still \
+         defanged when shown)\n"
+    );
+}
+
+#[test]
+fn search_allow_sends_paths_as_prefixes() {
+    let links = allow(&[
+        "https://example.org/blog/",
+        "https://docs.rs/serde/latest",
+        "https://en.wikipedia.org/wiki/AC%2FDC",
+        "https://*.example.net/a",
+    ]);
+    let domains = links.search_domains();
+    assert_eq!(domains.tool(), ServerTool::WebSearch);
+    assert_eq!(
+        sent(&domains),
+        strings(&[
+            "docs.rs/serde/latest",
+            "en.wikipedia.org",
+            "example.net/a",
+            "example.org/blog",
+        ])
+    );
+    assert_eq!(
+        notes(&domains),
+        [
+            (
+                "https://example.org/blog/".to_string(),
+                widened("example.org/blog", &[Widening::PathPrefix])
+            ),
+            (
+                "https://docs.rs/serde/latest".to_string(),
+                widened("docs.rs/serde/latest", &[Widening::PathPrefix])
+            ),
+            (
+                "https://en.wikipedia.org/wiki/AC%2FDC".to_string(),
+                widened("en.wikipedia.org", &[Widening::Path])
+            ),
+            (
+                "https://*.example.net/a".to_string(),
+                widened(
+                    "example.net/a",
+                    &[Widening::PathPrefix, Widening::Apex]
+                )
+            ),
+        ]
+    );
+    // Why a path prefix is a widening: the rule takes whole segments
+    let blog = rule("https://example.org/blog");
+    assert!(blog.allows(&url("https://example.org/blog/1")));
+    assert!(!blog.allows(&url("https://example.org/blogger")));
+    assert!(anthropic_matches(
+        "example.org/blog",
+        &url("https://example.org/blogger")
+    ));
+}
+
+#[test]
+fn search_deny_narrows_paths_and_never_blocks_more() {
+    let links = deny(&[
+        "https://evil.example",
+        "https://legit.example/evil",
+        "https://legit.example/a%20b",
+        "https://evil.example/also",
+        "https://ports.example:8080/x",
+        "https://*.tracker.example/x",
+    ]);
+    let domains = links.search_domains();
+    assert_eq!(
+        sent(&domains),
+        strings(&["evil.example", "legit.example/evil/"])
+    );
+    assert_eq!(
+        notes(&domains),
+        [
+            (
+                "https://legit.example/evil".to_string(),
+                DomainChange::Narrowed {
+                    entry: "legit.example/evil/".to_string()
+                }
+            ),
+            (
+                "https://legit.example/a%20b".to_string(),
+                DomainChange::NotSent(NotSent::DenyPathSpelling)
+            ),
+            (
+                "https://ports.example:8080/x".to_string(),
+                DomainChange::NotSent(NotSent::DenyPort)
+            ),
+            (
+                "https://*.tracker.example/x".to_string(),
+                DomainChange::NotSent(NotSent::DenyApex)
+            ),
+        ]
+    );
+    assert!(!anthropic_matches(
+        "legit.example/evil/",
+        &url("https://legit.example/evilness")
+    ));
+}
+
+/// One example of each kind, as an operator reads it
+#[test]
+fn the_report_reads_plainly() {
+    let links = allow(&[
+        "https://en.wikipedia.org/wiki",
+        "https://*.example.org",
+        "https://docs.rs",
+        "https://example.net:8443",
+        "https://127.0.0.1",
+    ]);
+    assert_eq!(
+        links.fetch_domains().to_string(),
+        "web fetch: allowed_domains, 4\n\
+         \x20 docs.rs\n\
+         \x20 en.wikipedia.org\n\
+         \x20 example.net\n\
+         \x20 example.org\n\
+         \x20 each with its subdomains, over http and https: web fetch \
+         matches on the domain alone\n\
+         \x20 widened: https://en.wikipedia.org/wiki as en.wikipedia.org, \
+         with every path\n\
+         \x20 widened: https://*.example.org as example.org, with \
+         example.org itself\n\
+         \x20 widened: https://example.net:8443 as example.net, with every \
+         port\n\
+         \x20 not sent: https://127.0.0.1: an IP address; the tool takes \
+         domain names (shown as written, not reached)\n"
+    );
+    assert_eq!(
+        links.search_domains().to_string(),
+        "web search: allowed_domains, 4\n\
+         \x20 docs.rs\n\
+         \x20 en.wikipedia.org/wiki\n\
+         \x20 example.net\n\
+         \x20 example.org\n\
+         \x20 each with its subdomains, over http and https, and every \
+         path that begins with its own\n\
+         \x20 widened: https://en.wikipedia.org/wiki as \
+         en.wikipedia.org/wiki, with every path that begins /wiki (/wikix \
+         too)\n\
+         \x20 widened: https://*.example.org as example.org, with \
+         example.org itself\n\
+         \x20 widened: https://example.net:8443 as example.net, with every \
+         port\n\
+         \x20 not sent: https://127.0.0.1: an IP address; the tool takes \
+         domain names (shown as written, not reached)\n"
+    );
+    assert_eq!(
+        deny(&["https://evil.example", "https://legit.example/evil"])
+            .search_domains()
+            .to_string(),
+        "web search: blocked_domains, 2\n\
+         \x20 evil.example\n\
+         \x20 legit.example/evil/\n\
+         \x20 each with its subdomains, over http and https, and every \
+         path that begins with its own\n\
+         \x20 narrowed: https://legit.example/evil as legit.example/evil/, \
+         the pages under it; the path itself is still defanged when shown\n"
+    );
+}
+
+/// URLs to try rules on: hosts at, over and under the rules', schemes,
+/// ports and paths in and out of theirs
+fn domain_probe_urls() -> Vec<Url> {
+    let hosts = [
+        "example.org",
+        "docs.example.org",
+        "a.b.example.org",
+        "example.org.evil.net",
+        "notexample.org",
+        "en.wikipedia.org",
+        "legit.example",
+        "sub.legit.example",
+    ];
+    let paths = [
+        "/",
+        "/wiki",
+        "/wiki/",
+        "/wiki/Rust",
+        "/wikipedia",
+        "/blog",
+        "/blog/1",
+        "/blogger",
+        "/evil",
+        "/evil/x",
+        "/evilness",
+        "/a/b/c",
+    ];
+    let mut urls = Vec::new();
+    for scheme in ["http", "https"] {
+        for host in hosts {
+            for port in ["", ":8443"] {
+                for path in paths {
+                    urls.push(url(&[scheme, "://", host, port, path].concat()));
+                }
+            }
+        }
+    }
+    urls
+}
+
+/// Whatever a rule allows, the tool reaches: every URL an allow rule
+/// leaves as written is matched by an entry sent, under Anthropic's rules
+#[test]
+fn every_allowed_url_is_reached_by_an_entry() {
+    let rules = [
+        "https://example.org",
+        "http://example.org/wiki",
+        "https://*.example.org",
+        "https://*.example.org/blog",
+        "https://en.wikipedia.org/wiki",
+        "https://en.wikipedia.org:8443/wiki/Rust",
+        "https://legit.example/blog/",
+    ];
+    let urls = domain_probe_urls();
+    for written in rules {
+        let links = allow(&[written]);
+        let rule = rule(written);
+        for domains in [links.fetch_domains(), links.search_domains()] {
+            let entries = sent(&domains);
+            for url in urls.iter().filter(|url| rule.allows(url)) {
+                assert!(
+                    entries.iter().any(|e| anthropic_matches(e, url)),
+                    "{written}: {url} allowed, but {} sends {entries:?}",
+                    domains.tool()
+                );
+            }
+        }
+    }
+}
+
+/// And never more blocked than the rules say, but for the subdomains an
+/// entry covers (said once in the report): on an entry's own domain,
+/// every URL it blocks a rule denies
+#[test]
+fn no_entry_blocks_what_no_rule_denies() {
+    let written = [
+        "https://example.org/wiki",
+        "https://*.example.org",
+        "https://legit.example/evil",
+        "https://legit.example/blog/",
+        "https://en.wikipedia.org",
+        "https://example.org:8443/a",
+    ];
+    let links = deny(&written);
+    let rules: Vec<LinkRule> = written.iter().map(|r| rule(r)).collect();
+    let urls = domain_probe_urls();
+    for domains in [links.fetch_domains(), links.search_domains()] {
+        for entry in sent(&domains) {
+            let domain = entry.split('/').next().unwrap_or(entry);
+            for url in urls
+                .iter()
+                .filter(|url| url.host_str() == Some(domain))
+                .filter(|url| anthropic_matches(entry, url))
+            {
+                assert!(
+                    rules.iter().any(|r| r.denies(url)),
+                    "{}: {entry} blocks {url}, which no rule denies",
+                    domains.tool()
+                );
+            }
+        }
+    }
+}
