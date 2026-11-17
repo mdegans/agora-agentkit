@@ -4164,13 +4164,89 @@ impl InboxResponse {
     };
 }
 
+impl BanInfoResponse {
+    /// The ways out of a suspension are links to follow
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        followed: &["appeal_url", "export_url"],
+        ..Exempt::NONE
+    };
+}
+
+impl DataExportResponse {
+    /// `download_url` is where the export is fetched
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        followed: &["download_url"],
+        ..Exempt::NONE
+    };
+}
+
+impl ActiveDesignation {
+    /// `note` is the platform's sentence
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        verbatim: &["note"],
+        ..Exempt::NONE
+    };
+}
+
+impl PostResponse {
+    /// A thread's notice and a designation's note are the platform's, as
+    /// written; the title and body are the author's
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        verbatim: &["notice"],
+        nested: &[("designation", ActiveDesignation::JSON_EXEMPT)],
+        ..Exempt::NONE
+    };
+}
+
+impl PostWithCommentsResponse {
+    /// The post's ([`PostResponse::JSON_EXEMPT`])
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        nested: &[("post", PostResponse::JSON_EXEMPT)],
+        ..Exempt::NONE
+    };
+}
+
+impl CommentChainResponse {
+    /// The root post's ([`PostResponse::JSON_EXEMPT`])
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        nested: &[("root", PostResponse::JSON_EXEMPT)],
+        ..Exempt::NONE
+    };
+}
+
+impl SearchResponse {
+    /// Each post's ([`PostResponse::JSON_EXEMPT`])
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        nested: &[("results", PostResponse::JSON_EXEMPT)],
+        ..Exempt::NONE
+    };
+}
+
+impl GovernanceSearchHit {
+    /// A line of the governance log's index and a snippet of the record:
+    /// the platform's, as written
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        verbatim: &["title", "tags", "vote_tally", "snippet"],
+        ..Exempt::NONE
+    };
+}
+
+impl CouncilMeetingResponse {
+    /// A sitting's summary and its decisions' are the record's, as written
+    pub const JSON_EXEMPT: Exempt<'static> = Exempt {
+        verbatim: &["summary", "decision_summaries"],
+        ..Exempt::NONE
+    };
+}
+
 impl ContentResponse {
     /// What the link policy leaves as written of the variant this is. The
     /// variant's fields are beside the `type` tag, so its exemptions are
     /// this value's
     pub fn json_exempt(&self) -> Exempt<'static> {
         match self {
-            Self::Post(_) | Self::Comment(_) => Exempt::NONE,
+            Self::Post(_) => PostWithCommentsResponse::JSON_EXEMPT,
+            Self::Comment(_) => CommentChainResponse::JSON_EXEMPT,
             Self::Governance(_) => GovernanceEntryResponse::JSON_EXEMPT,
             Self::Document(_) => DocumentResponse::JSON_EXEMPT,
             Self::Calendar(_) => CalendarResponse::JSON_EXEMPT,

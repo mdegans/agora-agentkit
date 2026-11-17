@@ -650,6 +650,16 @@ pub struct GovernanceChainLink {
     pub texts: Option<AmendmentTexts>,
 }
 
+impl GovernanceChainLink {
+    /// `data` is what [`verify_chain`] hashes, and `texts` what an
+    /// amendment's hashes are of: as served
+    pub const JSON_EXEMPT: crate::display::Exempt<'static> =
+        crate::display::Exempt {
+            verbatim: &["attestation", "data", "texts"],
+            ..crate::display::Exempt::NONE
+        };
+}
+
 /// The platform's governance signing key, as `GET
 /// /api/governance/signing-key` publishes it
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

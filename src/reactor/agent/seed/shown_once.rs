@@ -21,8 +21,10 @@
 //! request.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
+use crate::display::Links;
 use crate::ids::{ContentId, ContentIdPrefix, GovernanceLogId, PostId};
 
 /// One post or comment shown in full this session
@@ -94,6 +96,9 @@ struct Inner {
     cues: Cues,
     /// The agent's turns this session, counted by the tool's `on_turn`
     turn: u64,
+    /// The note on a defanged link for the session's link policy
+    /// ([`defanged_note_for`]); [`DEFANGED_NOTE`] until one is set
+    links_note: Option<&'static str>,
 }
 
 /// How a result points at further reads: in `agora://` links when it was
@@ -172,7 +177,28 @@ pub fn summary_text(text: &str) -> String {
 
 /// See the [module docs](self). Cheap to clone: one shared set per session
 #[derive(Debug, Clone, Default)]
-pub struct ShownOnce(Arc<RwLock<Inner>>);
+pub struct ShownOnce(Arc<RwLock<Inner>>, Arc<AtomicBool>);
+
+/// The note on a defanged link under [`Links::Defanged`], shown the first
+/// time a result defangs one ([`ShownOnce::defanged_note`])
+pub const DEFANGED_NOTE: &str = "*(Links to other sites are shown like \
+     hxxps://example[.]com, so they can't be followed, unless your operator \
+     has allowed the site. To have a site allowed, ask your operator: \
+     `send_message` to `operator`.)*";
+
+/// The same under [`Links::Raw`] with deny rules
+pub const BLOCKED_NOTE: &str = "*(Your operator has blocked some sites; \
+     links to them are shown like hxxps://example[.]com, so they can't be \
+     followed. To have a site unblocked, ask your operator: `send_message` \
+     to `operator`.)*";
+
+/// The note on a defanged link under `links`
+pub fn defanged_note_for(links: &Links) -> &'static str {
+    match links {
+        Links::Defanged { .. } => DEFANGED_NOTE,
+        Links::Raw { .. } => BLOCKED_NOTE,
+    }
+}
 
 impl ShownOnce {
     /// A result for `read` (what the pointer will call it: `your read of
@@ -400,6 +426,42 @@ impl ShownOnce {
         }
     }
 
+    /// What a [`DisplayContext`](crate::display::DisplayContext) sets when
+    /// it defangs a link ([`noting`](crate::display::DisplayContext::noting))
+    pub fn defanged_flag(&self) -> &AtomicBool {
+        &self.1
+    }
+
+    /// [`DEFANGED_NOTE`], when what was rendered since the last call
+    /// defanged a link and the note is still to be shown this session
+    pub fn defanged_note(&self) -> Option<&'static str> {
+        (self.1.swap(false, Ordering::Relaxed) && self.legend("defanged")).then(
+            || {
+                let inner = self.0.read().expect("shown-once lock");
+                inner.links_note.unwrap_or(DEFANGED_NOTE)
+            },
+        )
+    }
+
+    /// The session's link policy, which says which note
+    /// [`defanged_note`](Self::defanged_note) shows
+    pub fn set_links(&self, links: &Links) {
+        self.0.write().expect("shown-once lock").links_note =
+            Some(defanged_note_for(links));
+    }
+
+    /// The session's intro showed its note ([`defanged_note_for`]) if it
+    /// defanged a link
+    /// (it is seated, so the note counts as shown at once): whether it did
+    pub fn defanged_in_intro(&self) -> bool {
+        let defanged = self.1.swap(false, Ordering::Relaxed);
+        if defanged {
+            let mut inner = self.0.write().expect("shown-once lock");
+            inner.legends.insert("defanged");
+        }
+        defanged
+    }
+
     /// Whether the note `legend` was shown this session (or by the result
     /// being rendered), without showing it
     pub fn legend_shown(&self, legend: &'static str) -> bool {
@@ -549,6 +611,32 @@ mod tests {
 
     fn id(n: u128) -> ContentId {
         ContentId::from(Uuid::from_u128(n))
+    }
+
+    /// The note on a defanged link says what the session's mode does, and
+    /// is shown once whichever it is
+    #[test]
+    fn the_defanged_note_is_the_modes() {
+        let raw = Links::Raw {
+            deny: vec!["https://evil.example".parse().unwrap()],
+        };
+        for (links, note) in [
+            (None, DEFANGED_NOTE),
+            (Some(Links::default()), DEFANGED_NOTE),
+            (Some(raw), BLOCKED_NOTE),
+        ] {
+            let once = ShownOnce::default();
+            if let Some(links) = &links {
+                once.set_links(links);
+                assert_eq!(defanged_note_for(links), note);
+            }
+            once.defanged_flag().store(true, Ordering::Relaxed);
+            assert_eq!(once.defanged_note(), Some(note));
+            once.defanged_flag().store(true, Ordering::Relaxed);
+            assert_eq!(once.defanged_note(), None);
+        }
+        assert!(BLOCKED_NOTE.contains("blocked some sites"));
+        assert!(!DEFANGED_NOTE.contains("otherwise as written"));
     }
 
     #[test]

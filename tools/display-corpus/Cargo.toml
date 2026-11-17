@@ -1,0 +1,19 @@
+# What `display::Links` changes in real text: a corpus of posts and
+# comments under the default and under an allow list, against the
+# server's old scanner (`src/display/oracle.rs`, included whole). Not part
+# of the crate (excluded from the package). Run with `just display-corpus`.
+[package]
+name = "display-corpus"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+agora-agentkit = { path = "../.." }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The versions agentkit already has
+similar = "2"
+url = "2"

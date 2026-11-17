@@ -51,7 +51,9 @@ pub use prompt::{
 pub use prompt_log::{PromptLogError, prompt_sha256};
 pub use session::AgoraSession;
 pub use shortstring::{ShortString, ShortStringError};
-pub use shown_once::{Cues, Shown, ShownOnce};
+pub use shown_once::{
+    BLOCKED_NOTE, Cues, DEFANGED_NOTE, Shown, ShownOnce, defanged_note_for,
+};
 pub use soul::{
     EVOLUTION_LOG_CAP, EvolutionEntry, EvolutionRequest, Feedback, ITEM_MAX,
     Interests, InterestsDraft, LEGACY_REQUIRED_SECTIONS, PROSE_MAX, Soul,
@@ -1591,7 +1593,7 @@ impl Agent for SeedAgent {
                 .values()
                 .chain(dash.elsewhere.values())
                 .flatten()
-                .map(|p| (p.id, cx.links(&p.title).into_owned()))
+                .map(|p| (p.id, cx.linked(&p.title).into_owned()))
                 .collect();
         }
 
@@ -1678,9 +1680,11 @@ impl Agent for SeedAgent {
                 display: crate::display::DisplayContext::at(
                     &self.display,
                     Some(self.ctx.client.site()),
-                ),
+                )
+                .noting(self.shown_once.defanged_flag()),
             },
         )?;
+        self.shown_once.defanged_in_intro();
         Ok(())
     }
 

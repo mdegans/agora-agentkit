@@ -3,26 +3,26 @@
 
 use std::borrow::Cow;
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use misanthropic::prompt::message::Block;
-use serde::Serialize;
 use url::Url;
 
-use super::{AgentDisplayConfig, DisplayConfig, Exempt, json_view};
+use super::{AgentDisplayConfig, DisplayConfig};
 use crate::threads;
 
 /// What a view is rendered with: the reader's config, and the site whose
 /// page URLs are written as `agora://` links.
 ///
 /// The site is a fact of the deployment and not an option, so it is beside
-/// the config and not in it. [`new`](Self::new) reads the process's
-/// ([`links::site`](crate::links::site)); a test pins its own with
-/// [`at`](Self::at), since the process's is set once and by whoever is
-/// first.
+/// the config and not in it: the client's base URL
+/// ([`Client::site`](crate::client::Client::site)) for a runner.
 #[derive(Debug)]
 pub struct DisplayContext<'a, C = AgentDisplayConfig> {
     pub config: &'a C,
     pub site: Option<&'a Url>,
+    /// Set when the policy defanged something ([`noting`](Self::noting))
+    defanged: Option<&'a AtomicBool>,
 }
 
 impl<C> Clone for DisplayContext<'_, C> {
@@ -34,21 +34,27 @@ impl<C> Clone for DisplayContext<'_, C> {
 impl<C> Copy for DisplayContext<'_, C> {}
 
 impl<'a, C> DisplayContext<'a, C> {
-    /// `config` on this process's site
-    pub fn new(config: &'a C) -> Self {
-        Self::at(config, crate::links::site())
-    }
-
-    /// `config` on `site`, whatever the process's is
+    /// `config` on `site`
     pub fn at(config: &'a C, site: Option<&'a Url>) -> Self {
-        Self { config, site }
+        Self {
+            config,
+            site,
+            defanged: None,
+        }
     }
-}
 
-/// [`DisplayContext::new`]
-impl<'a, C> From<&'a C> for DisplayContext<'a, C> {
-    fn from(config: &'a C) -> Self {
-        Self::new(config)
+    /// The same, setting `flag` whenever [`linked`](Self::linked) defangs
+    /// a URL, so a reader can be told once what one is
+    pub fn noting(self, flag: &'a AtomicBool) -> Self {
+        Self {
+            defanged: Some(flag),
+            ..self
+        }
+    }
+
+    /// Whether the flag of [`noting`](Self::noting) is set
+    pub fn has_defanged(&self) -> bool {
+        self.defanged.is_some_and(|f| f.load(Ordering::Relaxed))
     }
 }
 
@@ -60,36 +66,43 @@ impl<'a, C> From<&'a C> for DisplayContext<'a, C> {
 impl<C: AsRef<DisplayConfig>> DisplayContext<'_, C> {
     /// `text` under the reader's link policy, and nothing else. Borrowed
     /// when nothing changes
-    pub fn links<'t>(&self, text: &'t str) -> Cow<'t, str> {
-        self.config.as_ref().links.rewrite(text, self.site)
+    pub fn linked<'t>(&self, text: &'t str) -> Cow<'t, str> {
+        let (text, defanged) =
+            self.config.as_ref().links.rewrite_noting(text, self.site);
+        if defanged && let Some(flag) = self.defanged {
+            flag.store(true, Ordering::Relaxed);
+        }
+        text
     }
 
-    /// `text` for between an element's tags: [`links`](Self::links), then
+    /// `text` for between an element's tags: [`linked`](Self::linked), then
     /// [`threads::escape_text`]
     pub fn in_element(&self, text: &str) -> String {
-        threads::escape_text(&self.links(text))
+        threads::escape_text(&self.linked(text))
     }
 
-    /// `text` for a line outside any element: [`links`](Self::links),
+    /// `text` for a line outside any element: [`linked`](Self::linked),
     /// then [`threads::defang`]
     pub fn on_line(&self, text: &str) -> String {
-        threads::defang(&self.links(text))
+        threads::defang(&self.linked(text))
     }
 
-    /// A post's or comment's body inside its element: [`threads::tidy`],
-    /// then [`in_element`](Self::in_element). What [`threads::shown_body`]
-    /// is without a policy
+    /// A post's or comment's body inside its element: [`linked`](Self::linked),
+    /// then [`threads::tidy`] and [`threads::escape_text`]. The policy reads
+    /// the body as written, before `tidy` changes its line breaks
     pub fn body(&self, body: &str) -> String {
-        self.in_element(&threads::tidy(body))
+        threads::escape_text(&threads::tidy(&self.linked(body)))
     }
 }
 
-/// What an agent is shown of a value: as text, as content blocks, and as
-/// JSON.
+/// What an agent is shown of a value, as text and as content blocks. Its
+/// JSON is [`AgentJson`](super::AgentJson)'s.
 ///
 /// A rendering that needs more than the value (who reads it, a byte
 /// budget) is implemented on a small struct that borrows the value and
-/// carries the rest, not put in the config.
+/// carries the rest, not put in the config. Such a view may hold state
+/// that rendering changes (the seed runner's legends shown once, its
+/// "already in your context" pointers), so one read is rendered once.
 ///
 /// Usable as a trait object, for the text and the blocks alike: a mixed
 /// list of views is a `Vec<Box<dyn AgentDisplay>>`, and a `&T` or a
@@ -102,18 +115,10 @@ pub trait AgentDisplay {
         cx: DisplayContext<'_>,
     ) -> fmt::Result;
 
-    /// What of this value's JSON the link policy leaves as written
-    /// ([`agent_display_json`](Self::agent_display_json)). A method, so an
-    /// enum can answer for the variant it is
-    fn json_exempt(&self) -> Exempt<'_> {
-        Exempt::NONE
-    }
-
     /// The content blocks an agent is shown: one text block of the text,
     /// unless a type has more to show (an image, a document).
     ///
-    /// It takes the context itself, not anything that is one, so that a
-    /// trait object has it: `(&config).into()` for a bare config
+    /// A trait object has it, as it takes the context itself
     fn agent_display_blocks<'a>(
         &'a self,
         cx: DisplayContext<'a>,
@@ -123,30 +128,16 @@ pub trait AgentDisplay {
     }
 
     /// The text as a [`Display`](fmt::Display):
-    /// `format!("{}", post.agent_display(&config))`. A `dyn AgentDisplay`
+    /// `format!("{}", post.agent_display(cx))`. A `dyn AgentDisplay`
     /// has [`agent_text`](trait.AgentDisplay.html#method.agent_text)
     fn agent_display<'a>(
         &'a self,
-        cx: impl Into<DisplayContext<'a>>,
+        cx: DisplayContext<'a>,
     ) -> AgentText<'a, Self>
     where
         Self: Sized,
     {
         AgentText::new(self, cx)
-    }
-
-    /// The JSON an agent is shown: the value's own, through [`json_view`]
-    /// with [`json_exempt`](Self::json_exempt). An error is the
-    /// serializer's
-    fn agent_display_json<'a>(
-        &self,
-        cx: impl Into<DisplayContext<'a>>,
-    ) -> Result<serde_json::Value, serde_json::Error>
-    where
-        Self: Serialize + Sized,
-    {
-        let value = serde_json::to_value(self)?;
-        Ok(json_view(value, self.json_exempt(), cx.into()))
     }
 }
 
@@ -155,7 +146,7 @@ impl<'t> dyn AgentDisplay + 't {
     /// have that method (it names the type it is of)
     pub fn agent_text<'a>(
         &'a self,
-        cx: impl Into<DisplayContext<'a>>,
+        cx: DisplayContext<'a>,
     ) -> AgentText<'a, Self> {
         AgentText::new(self, cx)
     }
@@ -169,11 +160,8 @@ pub struct AgentText<'a, T: ?Sized> {
 
 impl<'a, T: AgentDisplay + ?Sized> AgentText<'a, T> {
     /// What [`AgentDisplay::agent_display`] returns
-    pub fn new(value: &'a T, cx: impl Into<DisplayContext<'a>>) -> Self {
-        Self {
-            value,
-            cx: cx.into(),
-        }
+    pub fn new(value: &'a T, cx: DisplayContext<'a>) -> Self {
+        Self { value, cx }
     }
 }
 
@@ -192,10 +180,6 @@ macro_rules! forward {
                 cx: DisplayContext<'_>,
             ) -> fmt::Result {
                 (**self).fmt_agent(f, cx)
-            }
-
-            fn json_exempt(&self) -> Exempt<'_> {
-                (**self).json_exempt()
             }
 
             fn agent_display_blocks<'a>(

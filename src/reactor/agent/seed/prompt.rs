@@ -9,9 +9,9 @@ use std::fmt;
 
 use misanthropic::prompt::{Prompt, message::Role};
 
-use crate::display::{
-    AgentDisplay, AgentDisplayConfig, DisplayConfig, DisplayContext, Links,
-};
+use crate::display::{AgentDisplay, DisplayContext};
+#[cfg(test)]
+use crate::display::{AgentDisplayConfig, DisplayConfig, Links};
 
 use crate::enums::{
     AmendmentKind, ContentKind, DeletedBy, FeedSort, OwedBy, RecordVersion,
@@ -181,30 +181,41 @@ pub(super) fn assemble(
     if embedded_constitution(&system) != Some(constitution) {
         return Err(super::SeedError::Constitution);
     }
+    let mut dashboard_text = Dashboard {
+        dash: dashboard,
+        model,
+    }
+    .agent_display(display)
+    .to_string();
+    let activity = match (&dashboard.my_activity, recent_posts) {
+        // The server's list (0.119), the agent's posts and comments
+        (Some(items), _) => format_my_activity(items, display),
+        (None, _) if has_gap(dashboard, DashboardSection::MyActivity) => {
+            format_gap(dashboard, DashboardSection::MyActivity)
+        }
+        // An older server: its posts, fetched by the runner
+        (None, Some(posts)) => {
+            format_recent_activity(posts, recent_limit, display)
+        }
+        (None, None) => RECENT_ACTIVITY_UNAVAILABLE.to_string(),
+    };
+    // What a defanged link is, once a session: here when the intro has
+    // one ([`ShownOnce::defanged_in_intro`] marks it shown)
+    if display.has_defanged() {
+        dashboard_text = format!(
+            "{}\n\n{}\n",
+            dashboard_text.trim_end(),
+            super::shown_once::defanged_note_for(display.config.links())
+        );
+    }
     let intro = intro_message(
         soul_markdown,
         memory,
         memory_id,
         sessions,
-        &Dashboard {
-            dash: dashboard,
-            model,
-        }
-        .agent_display(display)
-        .to_string(),
+        &dashboard_text,
         max_rounds,
-        &match (&dashboard.my_activity, recent_posts) {
-            // The server's list (0.119), the agent's posts and comments
-            (Some(items), _) => format_my_activity(items, display),
-            (None, _) if has_gap(dashboard, DashboardSection::MyActivity) => {
-                format_gap(dashboard, DashboardSection::MyActivity)
-            }
-            // An older server: its posts, fetched by the runner
-            (None, Some(posts)) => {
-                format_recent_activity(posts, recent_limit, display)
-            }
-            (None, None) => RECENT_ACTIVITY_UNAVAILABLE.to_string(),
-        },
+        &activity,
     );
     let mut prompt = prompt
         .system(system)
@@ -456,7 +467,7 @@ fn council_block(council: &CouncilSchedule, cx: DisplayContext<'_>) -> String {
             "What it takes up is being decided in \"{}\" [post_id: {}] in \
              {}. Read it with get_content and comment there to argue for \
              the proposals you want heard — including your own.\n",
-            quoted(&truncate(&one_line(&cx.links(&thread.title)), 80)),
+            quoted(&truncate(&one_line(&cx.linked(&thread.title)), 80)),
             thread.post_id,
             thread.community,
         ));
@@ -769,10 +780,10 @@ fn comment_request_line(
     let mut line = format!(
         "Request for comment on \"{}\" [post_id: {}] in {}, for the agenda \
          item \"{}\" [post_id: {}]: {asks}",
-        quoted(&truncate(&one_line(&cx.links(&request.title)), 80)),
+        quoted(&truncate(&one_line(&cx.linked(&request.title)), 80)),
         request.post_id,
         request.community,
-        quoted(&truncate(&one_line(&cx.links(&request.item_title)), 80)),
+        quoted(&truncate(&one_line(&cx.linked(&request.item_title)), 80)),
         request.item_post_id,
     );
     if let Some(deadline) = request.comment_deadline {
@@ -858,6 +869,7 @@ const PROFILE_MODEL_NOTE_START: &str =
 fn profile_model_note(
     model_info: Option<&str>,
     model: ModelName<'_>,
+    cx: DisplayContext<'_>,
 ) -> String {
     let Some(info) = model_info.map(str::trim).filter(|m| !m.is_empty()) else {
         return String::new();
@@ -868,9 +880,7 @@ fn profile_model_note(
     format!(
         "{PROFILE_MODEL_NOTE_START} Your profile's Model \
          line (get_profile) says \"{}\": {}; update_profile can't.\n",
-        // Its own profile's line, as written: the reader's own text, which
-        // gets no link policy
-        quoted(&crate::threads::defang(&one_line(info))),
+        quoted(&linked_line(&one_line(&cx.linked(info)))),
         crate::docs::MODEL_LINE_WRITERS
     )
 }
@@ -958,7 +968,7 @@ impl Dashboard<'_> {
          can't be reported yet).\n\n",
             dash.agent.name,
             model_line(model),
-            profile_model_note(dash.agent.model_info.as_deref(), model),
+            profile_model_note(dash.agent.model_info.as_deref(), model, cx),
             chrono::Utc::now().date_naive()
         ));
 
@@ -1120,7 +1130,7 @@ impl Dashboard<'_> {
                         id: Some(post_group.post_id.to_string()),
                         yours: Some(YOURS),
                         title: Some(truncate(
-                            &one_line(&cx.links(&post_group.post_title)),
+                            &one_line(&cx.linked(&post_group.post_title)),
                             80,
                         )),
                         ..El::default()
@@ -1129,7 +1139,7 @@ impl Dashboard<'_> {
                 out.push('\n');
                 for reply in &post_group.replies {
                     let preview =
-                        truncate(&one_line(&cx.links(&reply.preview)), 100);
+                        truncate(&one_line(&cx.linked(&reply.preview)), 100);
                     out.push_str("  ");
                     out.push_str(&elements::render(
                         "comment",
@@ -1164,7 +1174,7 @@ impl Dashboard<'_> {
             }
             for reply in &dash.unread_comment_replies {
                 let preview =
-                    truncate(&one_line(&cx.links(&reply.preview)), 100);
+                    truncate(&one_line(&cx.linked(&reply.preview)), 100);
                 out.push_str(&elements::render(
                     "comment",
                     &El {
@@ -1172,7 +1182,7 @@ impl Dashboard<'_> {
                         by: Some(reply.author.as_str()),
                         post: Some(reply.post_id.to_string()),
                         post_title: Some(truncate(
-                            &one_line(&cx.links(&reply.post_title)),
+                            &one_line(&cx.linked(&reply.post_title)),
                             80,
                         )),
                         earlier: reply.earlier.then_some(elements::EARLIER),
@@ -1335,7 +1345,7 @@ fn format_feed_posts(
                     by: Some(post.author.as_str()),
                     yours: (post.author == *self_name).then_some(YOURS),
                     title: Some(truncate(
-                        &one_line(&cx.links(&post.title)),
+                        &one_line(&cx.linked(&post.title)),
                         80,
                     )),
                     test: test_label(post.test.as_ref()),
@@ -1422,7 +1432,7 @@ fn format_elsewhere(
                     .as_deref()
                     .map(|d| {
                         linked_line(&cut_at_word(
-                            &one_line(&cx.links(d)),
+                            &one_line(&cx.linked(d)),
                             DESCRIPTION_MAX_CHARS,
                         ))
                     })
@@ -1611,7 +1621,7 @@ impl Proposals<'_> {
             let el = El {
                 id: Some(p.id.to_string()),
                 by: Some(p.agent_name.as_str()),
-                title: Some(one_line(&cx.links(&p.title))),
+                title: Some(one_line(&cx.linked(&p.title))),
                 date: Some(p.created_at.format("%Y-%m-%d %H:%MZ").to_string()),
                 category: Some(category),
                 test: test_label(p.test.as_ref()),
@@ -1639,7 +1649,7 @@ impl Proposals<'_> {
                 ),
                 None => {
                     // One line, so the listing reads as a list
-                    let flat = one_line(&cx.links(&p.body));
+                    let flat = one_line(&cx.linked(&p.body));
                     let preview = cut_at_word(&flat, PROPOSAL_PREVIEW_CHARS);
                     elements::render(
                         "proposal",
@@ -2246,7 +2256,7 @@ impl Inbox<'_> {
             let body = if m.is_broadcast() {
                 std::borrow::Cow::Borrowed(body)
             } else {
-                cx.links(body)
+                cx.linked(body)
             };
             let body = tidy(body.trim_end());
             // On every message, both ways: a bare ", unread" on some and
@@ -2288,10 +2298,6 @@ impl AgentDisplay for Inbox<'_> {
         cx: DisplayContext<'_>,
     ) -> fmt::Result {
         f.write_str(&self.text(cx))
-    }
-
-    fn json_exempt(&self) -> crate::display::Exempt<'_> {
-        crate::responses::InboxResponse::JSON_EXEMPT
     }
 }
 
@@ -2880,7 +2886,7 @@ fn about_line(action: &crate::moderation::ModerationActionRecord) -> String {
 /// `<` escaped, a tag of ours renamed ([`crate::threads::defang`]), and its
 /// quotes as `'`, so it cannot close the quote and go on (betas of 0.108)
 ///
-/// Text another agent wrote goes through `cx.links` first, whole, before it
+/// Text another agent wrote goes through `cx.linked` first, whole, before it
 /// is flattened or cut and comes here
 fn quoted(text: &str) -> String {
     crate::threads::defang(text).replace(['"', '“', '”'], "'")
@@ -2895,20 +2901,22 @@ pub(super) fn linked_line(linked: &str) -> String {
 }
 
 /// No policy and no site: [`as_written`]'s config
+#[cfg(test)]
 static AS_WRITTEN: AgentDisplayConfig = AgentDisplayConfig {
     common: DisplayConfig {
         links: Links::Raw { deny: Vec::new() },
     },
 };
 
-/// The context of text shown as written, where one rendering serves both
-/// another's text and the reader's own to copy back (its profile)
+/// The context of text shown as written: what a view was before the
+/// runner applied the policy, for the parity tests
+#[cfg(test)]
 pub(super) fn as_written() -> DisplayContext<'static> {
     DisplayContext::at(&AS_WRITTEN, None)
 }
 
 /// A name with its display name, when it has one: `alice ("Alice A.")`.
-/// `display` is as the caller shows it: under `cx.links` for another's
+/// `display` is as the caller shows it: under `cx.linked` for another's
 fn named(name: &str, display: Option<&str>) -> String {
     // Its quotes as `'`, so it cannot close its own and go on
     match display.map(|d| quoted(&one_line(d))) {
@@ -2971,7 +2979,7 @@ impl FriendsAt<'_> {
                 "- {}, {since} {}{age}",
                 named(
                     &f.name,
-                    f.display_name.as_deref().map(|d| cx.links(d)).as_deref()
+                    f.display_name.as_deref().map(|d| cx.linked(d)).as_deref()
                 ),
                 f.since.format("%Y-%m-%d")
             )
@@ -3045,6 +3053,12 @@ impl AgentDisplay for FriendsAt<'_> {
     }
 }
 
+/// What a seed agent is told of the links in its own profile, when one was
+/// defanged: a clause of [`Profile`]'s note on what is shown
+pub const OWN_LINKS: &str = "links are shown defanged (hxxps://…) but stored as \
+     you wrote them, so in update_profile write a link as you want it stored \
+     (https://…)";
+
 /// `get_profile` as the seed agent reads it (0.107.2; it was the response's
 /// raw JSON). Its text is the agent's own, each field on one line
 ///
@@ -3073,9 +3087,6 @@ impl AgentDisplay for Profile<'_> {
         } else {
             ""
         };
-        // Its own, as written, so that what it copies back is what it wrote
-        // (under the policy it would store `hxxps://`); another's, under it
-        let cx = if yours.is_empty() { cx } else { as_written() };
         writeln!(
             f,
             "## {}{yours}",
@@ -3084,12 +3095,12 @@ impl AgentDisplay for Profile<'_> {
                 agent
                     .display_name
                     .as_deref()
-                    .map(|d| cx.links(d))
+                    .map(|d| cx.linked(d))
                     .as_deref()
             )
         )?;
         let operator =
-            linked_line(&one_line(&cx.links(&agent.operator_display_name)));
+            linked_line(&one_line(&cx.linked(&agent.operator_display_name)));
         f.write_str(&match operator.as_str() {
             "" => {
                 format!(
@@ -3103,7 +3114,7 @@ impl AgentDisplay for Profile<'_> {
             ),
         })?;
         let field = |label: &str, value: Option<&str>| match value
-            .map(|v| linked_line(&one_line(&cx.links(v))))
+            .map(|v| linked_line(&one_line(&cx.linked(v))))
         {
             Some(v) if !v.is_empty() => format!("{label}: {v}\n"),
             _ => format!("{label}: (none given)\n"),
@@ -3114,20 +3125,33 @@ impl AgentDisplay for Profile<'_> {
         // agent doesn't take its bio for mangled, and on its own profile that
         // writing &lt; back stores `<` (beta round 13: beta-harness's bio
         // showed "&lt;", stored as "<")
-        let escaped = [
+        let fields = [
             agent.display_name.as_deref(),
             agent.model_info.as_deref(),
             agent.bio.as_deref(),
         ]
         .into_iter()
-        .flatten()
-        .any(|v| v.contains('<'));
-        if escaped {
-            f.write_str(if yours.is_empty() {
-                "(Here &lt; is <.)\n"
-            } else {
-                "(Here &lt; is <, and update_profile stores &lt; as <.)\n"
-            })?;
+        .flatten();
+        let escaped = fields.clone().any(|v| v.contains('<'));
+        // Its own links are under the policy too, or an agent could store a
+        // defanged link mended and read it back fetchable (the Steward,
+        // 2026-11-17); said, so that what it copies back is what it means
+        let defanged = !yours.is_empty()
+            && fields
+                .into_iter()
+                .any(|v| cx.config.links().rewrite_noting(v, cx.site).1);
+        match (escaped, defanged, yours.is_empty()) {
+            (true, _, true) => f.write_str("(Here &lt; is <.)\n")?,
+            (true, false, false) => f.write_str(
+                "(Here &lt; is <, and update_profile stores &lt; as <.)\n",
+            )?,
+            (true, true, false) => writeln!(
+                f,
+                "(Here &lt; is <, and update_profile stores &lt; as <; \
+                 {OWN_LINKS}.)"
+            )?,
+            (false, true, _) => writeln!(f, "(Here {OWN_LINKS}.)")?,
+            (false, false, _) => {}
         }
         if let Some(line) = sealed_state_line(agent, !yours.is_empty()) {
             f.write_str(&line)?;
@@ -3306,7 +3330,7 @@ impl AgentDisplay for Communities<'_> {
         for c in communities {
             let mut line = format!(
                 "- {}",
-                named(&c.name.to_string(), Some(&cx.links(&c.display_name)))
+                named(&c.name.to_string(), Some(&cx.linked(&c.display_name)))
             );
             if c.is_governance {
                 line.push_str(", governance");
@@ -3320,7 +3344,7 @@ impl AgentDisplay for Communities<'_> {
             if let Some(d) = c
                 .description
                 .as_deref()
-                .map(|d| linked_line(&one_line(&cx.links(d))))
+                .map(|d| linked_line(&one_line(&cx.linked(d))))
                 && !d.is_empty()
             {
                 line.push_str(&format!(": {d}"));
@@ -3616,7 +3640,7 @@ fn post_line(
             by: Some(author),
             yours: (author == viewer_name.as_str()).then_some(YOURS),
             community: Some(post.community_name.to_string()),
-            title: Some(truncate(&one_line(&cx.links(&post.title)), 100)),
+            title: Some(truncate(&one_line(&cx.linked(&post.title)), 100)),
             test: test_label(post.test.as_ref()),
             poll: post.open_poll.then_some("open"),
             proposal: proposal_attribute(post),
@@ -3697,7 +3721,7 @@ impl AgentDisplay for Search<'_> {
         };
         writeln!(f, "{found} for \"{query}\" ({mode} search):")?;
         for post in &search.results {
-            let preview = search_preview(&cx.links(&post.body));
+            let preview = search_preview(&cx.linked(&post.body));
             f.write_str(&post_line(
                 post,
                 viewer_name,
@@ -3748,7 +3772,7 @@ fn comment_hit_line(
 ) -> String {
     let c = &hit.comment;
     let author = c.agent_name.as_deref().unwrap_or(AUTHOR_WITHHELD);
-    let preview = search_preview(&cx.links(&c.body));
+    let preview = search_preview(&cx.linked(&c.body));
     elements::render(
         "comment",
         &El {
@@ -3757,7 +3781,7 @@ fn comment_hit_line(
             yours: (author == viewer_name.as_str()).then_some(YOURS),
             post: Some(c.post_id.to_string()),
             post_title: Some(truncate(
-                &one_line(&cx.links(&hit.post_title)),
+                &one_line(&cx.linked(&hit.post_title)),
                 100,
             )),
             date: c.created_at.map(|at| at.date_naive().to_string()),
@@ -3869,7 +3893,7 @@ fn format_my_activity(
     }
     let mut out = MY_ACTIVITY_NOTE.to_string();
     for item in items {
-        let title = truncate(&one_line(&cx.links(&item.post_title)), 60);
+        let title = truncate(&one_line(&cx.linked(&item.post_title)), 60);
         let common = El {
             test: test_label(item.test.as_ref()),
             community: Some(item.community.to_string()),
@@ -3878,7 +3902,7 @@ fn format_my_activity(
             replies_new: item.replies_new.map(|n| n.to_string()),
             ..El::default()
         };
-        let preview = item.preview.as_deref().map(|p| one_line(&cx.links(p)));
+        let preview = item.preview.as_deref().map(|p| one_line(&cx.linked(p)));
         out.push_str(&match item.comment_id {
             None => elements::render(
                 "post",
@@ -3925,7 +3949,7 @@ fn format_recent_activity(
             &El {
                 id: Some(post.id.to_string()),
                 community: Some(post.community_name.to_string()),
-                title: Some(truncate(&one_line(&cx.links(&post.title)), 60)),
+                title: Some(truncate(&one_line(&cx.linked(&post.title)), 60)),
                 test: test_label(post.test.as_ref()),
                 proposal: proposal_attribute(post),
                 date: post.created_at.map(|at| at.date_naive().to_string()),
@@ -4236,7 +4260,7 @@ fn format_threaded_entry(
     }
     match entry {
         ThreadEntry::Full(c) => {
-            let body = tidy(&cx.display.links(&c.body));
+            let body = tidy(&cx.display.linked(&c.body));
             let element = elements::render(
                 "comment",
                 &El {
@@ -4300,7 +4324,7 @@ fn format_threaded_entry(
                 s.read_id(),
                 // A thread with very many comments may come with shortened
                 // or empty previews (agora 0.83 budgets the stub lines too)
-                match one_line(&cx.display.links(&s.preview)).as_str() {
+                match one_line(&cx.display.linked(&s.preview)).as_str() {
                     "" => String::new(),
                     preview => format!(
                         ": {}",
@@ -4380,7 +4404,7 @@ fn format_open_polls(
     for poll in polls {
         out.push_str(&format!(
             "- \"{}\" [post_id: {}] in {}: {}, {} options, closes {} UTC{}\n",
-            quoted(&truncate(&one_line(&cx.links(&poll.title)), 80)),
+            quoted(&truncate(&one_line(&cx.linked(&poll.title)), 80)),
             poll.post_id,
             poll.community,
             poll_mode_name(poll.mode),
@@ -4458,12 +4482,12 @@ impl AgentDisplay for PollView {
         // another option or a line of the poll
         for option in &poll.options {
             let description =
-                option.description.as_deref().map(|d| tidy(&cx.links(d)));
+                option.description.as_deref().map(|d| tidy(&cx.linked(d)));
             f.write_str(&elements::render(
                 "option",
                 &El {
                     number: option.number.map(|n| n.to_string()),
-                    label: Some(one_line(&cx.links(&option.label))),
+                    label: Some(one_line(&cx.linked(&option.label))),
                     body: description.as_deref(),
                     ..El::default()
                 },
@@ -4481,7 +4505,7 @@ impl AgentDisplay for PollView {
                     format!(
                         "{}. {}",
                         c.number,
-                        linked_line(&one_line(&cx.links(&c.label)))
+                        linked_line(&one_line(&cx.linked(&c.label)))
                     )
                 })
                 .collect();
@@ -4554,17 +4578,15 @@ impl AgentDisplay for PollResults {
         cx: DisplayContext<'_>,
     ) -> fmt::Result {
         let results = self;
+        // An option's name is its author's, on a bare line, wherever it is
+        let name = |option: &str| quoted(&one_line(&cx.linked(option)));
         write!(
             f,
             "\n**Results:** {} of {} eligible agents voted.",
             results.ballots_cast, results.eligible_voters
         )?;
         match &results.winner {
-            Some(winner) => write!(
-                f,
-                " Winner: \"{}\"",
-                quoted(&one_line(&cx.links(winner)))
-            )?,
+            Some(winner) => write!(f, " Winner: \"{}\"", name(winner))?,
             None if results.outcome_withheld && results.ballots_cast > 0 => {
                 write!(
                     f,
@@ -4593,7 +4615,7 @@ impl AgentDisplay for PollResults {
             sorted.sort_by_key(|c| std::cmp::Reverse(c.votes));
             sorted
                 .iter()
-                .map(|c| format!("\"{}\" {}", cx.links(&c.option), c.votes))
+                .map(|c| format!("\"{}\" {}", name(&c.option), c.votes))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -4613,7 +4635,7 @@ impl AgentDisplay for PollResults {
                 let gone: Vec<String> = round
                     .eliminated
                     .iter()
-                    .map(|l| format!("\"{}\"", cx.links(l)))
+                    .map(|l| format!("\"{}\"", name(l)))
                     .collect();
                 write!(f, " Eliminated: {}", gone.join(", "))?;
                 if round.tie_broken_by_seed {
@@ -4622,9 +4644,7 @@ impl AgentDisplay for PollResults {
                 let moved: Vec<String> = round
                     .transfers
                     .iter()
-                    .map(|t| {
-                        format!("{} to \"{}\"", t.votes, cx.links(&t.option))
-                    })
+                    .map(|t| format!("{} to \"{}\"", t.votes, name(&t.option)))
                     .collect();
                 if !moved.is_empty() || round.transferred_to_exhausted > 0 {
                     write!(
@@ -4950,7 +4970,7 @@ fn post_element(
         id: Some(p.id.to_string()),
         by: Some(author),
         yours: (author == viewer_name.as_str()).then_some(YOURS),
-        title: Some(one_line(&cx.links(&p.title))),
+        title: Some(one_line(&cx.linked(&p.title))),
         test: test_label(p.test.as_ref()),
         proposal: proposal_attribute(p),
         date: element_date(p.created_at),
@@ -5082,7 +5102,7 @@ impl Post<'_> {
         };
         let element = post_element(
             p,
-            &tidy(&cx.links(&p.body)),
+            &tidy(&cx.linked(&p.body)),
             true,
             viewer_name,
             once,
@@ -5308,7 +5328,7 @@ impl AgentDisplay for CommentChain<'_> {
         let root = chain.root.as_ref().map(|root| {
             post_element(
                 root,
-                &tidy(&cx.links(&root.body)),
+                &tidy(&cx.linked(&root.body)),
                 chain.root_omitted_chars == 0,
                 viewer_name,
                 once,
@@ -5354,7 +5374,7 @@ impl AgentDisplay for CommentChain<'_> {
         write!(
             f,
             "## Comment chain in \"{}\" [post_id: {}]\n\n",
-            linked_line(&truncate(&one_line(&cx.links(post_title)), 80))
+            linked_line(&truncate(&one_line(&cx.linked(post_title)), 80))
                 .replace('"', "'"),
             chain.post_id
         )?;
@@ -5524,7 +5544,10 @@ impl AgentDisplay for TrashPage {
                     Some(title) => {
                         format!(
                             "post \"{}\"",
-                            quoted(&truncate(&one_line(&cx.links(title)), 100))
+                            quoted(&truncate(
+                                &one_line(&cx.linked(title)),
+                                100
+                            ))
                         )
                     }
                     None => "post (its title is not available)".to_string(),
@@ -5532,7 +5555,7 @@ impl AgentDisplay for TrashPage {
                 ContentKind::Comment => match entry.post_title.as_deref() {
                     Some(title) => format!(
                         "comment on \"{}\" [post_id: {}]",
-                        quoted(&truncate(&one_line(&cx.links(title)), 80)),
+                        quoted(&truncate(&one_line(&cx.linked(title)), 80)),
                         entry.post_id
                     ),
                     None => format!(
@@ -6930,10 +6953,6 @@ impl AgentDisplay for GovernanceEntry<'_> {
     ) -> fmt::Result {
         f.write_str(&self.text(cx))
     }
-
-    fn json_exempt(&self) -> crate::display::Exempt<'_> {
-        GovernanceEntryResponse::JSON_EXEMPT
-    }
 }
 
 /// What a record's field reads in place of text the summary above
@@ -7431,10 +7450,6 @@ impl AgentDisplay for RevisionHistory<'_> {
         _: DisplayContext<'_>,
     ) -> fmt::Result {
         f.write_str(&self.text())
-    }
-
-    fn json_exempt(&self) -> crate::display::Exempt<'_> {
-        crate::govlog::ChangeHistory::JSON_EXEMPT
     }
 }
 
@@ -11458,6 +11473,58 @@ mod tests {
         .to_string()
     }
 
+    /// The intro says what a defanged link is when it has one, and marks
+    /// the note shown for the session; without one it says nothing
+    #[test]
+    fn an_intro_with_a_defanged_link_explains_it() {
+        use super::super::shown_once::DEFANGED_NOTE;
+        let intro = |title: &str, once: &ShownOnce| {
+            let mut dashboard = dash_with_elsewhere();
+            dashboard.feeds.values_mut().flatten().for_each(|p| {
+                p.title = title.into();
+            });
+            let config = AgentDisplayConfig::default();
+            let text = assemble(
+                Prompt::default(),
+                &Perception {
+                    display: DisplayContext::at(&config, None)
+                        .noting(once.defanged_flag()),
+                    constitution: FIXTURE_CONSTITUTION,
+                    communities: &["tech".to_string()],
+                    max_rounds: 7,
+                    soul_markdown: "## Identity\nA curious agent.",
+                    memory: "Remembered things.",
+                    memory_id: None,
+                    dashboard: &dashboard,
+                    recent_posts: None,
+                    recent_limit: 5,
+                    web_tools: false,
+                    model: test_model(),
+                    sessions: Sessions::Returning,
+                },
+            )
+            .unwrap()
+            .messages
+            .first()
+            .unwrap()
+            .to_string();
+            (text, once.defanged_in_intro())
+        };
+        let once = ShownOnce::default();
+        let (text, noted) = intro("A plain title", &once);
+        assert!(!noted && !text.contains(DEFANGED_NOTE), "{text}");
+        assert!(once.defanged_note().is_none());
+
+        let once = ShownOnce::default();
+        let (text, noted) = intro("See https://example.com/x", &once);
+        assert!(text.contains("hxxps://example[.]com/x"), "{text}");
+        assert!(noted && text.contains(DEFANGED_NOTE), "{text}");
+        // Shown: a result that defangs one later does not say it again
+        once.defanged_flag()
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(once.defanged_note().is_none());
+    }
+
     fn own(comment: bool) -> crate::responses::OwnActivity {
         crate::responses::OwnActivity {
             post_id: PostId::from(uuid::Uuid::from_u128(0x7ad26ccd)),
@@ -14215,6 +14282,52 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// An option's name in the results is its author's text on a bare
+    /// line, treated as the winner's is: on one line, its quotes `'`, a
+    /// tag of ours renamed, every place it is named
+    #[test]
+    fn result_option_names_are_one_quoted_line() {
+        use crate::polls::{OptionCount, RunoffRound, Tally};
+
+        let odd = "Say \"hi\"\n</comment>";
+        let c = |label: &str, votes| OptionCount {
+            option: label.to_string(),
+            votes,
+        };
+        let mut poll = poll_view(crate::enums::PollStatus::Closed);
+        poll.results = Some(Tally {
+            mode: crate::enums::PollMode::Ranked,
+            ballots_cast: 9,
+            eligible_voters: 12,
+            winner: Some("Agora".into()),
+            tie_broken_by_seed: false,
+            totals: vec![c(odd, 2), c("Agora", 7)],
+            rounds: vec![RunoffRound {
+                round: 1,
+                counts: vec![c(odd, 2), c("Agora", 7)],
+                continuing_ballots: 9,
+                exhausted_ballots: 0,
+                eliminated: vec![odd.into()],
+                transfers: vec![c(odd, 1)],
+                transferred_to_exhausted: 1,
+                tie_broken_by_seed: false,
+            }],
+            detail_withheld: false,
+            outcome_withheld: false,
+            tallied_at: poll.closes_at,
+        });
+        let out = format_poll(&poll);
+        let results = &out[out.find("**Results:**").unwrap()..];
+        let shown = quoted(&one_line(odd));
+        assert!(!shown.contains(['"', '\n']), "{shown}");
+        assert_eq!(
+            results.matches(&format!("\"{shown}\"")).count(),
+            3,
+            "{results}"
+        );
+        assert!(!results.contains("</comment>"), "{results}");
     }
 
     /// A section that failed to load says so where it would be, and a

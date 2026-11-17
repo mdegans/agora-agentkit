@@ -458,6 +458,14 @@ impl<T: Tool> Tool for Gauged<T> {
                 t.replace(crate::links::FORM, crate::links::FORM_AGAIN)
             });
         }
+        // What a defanged link is, the first time a result has one
+        if let Some(note) = self
+            .shown_once
+            .as_ref()
+            .and_then(|once| once.defanged_note())
+        {
+            super::tool::append_paragraph(&mut result.content, note);
+        }
         if let Some(client) = &self.prompt_check {
             check_prompt_link(client, &name, &input, &mut result).await;
         }
@@ -839,6 +847,77 @@ mod tests {
             }))
             .expect("fixture");
         super::super::prompt::format_post(&post, &"reader".parse().unwrap())
+    }
+
+    /// A tool that shows `text` under the default link policy, on the site
+    struct Linked {
+        text: &'static str,
+        once: super::super::ShownOnce,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for Linked {
+        fn name(&self) -> &str {
+            "get_content"
+        }
+
+        fn definitions(&self) -> Vec<MethodDef> {
+            Vec::new()
+        }
+
+        async fn call(&mut self, call: Use) -> tool::Result {
+            self.once.begin("a read");
+            let config = crate::display::AgentDisplayConfig::default();
+            let site =
+                url::Url::parse("https://subliminal.technology").unwrap();
+            let cx = crate::display::DisplayContext::at(&config, Some(&site))
+                .noting(self.once.defanged_flag());
+            tool::Result::new(call.id, cx.linked(self.text).into_owned())
+        }
+    }
+
+    /// The first result that defangs a link says what one is, once a
+    /// session; one that defangs nothing (a site page as its link
+    /// included) does not, nor does one left out mark it shown
+    #[tokio::test]
+    async fn the_first_defanged_link_is_explained_once() {
+        use super::super::shown_once::DEFANGED_NOTE;
+        let once = super::super::ShownOnce::default();
+        let gauge = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
+        let tool = |text| {
+            Gauged::new(
+                Linked {
+                    text,
+                    once: once.clone(),
+                },
+                gauge.clone(),
+            )
+            .with_shown_once(once.clone())
+        };
+        let text = |r: tool::Result| r.content.to_string();
+        let plain =
+            text(tool("No links here.").call(call("get_content")).await);
+        assert!(!plain.contains(DEFANGED_NOTE), "{plain}");
+        let own = text(
+            tool("https://subliminal.technology/agora/protocol")
+                .call(call("get_content"))
+                .await,
+        );
+        assert!(own.contains("agora://protocol"), "{own}");
+        assert!(!own.contains(DEFANGED_NOTE), "{own}");
+        let first = text(
+            tool("See https://example.com/x")
+                .call(call("get_content"))
+                .await,
+        );
+        assert!(first.starts_with("See hxxps://example[.]com/x"), "{first}");
+        assert!(first.ends_with(DEFANGED_NOTE), "{first}");
+        let again = text(
+            tool("See https://example.com/y")
+                .call(call("get_content"))
+                .await,
+        );
+        assert!(!again.contains(DEFANGED_NOTE), "{again}");
     }
 
     /// A tool that answers every call with `text`

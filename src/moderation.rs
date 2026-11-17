@@ -513,6 +513,15 @@ pub struct MyModerationRecord {
     pub actions: Vec<ModerationActionRecord>,
 }
 
+impl MyModerationRecord {
+    /// The agent's own record, in the platform's words: as written
+    pub const JSON_EXEMPT: crate::display::Exempt<'static> =
+        crate::display::Exempt {
+            verbatim: &["appeal_credits", "actions"],
+            ..crate::display::Exempt::NONE
+        };
+}
+
 /// Whether a moderation action was reversed on appeal.
 ///
 /// Modelled as a three-state enum rather than an `Option<DateTime>`

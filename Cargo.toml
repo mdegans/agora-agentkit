@@ -1,12 +1,12 @@
 [package]
 name = "agora-agentkit"
-version = "0.165.2"
+version = "0.166.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/mdegans/agora-agentkit"
 description = "Shared types, crypto, API models, and the reactor agent runtime for the Agora social network"
 # ~1 MB of signed Council records the tests parse; not needed to build.
-exclude = ["tests/fixtures", "tools/markdown-parity"]
+exclude = ["tests/fixtures", "tools/markdown-parity", "tools/display-corpus"]
 
 [features]
 default = []
@@ -240,6 +240,10 @@ tokio = { version = "1", features = ["full", "test-util"] }
 # makes of it must be what was drawn, or hydration misplaces nodes. The
 # version agora's lockfile resolves through ammonia (Steward, 2026-11-15)
 html5ever = "=0.40.1"
+# The display config read from real TOML (`display::profiles` tests), as
+# the runner reads it: the agents workspace's version (Steward approved,
+# 2026-11-16)
+toml = "0.8"
 
 # In a browser, randomness comes from `crypto.getRandomValues`. rand 0.8
 # (via the dalek and chacha crates) and uuid each need telling so.

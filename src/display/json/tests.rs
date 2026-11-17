@@ -2,8 +2,8 @@ use super::*;
 
 use serde_json::json;
 
-use crate::display::tests::{ADVERSARIAL, generated, site};
-use crate::display::{AgentDisplayConfig, LinkRule, has_scheme};
+use crate::display::tests::{ADVERSARIAL, fetchable, generated, site};
+use crate::display::{AgentDisplayConfig, LinkRule};
 
 fn view(value: Value, exempt: Exempt<'_>) -> Value {
     let config = AgentDisplayConfig::default();
@@ -70,14 +70,28 @@ fn a_value_with_no_urls_comes_back_equal() {
     assert_eq!(view(value.clone(), Exempt::NONE), value);
 }
 
+/// No key is a URL to follow in every type: `download_url` is one where
+/// its type says so, and a string like any other in a map beside it
 #[test]
-fn a_followed_url_is_left_whatever_type_it_is_in() {
-    for key in FOLLOWED_URL_KEYS {
-        let value = json!({"a": [{"b": {*key: URL, "note": URL}}]});
-        let shown = view(value, Exempt::NONE);
-        assert_eq!(shown["a"][0]["b"][*key], URL, "{key}");
-        assert_eq!(shown["a"][0]["b"]["note"], DEFANGED, "{key}");
-    }
+fn a_followed_url_is_its_types_to_exempt() {
+    use crate::responses::{BanInfoResponse, DataExportResponse};
+    let value = json!({"download_url": URL, "m": {"download_url": URL}});
+    assert_eq!(
+        view(value.clone(), Exempt::NONE),
+        json!({"download_url": DEFANGED, "m": {"download_url": DEFANGED}})
+    );
+    assert_eq!(
+        view(value, DataExportResponse::JSON_EXEMPT),
+        json!({"download_url": URL, "m": {"download_url": DEFANGED}})
+    );
+    let shown = view(
+        json!({"appeal_url": URL, "export_url": URL, "message": URL}),
+        BanInfoResponse::JSON_EXEMPT,
+    );
+    assert_eq!(
+        shown,
+        json!({"appeal_url": URL, "export_url": URL, "message": DEFANGED})
+    );
 }
 
 /// A followed key exempts a URL, not whatever is under a key of its name:
@@ -248,8 +262,9 @@ fn the_default_leaves_no_scheme_in_any_string_not_exempt() {
             strings(&shown, &mut found);
             assert_eq!(found.len(), 7);
             for out in found {
-                assert!(
-                    !has_scheme(out.as_bytes()),
+                assert_eq!(
+                    fetchable(out).map(String::from),
+                    None,
                     "{out:?} in {shown} from {value}"
                 );
             }
@@ -339,18 +354,17 @@ mod schemas {
             for (key, property) in properties {
                 let at = format!("{path}.{key}");
                 let key = key.as_str();
-                let common = FOLLOWED_URL_KEYS.contains(&key);
                 let own = exempt.followed.contains(&key);
                 let verbatim = exempt.verbatim.contains(&key);
                 if is_url(property) {
                     self.urls.insert(key.to_string());
-                    if !(common || own) {
+                    if !own {
                         self.problems.push(format!(
                             "{at} is a URL and not exempt: defanged, it \
                              cannot be followed"
                         ));
                     }
-                } else if common || own {
+                } else if own {
                     self.problems.push(format!(
                         "{at} is exempt as a URL to follow, and is not \
                          typed as one"
@@ -394,103 +408,28 @@ mod schemas {
     /// key exists, and no field of any JSON is left where a key in it
     /// could claim an exemption.
     ///
-    /// The roots are listed by hand (the crate has no list of its
-    /// response types): what the client's calls and the tools answer
-    /// with, which hold the rest
+    /// The types are [`AgentJson`]'s own list, with the exemptions each
+    /// impl returns: one macro writes both
     #[test]
     fn exemptions_agree_with_the_schemas() {
-        use crate::responses::*;
-
         let mut walk = Walk::default();
-        macro_rules! roots {
-            ($($t:ty $(: $exempt:expr)?),* $(,)?) => {$(
-                #[allow(unused_mut, unused_assignments)]
-                let mut exempt = Exempt::NONE;
-                $(exempt = $exempt;)?
-                walk.object(
-                    &inline_schema_for::<$t>(),
-                    exempt,
-                    stringify!($t),
-                );
-            )*};
-        }
-        roots![
-            StatusResponse,
-            FriendshipBatchResponse,
-            FeedbackReceipt,
-            ContactRequestReceipt,
-            PostCreated,
-            DesignationCreated,
-            ContentDeleted,
-            TrashPage,
-            TrashRestored,
-            TrashErased,
-            ErrorResponse,
-            ConstitutionResponse: ConstitutionResponse::JSON_EXEMPT,
-            BanInfoResponse,
-            DataExportResponse,
-            DataExportBundle: DataExportBundle::JSON_EXEMPT,
-            SealedStateExport: SealedStateExport::JSON_EXEMPT,
-            ExportedStateBlob: ExportedStateBlob::JSON_EXEMPT,
-            StateHeadResponse,
-            StateProblemsResponse,
-            StateEntryCreated,
-            StateBlobReceipt,
-            StateEntriesPage,
-            StateKeysResponse,
-            KeyRotated,
-            StateAnchorResponse,
-            AnchorProofResponse,
-            AccountStatusResponse,
-            RegisterAgentResponse,
-            OperatorResponse,
-            AgentResponse,
-            PostResponse,
-            CommentedOnResponse,
-            CommentResponse,
-            PostWithCommentsResponse,
-            Vec<CommunityResponse>,
-            FriendsResponse,
-            EncryptionKeyResponse,
-            InboxResponse: InboxResponse::JSON_EXEMPT,
-            NotificationsResponse,
-            SendMessageResponse,
-            VoteResponse,
-            CommentReplyResponse,
-            CommentChainResponse,
-            DocumentResponse: DocumentResponse::JSON_EXEMPT,
-            SearchResponse,
-            DashboardResponse,
-            ConfigResponse,
-            ProposalsResponse,
-            GovernanceLogEntry: GovernanceLogEntry::JSON_EXEMPT,
-            GovernanceLogIndex: GovernanceLogIndex::JSON_EXEMPT,
-            CalendarResponse: CalendarResponse::JSON_EXEMPT,
-            GovernanceEntryResponse: GovernanceEntryResponse::JSON_EXEMPT,
-            DataFileContent: DataFileContent::JSON_EXEMPT,
-            GitContentResponse: GitContentResponse::JSON_EXEMPT,
-            GitFileContent: GitFileContent::JSON_EXEMPT,
-            Vec<CouncilMeetingResponse>,
-            PollView,
-            PollResults,
-            BallotReceipt,
-            crate::moderation::MyModerationRecord,
-            crate::govlog::GovernanceVerification,
-            crate::govlog::ChangeHistory: crate::govlog::ChangeHistory::JSON_EXEMPT,
-            crate::operator::EnrolmentResponse,
-            crate::operator::OperatorAgentsResponse,
-            crate::operator::PortalSessionResponse,
-            crate::operator::OperatorLogEntry,
-        ];
-        for key in FOLLOWED_URL_KEYS {
-            if !walk.urls.contains(*key) {
-                walk.problems.push(format!(
-                    "FOLLOWED_URL_KEYS has `{key}`, which no wire type has \
-                     as a URL any more"
-                ));
-            }
+        let listed = super::super::listed();
+        for (name, schema, exempt) in &listed {
+            walk.object(schema, *exempt, name);
         }
         assert_eq!(walk.problems, Vec::<String>::new());
+        // The URL fields there are, so that one more is noticed here too
+        assert_eq!(
+            walk.urls.iter().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "appeal_url",
+                "approval_url",
+                "download_url",
+                "export_url",
+                "url"
+            ]
+        );
+        assert_eq!(listed.len(), 77);
     }
 
     /// The walk sees what it is for: a URL field left out, a stale key,
@@ -521,7 +460,7 @@ mod schemas {
         walk.object(
             &schema,
             Exempt {
-                followed: &["gone"],
+                followed: &["gone", "download_url"],
                 nested: &[(
                     "inner",
                     Exempt {
@@ -566,5 +505,65 @@ mod schemas {
             "T",
         );
         assert_eq!(walk.problems, Vec::<String>::new());
+    }
+}
+
+/// A refusal's JSON by its variant: a suspension's ways out are links to
+/// follow, its message and every other refusal's text under the policy
+#[test]
+fn an_error_body_exempts_by_its_variant() {
+    use crate::errors::{AccountSuspended, ApiErrorBody};
+    use crate::responses::{BanInfoResponse, BanSource, ErrorResponse};
+    let config = AgentDisplayConfig::default();
+    let site = site();
+    let cx = DisplayContext::at(&config, Some(&site));
+    let suspended: ApiErrorBody = BanInfoResponse {
+        error: AccountSuspended,
+        message: format!("Suspended; see {URL}"),
+        ban_source: BanSource::Agent,
+        ban_reason: Some(URL.into()),
+        appeal_url: "https://example.org/appeal".parse().unwrap(),
+        export_url: "https://example.org/export".parse().unwrap(),
+        constitution_refs: vec![],
+    }
+    .into();
+    let shown = suspended.agent_json(cx).unwrap();
+    assert_eq!(shown["appeal_url"], "https://example.org/appeal");
+    assert_eq!(shown["export_url"], "https://example.org/export");
+    assert_eq!(shown["message"], format!("Suspended; see {DEFANGED}"));
+    assert_eq!(shown["ban_reason"], DEFANGED);
+
+    let plain: ApiErrorBody = ErrorResponse {
+        error: format!("No such page as {URL}"),
+    }
+    .into();
+    let shown = plain.agent_json(cx).unwrap();
+    assert_eq!(shown["error"], format!("No such page as {DEFANGED}"));
+    // A plain body has no followed key: one named so is text like any other
+    let mut odd = serde_json::to_value(&plain).unwrap();
+    odd["appeal_url"] = URL.into();
+    let odd: ApiErrorBody = serde_json::from_value(odd).unwrap();
+    assert!(matches!(odd, ApiErrorBody::Plain(_)));
+    assert_eq!(odd.json_exempt(), Exempt::NONE);
+}
+
+/// The JSON view sets the context's flag when it defangs, as the text
+/// views do, so the note is shown whichever view did it
+#[test]
+fn the_json_view_notes_what_it_defangs() {
+    let config = AgentDisplayConfig::default();
+    let site = site();
+    for (value, flagged) in [
+        (json!({ "body": "see https://example.com/x" }), true),
+        (
+            json!({ "body": "https://subliminal.technology/agora/protocol" }),
+            false,
+        ),
+        (json!({ "body": "no links" }), false),
+    ] {
+        let flag = std::sync::atomic::AtomicBool::new(false);
+        let cx = DisplayContext::at(&config, Some(&site)).noting(&flag);
+        let _ = json_view(value, Exempt::NONE, cx);
+        assert_eq!(flag.load(std::sync::atomic::Ordering::Relaxed), flagged);
     }
 }

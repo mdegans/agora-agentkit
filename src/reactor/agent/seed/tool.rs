@@ -275,6 +275,18 @@ pub(super) fn map_text(content: &mut Content, f: impl Fn(&str) -> String) {
     }
 }
 
+/// `note` as a paragraph after a result's text, in its last text block
+pub(super) fn append_paragraph(content: &mut Content, note: &str) {
+    use misanthropic::prompt::message::Block;
+    match content.0.iter_mut().rev().find_map(|b| match b {
+        Block::Text { text, .. } => Some(text),
+        _ => None,
+    }) {
+        Some(text) => *text = format!("{}\n\n{note}", text.trim_end()).into(),
+        None => content.0.push(Block::from(note.to_string())),
+    }
+}
+
 /// The sentence `tail` after a result's text, in its last text block, the
 /// text before it ended as a sentence (betas of 0.113.0: "count from 1
 /// Refused;")
@@ -596,6 +608,7 @@ impl Agora {
     /// Show text under `display` rather than the default (every off-site
     /// link defanged)
     pub fn with_display(mut self, display: AgentDisplayConfig) -> Self {
+        self.shown_once.set_links(display.links());
         self.display = display;
         self
     }
@@ -604,6 +617,7 @@ impl Agora {
     /// client's site
     fn cx(&self) -> DisplayContext<'_> {
         DisplayContext::at(&self.display, Some(self.client.site()))
+            .noting(self.shown_once.defanged_flag())
     }
 
     /// The agent this tool acts as
@@ -636,6 +650,7 @@ impl Agora {
     /// Show each post and comment once a session, with `shown_once`: the
     /// same set the [`super::Gauged`] around this tool commits to
     pub fn with_shown_once(mut self, shown_once: super::ShownOnce) -> Self {
+        shown_once.set_links(self.display.links());
         self.shown_once = shown_once;
         self
     }
@@ -1065,11 +1080,11 @@ impl AgentDisplay for CommunityHeader<'_> {
         writeln!(
             f,
             "## {} ({})",
-            prompt::linked_line(&one_line(&cx.links(&c.display_name))),
+            prompt::linked_line(&one_line(&cx.linked(&c.display_name))),
             c.name.canonical()
         )?;
         if let Some(d) = c.description.as_deref().filter(|d| !d.is_empty()) {
-            writeln!(f, "{}", prompt::linked_line(&one_line(&cx.links(d))))?;
+            writeln!(f, "{}", prompt::linked_line(&one_line(&cx.linked(d))))?;
         }
         if let Some(n) = c.member_count {
             writeln!(f, "{n} member(s)")?;
@@ -1127,7 +1142,43 @@ pub(super) const OPERATOR_MESSAGE_NOT_REPORTABLE: &str = "Error: a message \
 pub(super) const OPERATOR_MESSAGE_NOT_DELETABLE: &str = "Error: a message \
      from your operator cannot be deleted yet. Nothing was changed.";
 
+/// The fields of a profile update that hold a link in the defanged form
+/// (`hxxp://` or `hxxps://`, any case): stored as sent, and said
+fn stored_defanged(
+    update: &crate::requests::SeedProfileUpdate,
+) -> Vec<&'static str> {
+    let defanged = |v: &Option<String>| {
+        v.as_deref().is_some_and(|v| {
+            let v = v.to_ascii_lowercase();
+            v.contains("hxxp://") || v.contains("hxxps://")
+        })
+    };
+    [
+        ("display name", defanged(&update.display_name)),
+        ("bio", defanged(&update.bio)),
+    ]
+    .into_iter()
+    .filter_map(|(field, yes)| yes.then_some(field))
+    .collect()
+}
+
+/// What `update_profile` says when a field it stored holds a defanged
+/// link ([`stored_defanged`]); `None` when none does
+fn defanged_stored_note(fields: &[&str]) -> Option<String> {
+    let (fields, was, holds) = match fields {
+        [] => return None,
+        [one] => (one.to_string(), "was", "holds"),
+        many => (many.join(" and "), "were", "hold"),
+    };
+    Some(format!(
+        "(Your {fields} {was} stored as you wrote it, and {holds} a link in \
+         the defanged form (hxxps://…); if you meant a real link, update it \
+         again with the https:// address.)"
+    ))
+}
+
 /// Appended to the server's refusal of a bio over its limit
+///
 /// (beta-critic's wording, 2026-10-27: the agents choose agent-facing words)
 pub(crate) const LONG_BIO_NOTE: &str = "If this was meant for your memory: at \
      the end of the session you're asked to rewrite your memory; there is no \
@@ -1427,9 +1478,13 @@ impl Agora {
         };
         // Rendered after the entry, into the same result. Its own copy of
         // the context: the arms below change `self`
-        let (display, site) =
-            (self.display.clone(), self.client.site().clone());
-        let cx = DisplayContext::at(&display, Some(&site));
+        let (display, site, once) = (
+            self.display.clone(),
+            self.client.site().clone(),
+            self.shown_once.clone(),
+        );
+        let cx = DisplayContext::at(&display, Some(&site))
+            .noting(once.defanged_flag());
         let with_history =
             |rendered: String, once: &super::ShownOnce| match &history {
                 Some((h, amendments)) => {
@@ -2957,6 +3012,7 @@ impl Agora {
             && args.bio.as_ref().is_some_and(|b| {
                 b.chars().count() > crate::limits::profile::BIO_MAX_CHARS
             });
+        let defanged = stored_defanged(&args);
         let profile = self
             .client
             .update_profile(self.agent_id, &args.into(), &self.key)
@@ -2977,9 +3033,20 @@ impl Agora {
                     err(e)
                 }
             })?;
-        serde_json::to_string(&profile)
-            .map(Content::from)
-            .map_err(err)
+        // Its profile as `get_profile` shows it, under the policy: the
+        // answer's raw JSON would show a link stored mended as written
+        let mut shown = prompt::Profile {
+            agent: &profile,
+            viewer_name: &self.agent_name,
+            enrolled: None,
+        }
+        .agent_display(self.cx())
+        .to_string();
+        if let Some(note) = defanged_stored_note(&defanged) {
+            shown.push('\n');
+            shown.push_str(&note);
+        }
+        Ok(shown.into())
     }
 
     /// `join_community`: the model reads the registry's description

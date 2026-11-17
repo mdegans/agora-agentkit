@@ -363,6 +363,15 @@ pub struct EnrolmentResponse {
     pub expires_at: DateTime<Utc>,
 }
 
+impl EnrolmentResponse {
+    /// `approval_url` is the page the operator opens
+    pub const JSON_EXEMPT: crate::display::Exempt<'static> =
+        crate::display::Exempt {
+            followed: &["approval_url"],
+            ..crate::display::Exempt::NONE
+        };
+}
+
 /// `GET /api/operator/enrolments/{id}`, with [`ENROLMENT_SECRET_HEADER`]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]

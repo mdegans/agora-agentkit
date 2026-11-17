@@ -2,6 +2,11 @@ use super::*;
 
 use serde_json::json;
 
+use crate::threads;
+
+use super::oracle::{Reader, destination, places, readings};
+pub(in crate::display) use super::oracle::{SPELLINGS, fetchable};
+
 pub(super) fn site() -> Url {
     Url::parse("https://subliminal.technology").unwrap()
 }
@@ -186,6 +191,22 @@ pub(super) fn generated(count: usize) -> Vec<String> {
         "hTtP://",
         "http:/",
         "http",
+        "https",
+        "ht",
+        "tp",
+        ":/",
+        ":\\",
+        "\t",
+        "\r",
+        "'",
+        "\"",
+        "`",
+        "{",
+        "}",
+        "|",
+        ";",
+        "\u{a0}",
+        "denied.example",
         "s://",
         "://",
         "www.",
@@ -271,8 +292,9 @@ pub(super) const ADVERSARIAL: &[&str] = &[
     "https://\u{1}https://evil.example/x",
 ];
 
-/// Under the default policy nothing `http://` or `https://` is left, in
-/// any case, whatever the text and whatever the site
+/// Under the default policy no `http` or `https` URL is left, in any
+/// case or spelling, whatever the text and whatever the site: by the
+/// scanner's own test, and by a URL parser at every place in the result
 #[test]
 fn the_default_leaves_no_scheme() {
     let sites = [
@@ -281,19 +303,32 @@ fn the_default_leaves_no_scheme() {
         Some(url("https://subliminal.technology/agora")),
     ];
     let texts = generated(20_000);
+    let mut seen = 0;
     for text in ADVERSARIAL
         .iter()
+        .chain(SPELLINGS)
         .copied()
         .chain(texts.iter().map(String::as_str))
     {
+        seen += usize::from(fetchable(text).is_some());
         for site in &sites {
             let out = Links::default().rewrite(text, site.as_ref());
-            assert!(
-                !has_scheme(out.as_bytes()),
+            assert!(!has_scheme(&out), "{text:?} at {site:?} gave {out:?}");
+            assert_eq!(
+                fetchable(&out).map(String::from),
+                None,
                 "{text:?} at {site:?} gave {out:?}"
+            );
+            // And as a body is shown: the policy, then `tidy`
+            let tidied = threads::tidy(&out);
+            assert_eq!(
+                fetchable(&tidied).map(String::from),
+                None,
+                "{text:?} at {site:?} gave {tidied:?}"
             );
         }
     }
+    assert!(seen > 3_000, "{seen} texts had a URL: too few to tell");
     // The site's pages are still links: one that carries a URL has it
     // percent-encoded, and a page with no link is defanged with what is in it
     assert_eq!(
@@ -314,12 +349,275 @@ fn the_default_leaves_no_scheme() {
     );
 }
 
-/// Under `raw`, no URL left in the result is one a deny rule matches, read
-/// from its scheme to its end as written
+#[test]
+fn a_scheme_is_seen_however_it_is_spelt() {
+    for spelling in SPELLINGS {
+        assert!(fetchable(spelling).is_some(), "{spelling:?} is not a URL");
+    }
+    for (text, want) in [
+        ("https:/evil.example/x", "hxxps:/evil[.]example/x"),
+        ("https:evil.example/x", "hxxps:evil[.]example/x"),
+        ("https:\\\\evil.example/x", "hxxps:\\\\evil[.]example/x"),
+        ("http:/\\evil.example", "hxxp:/\\evil[.]example"),
+        ("HTTPS:EVIL.EXAMPLE", "hxxps:EVIL[.]EXAMPLE"),
+        // What a parser drops is kept, and the scheme is still not one
+        ("ht\ttps://evil.example/x", "hx\txps://evil[.]example/x"),
+        ("https\r\n://evil.example/x", "hxxps\r\n://evil[.]example/x"),
+        ("https://\nevil.example/x", "hxxps://\nevil.example/x"),
+        ("https:\nevil.example/x", "hxxps:\nevil.example/x"),
+        ("http::@evil.example/x", "hxxp::@evil[.]example/x"),
+        ("http:\".evil.example/x", "hxxp:\".evil.example/x"),
+        // A line that ends in `https:` is read with the next one
+        ("use https:\nevil.example", "use hxxps:\nevil.example"),
+    ] {
+        assert_eq!(defang(text), want);
+        assert_eq!(fetchable(want), None, "{want:?}");
+    }
+    // Prose: nothing a parser reads as a URL with a host
+    for prose in [
+        "use https: it is safer",
+        // (to a single label, as a parser reads it: not seen)
+        "use https:\nit is safer",
+        "the scheme is http:",
+        "\"http:\" and `https:` and (http:) and http:, http:; http:.",
+        "http::Request::builder() and std::http::StatusCode",
+        "https:// is always a start, https:? and http:# and http:/ are not",
+        "http: \u{a0}x and http: x",
+        "ht tp://example.com, h ttps:example.com",
+        "http\u{a0}://example.com",
+        "httpx://example.com, htps://example.com, shttp//example.com",
+    ] {
+        let out = defang(prose);
+        assert_eq!(
+            out.replace("hxxps://", "https://"),
+            prose,
+            "only `https://` alone is rewritten"
+        );
+        assert_eq!(fetchable(prose), None, "{prose:?}");
+    }
+    // Under rules these are never left: the two parsers an operator and
+    // a fetcher have may not agree on them
+    let allowed = allow(&["https://evil.example", "http://evil.example"]);
+    let denied = deny(&["https://other.example"]);
+    for spelling in SPELLINGS {
+        for links in [&allowed, &denied] {
+            let out = links.rewrite(spelling, None);
+            assert_eq!(
+                fetchable(&out).map(String::from),
+                None,
+                "{links:?}: {spelling:?} gave {out:?}"
+            );
+        }
+    }
+    // With no rule at all, raw is raw
+    let raw = Links::Raw { deny: Vec::new() };
+    for spelling in SPELLINGS {
+        assert!(matches!(raw.rewrite(spelling, None), Cow::Borrowed(_)));
+    }
+}
+
+/// What the review of 0.166.0 found left as written: a rule passed the
+/// URL up to a bracket or quote, and a parser reads past it
+const PAST_THE_END: &[&str] = &[
+    "https://allowed.example'@evil.com/x",
+    "https://allowed.example(@evil.com/x",
+    "https://allowed.example)@evil.com/x",
+    "https://allowed.example\"@evil.com/x",
+    "https://allowed.example|@evil.com/x",
+    "https://allowed.example{@evil.com/x",
+    "https://allowed.example}@evil.com/x",
+    "https://allowed.example<@evil.com/x",
+    "https://allowed.example>@evil.com/x",
+    "https://allowed.example[@evil.com/x",
+    "https://allowed.example]@evil.com/x",
+    "https://allowed.example`@evil.com/x",
+    "https://allowed.example'.evil.com/x",
+    "https://allowed.example(.evil.com/x",
+    "https://allowed.example).evil.com/x",
+    "https://en.wikipedia.org/wiki/x'/../../w",
+    "https://en.wikipedia.org/wiki/x)/../../w",
+    // Allowed at both ends, and not at a bracket between them
+    "https://en.wikipedia.org/wiki/x'/../..)/wiki/y",
+    "https://allowed.example'@evil.com)@allowed.example/x",
+    "https://allowed.example'.evil.com\"/x",
+];
+
+/// What a reader that deletes whitespace or line breaks inside a URL
+/// would read past an allowed one: outside what is guarded (the Steward,
+/// 2026-11-16), and left, since rules judge a URL to its first whitespace
+const ACROSS_A_BREAK: &[&str] = &[
+    "https://allowed.example\t.evil.com/x",
+    "https://allowed.example\n.evil.com/x",
+    "https://allowed.example\r\n.evil.com/x",
+    "https://allowed.example.\nevil.com/x",
+    "https://allowed.example\t@evil.com/x",
+    "https://allowed.example\n:8443/x",
+    "https://allowed.example  \n.evil.com/x",
+    "https://allowed.example\u{2028}.evil.com/x",
+    "https://allowed.example \u{b}@evil.com/x",
+    "https://en.wikipedia.org/wiki/x\n/../../w",
+    "https://en.wikipedia.org/wiki/.\n./w",
+    "https://en.wikipedia.org/wiki\n/../w",
+    "https://en.wikipedia.org/wiki\nleaks/x",
+    "https://en.wikipedia.org/wiki/x'/..\n/..\"/wiki/y",
+];
+
+#[test]
+fn an_allow_rule_is_not_passed_by_a_longer_reading() {
+    let links =
+        allow(&["https://allowed.example", "https://en.wikipedia.org/wiki"]);
+    let Links::Defanged { allow: rules } = &links else {
+        unreachable!()
+    };
+    for text in PAST_THE_END {
+        let out = links.rewrite(text, None);
+        assert!(out.starts_with("hxxps://"), "{text:?} gave {out:?}");
+        assert_eq!(fetchable(&out), None, "{text:?} gave {out:?}");
+    }
+    // What is left as written: every reading that names a host is on
+    // the allowed one and under the rule's path
+    for text in [
+        "[t](https://allowed.example/x)",
+        "[t](https://allowed.example/x).",
+        "[t](https://allowed.example)",
+        "[t](https://allowed.example), then",
+        "[t](https://allowed.example/x),[u](https://allowed.example/y)",
+        "[t](https://allowed.example),next",
+        "<a href=\"https://allowed.example/x\">t</a>",
+        "<a href=\"https://allowed.example\">t</a>",
+        "<https://allowed.example>",
+        "\"https://allowed.example\"",
+        "('https://allowed.example/'),",
+        "{\"url\":\"https://allowed.example/x\",\"n\":1}",
+        "|https://allowed.example/x|https://allowed.example/y|",
+        "https://allowed.example\nNext line",
+        "https://allowed.example\n\nNext paragraph",
+        "https://allowed.example/x\nNext line",
+        "https://allowed.example/\nNext line",
+        "https://allowed.example\n\n",
+        "https://allowed.example.\n",
+        "https://allowed.example\t and",
+        "https://allowed.example\u{2028}next",
+        "https://allowed.example/x\u{a0}y",
+        "https://en.wikipedia.org/wiki/Rust\nNext line",
+        "https://en.wikipedia.org/wiki\nNext line",
+        "(https://en.wikipedia.org/wiki)",
+        "https://en.wikipedia.org/wiki.\n",
+        "https://en.wikipedia.org/wiki/x'/y)",
+        "see https://allowed.example/a(b)c[d]e{f}g<h>i'j\"k`l|m end",
+        // Ends in the path cannot change the host, and those that name no
+        // host cost nothing: neither is counted
+        "https://allowed.example/a(b)c[d]e{f}g<h>i'j\"k`l|m(n)o[p]q{r}s",
+        "https://allowed.example(a)b(c)d(e)f(g)h(i)j(k)l(m)n(o)p(q)r(s)t/",
+    ]
+    .iter()
+    .chain(ACROSS_A_BREAK)
+    {
+        let out = links.rewrite(text, None);
+        assert!(matches!(out, Cow::Borrowed(_)), "{text:?} gave {out:?}");
+        for reading in readings(text, Reader::Whitespace) {
+            if let Some(found) = destination(&reading) {
+                assert!(rules.iter().any(|r| r.allows(&found)), "{found}");
+            }
+        }
+    }
+    // A reading past a bracket that names a host is checked: here the
+    // URL with another host, and a path that leaves the rule's
+    for (text, want) in [
+        (
+            "[t](https://allowed.example),next.evil.com",
+            "[t](hxxps://allowed[.]example),next.evil.com",
+        ),
+        (
+            "[t](https://allowed.example)%2eevil.com",
+            "[t](hxxps://allowed[.]example)%2eevil.com",
+        ),
+        (
+            "[t](https://en.wikipedia.org/wiki),next",
+            "[t](hxxps://en[.]wikipedia[.]org/wiki),next",
+        ),
+        // One left and the one after it not: each is judged on its own
+        (
+            "[t](https://allowed.example/x),[u](https://evil.com/y)",
+            "[t](https://allowed.example/x),[u](hxxps://evil[.]com/y)",
+        ),
+    ] {
+        assert_eq!(links.rewrite(text, None), want);
+    }
+}
+
+#[test]
+fn a_deny_rule_is_not_passed_by_a_longer_reading() {
+    let links = deny(&["https://denied.example"]);
+    for text in [
+        "https://ok.example'@denied.example/x",
+        "https://ok.example(@denied.example/x",
+        "https://ok.example|@denied.example/x",
+        "https://ok.example\"@denied.example/x",
+        "https://ok.example[@denied.example/x",
+        "https://ok.example`@denied.example/x",
+        // Denied at a bracket between two ends that are not
+        "https://ok.example'@denied.example)@ok.example/x",
+        "https://u'@denied.example\"x/",
+        // Spellings a parser reads as the denied host
+        "https:/denied.example/x",
+        "https:denied.example/x",
+        "https:\\\\denied.example/x",
+        "http:/\\denied.example",
+        "ht\ttps://denied.example/x",
+        "https:\n//denied.example/x",
+    ] {
+        let out = links.rewrite(text, None);
+        assert!(out.starts_with("hx"), "{text:?} gave {out:?}");
+        assert_eq!(fetchable(&out), None, "{text:?} gave {out:?}");
+    }
+    let path = deny(&["https://h.example/a/b"]);
+    for text in [
+        "https://h.example/a;'/b)zz",
+        "https://h.example/y'/../a/b)/../../y",
+    ] {
+        let out = path.rewrite(text, None);
+        assert!(out.starts_with("hxxps://"), "{text:?} gave {out:?}");
+    }
+    for text in [
+        "[t](https://ok.example/x)",
+        "https://ok.example\nNext line",
+        "https://ok.example'x)y",
+        "<a href=\"https://ok.example/x\">t</a>",
+        "<a href=\"https://ok.example\">t</a>",
+        // Rules judge a URL to its first whitespace: what a reader that
+        // deletes line breaks inside one would read is not guarded
+        "https://deni\ted.example/",
+        "https://deni\r\ned.example/",
+        "https://ok.example\t@denied.example/",
+        "https://ok.example  \n@denied.example/",
+        "https://deni \u{2028}ed.example/",
+        "https://h.example/a\n/b)zz",
+    ] {
+        let out = links.rewrite(text, None);
+        assert!(matches!(out, Cow::Borrowed(_)), "{text:?} gave {out:?}");
+    }
+    // `https://denied` is not the denied host, and a parser handed
+    // `https://denied\n.example/` whole reads one; but a scheme spelt
+    // across a break is still a start, and never left under rules
+    assert_eq!(
+        links.rewrite("https:\n//denied.example/", None),
+        "hxxps:\n//denied[.]example/"
+    );
+}
+
+/// Under `raw`, no URL left in the result is one a deny rule matches,
+/// under any reading, each found here without the scanner.
+///
+/// A reading ends at whitespace of any kind ([`Reader::Whitespace`]): a
+/// reader that deletes line breaks inside a URL is outside what is
+/// guarded, by the Steward's decision (2026-11-16). A reading whose host
+/// no one could reach ([`destination`]) is not one
 #[test]
 fn raw_leaves_no_denied_url() {
     let links = deny(&[
         "https://evil.example",
+        "https://denied.example",
         "https://ok.example/x",
         "https://*.ok.example",
         "http://a:8443",
@@ -333,25 +631,41 @@ fn raw_leaves_no_denied_url() {
     let mut left = 0;
     for text in ADVERSARIAL
         .iter()
+        .chain(SPELLINGS)
+        .chain(PAST_THE_END)
         .copied()
         .chain(texts.iter().map(String::as_str))
     {
         for site in &sites {
             let out = links.rewrite(text, site.as_ref());
-            let bytes = out.as_bytes();
-            for at in
-                (0..bytes.len()).filter(|i| scheme_at(bytes, *i).is_some())
-            {
-                // As any reader would take it, nested URL and all
-                let end = url_end(bytes, at).unwrap_or(bytes.len());
-                let Ok(found) = Url::parse(&out[at..end]) else {
-                    continue;
-                };
-                left += 1;
-                assert!(
-                    !rules.iter().any(|r| r.denies(&found)),
-                    "{text:?} gave {out:?}, where {found} is denied"
-                );
+            for out in [out.to_string(), threads::tidy(&out)] {
+                for (at, reading) in places(&out, Reader::Whitespace) {
+                    // A schemeless host is one only where a word starts, and
+                    // with a host's character written after its `www.`
+                    let word = !out[..at].ends_with(|c: char| {
+                        c.is_ascii_alphanumeric() || c == '.'
+                    }) && out[at..]
+                        .get(4..)
+                        .unwrap_or_default()
+                        .starts_with(|c: char| {
+                            c.is_ascii_alphanumeric() || "-._~%:@".contains(c)
+                        });
+                    let found =
+                        if reading.to_ascii_lowercase().starts_with("www.") {
+                            destination(&["http://", &reading].concat())
+                                .filter(|_| word)
+                        } else {
+                            destination(&reading)
+                        };
+                    let Some(found) = found else {
+                        continue;
+                    };
+                    left += 1;
+                    assert!(
+                        !rules.iter().any(|r| r.denies(&found)),
+                        "{text:?} gave {out:?}, where {found} is denied"
+                    );
+                }
             }
         }
     }
@@ -363,6 +677,54 @@ fn raw_leaves_no_denied_url() {
             assert!(!out.contains(&[scheme, "evil.example"].concat()), "{out}");
         }
     }
+}
+
+/// Under `defanged` with rules, every URL left in the result is one a
+/// rule allows, under any reading, each found here without the scanner,
+/// read as in [`raw_leaves_no_denied_url`]
+#[test]
+fn allow_leaves_only_allowed_urls() {
+    let links = allow(&[
+        "https://ok.example",
+        "http://ok.example",
+        "https://*.ok.example/x",
+        "https://evil.example/x",
+        "http://a:8443",
+        "https://a",
+        "http://x",
+        "http://127.0.0.1",
+        "https://allowed.example",
+        "https://en.wikipedia.org/wiki",
+    ]);
+    let Links::Defanged { allow: rules } = &links else {
+        unreachable!()
+    };
+    let sites = [None, Some(site())];
+    let texts = generated(20_000);
+    let mut left = 0;
+    for text in ADVERSARIAL
+        .iter()
+        .chain(SPELLINGS)
+        .chain(PAST_THE_END)
+        .copied()
+        .chain(texts.iter().map(String::as_str))
+    {
+        for site in &sites {
+            let out = links.rewrite(text, site.as_ref());
+            let tidied = threads::tidy(&out);
+            for found in readings(&out, Reader::Whitespace)
+                .chain(readings(&tidied, Reader::Whitespace))
+                .filter_map(|r| destination(&r))
+            {
+                left += 1;
+                assert!(
+                    rules.iter().any(|r| r.allows(&found)),
+                    "{text:?} gave {out:?}, where {found} is not allowed"
+                );
+            }
+        }
+    }
+    assert!(left > 300, "the texts left {left} URLs: too few to tell");
 }
 
 /// This site's page URLs are their links, which an agent can follow;
@@ -479,14 +841,55 @@ fn many_urls_are_linear() {
         Links::default(),
         allow(&["https://a", "https://*.example.org/wiki"]),
         deny(&["https://a", "https://*.example.org/wiki"]),
+        // Every path is checked: a rule with one, the host's own
+        allow(&["http://a/x", "https://a/x/y"]),
+        deny(&["http://a/x/y/z"]),
     ];
+    // Lines of minified JSON, quotes and marks after an allowed URL, and
+    // many starts in one run, each with every later end to check
+    let json = [
+        "{\"url\":\"http://a/x/y\"",
+        &",\"k\":\"v\"".repeat(150),
+        &",\"v\":\"1.2\"".repeat(10),
+        "}\n",
+    ]
+    .concat();
+    let quotes = ["http://a/x/", &"'y".repeat(500), " "].concat();
+    let starts = ["http://a/x'".repeat(150), " ".into()].concat();
+    let dotted = ["http://a/x/", &"a.b'".repeat(300), " "].concat();
+    let marks = ["http://a", &"、a".repeat(200), " "].concat();
+    let marked = ["https://a/x/", &"“y”".repeat(150), " "].concat();
     for links in &policies {
+        // Many starts in one run without a space, each with every later
+        // bracket and line break as an end of its own to check: the
+        // bound is `MAX_URL_BYTES` and `MAX_URL_ENDS` a start
+        let ends = ["http://a/", &"x".repeat(110), "'"].concat();
+        let spaced = ["http://a/", &"x".repeat(60), " \n"].concat();
         for unit in [
             "http://a/",
             "http://a/ ",
             "www.a/",
             "https://subliminal.technology/x/",
             "https://subliminal.technology/agora/post/",
+            "http://a/x'",
+            "http://a/x)(",
+            "http://a/x\n",
+            "http://a/.\n.",
+            "www.a/x|",
+            "http:a/",
+            "http:\\a'",
+            "h\t",
+            "http \n",
+            "https: \n",
+            "http::",
+            &ends,
+            &spaced,
+            &json,
+            &quotes,
+            &starts,
+            &dotted,
+            &marks,
+            &marked,
         ] {
             let small_text = unit.repeat(8_192 / unit.len());
             let large_text = unit.repeat(65_536 / unit.len());
@@ -504,6 +907,9 @@ fn many_urls_are_linear() {
                 ratio < 24.0,
                 "{links:?} {unit}: 8x the text took {ratio:.1}x the time"
             );
+            if std::env::var_os("DISPLAY_TIMES").is_some() {
+                eprintln!("{large:>12?} {links:?} {:.40?}", unit);
+            }
         }
     }
     assert_eq!(
@@ -663,6 +1069,27 @@ fn what_a_deny_rule_does_not_let_by() {
             "hxxps://evil[.]example/y/../x",
         ),
         ("https://evil.example:443/x", "hxxps://evil[.]example:443/x"),
+        (
+            "https://evil.example:8443/x",
+            "hxxps://evil[.]example:8443/x",
+        ),
+        ("http://evil.example:8080/x", "hxxp://evil[.]example:8080/x"),
+        // An encoded separator, a segment's parameters, and `..` after
+        // the decoding
+        ("https://evil.example/%2Fx", "hxxps://evil[.]example/%2Fx"),
+        (
+            "https://evil.example/x;a=b/y",
+            "hxxps://evil[.]example/x;a=b/y",
+        ),
+        (
+            "https://evil.example/y%2F..%2Fx",
+            "hxxps://evil[.]example/y%2F..%2Fx",
+        ),
+        (
+            "https://evil.example/y%5C..%5Cx",
+            "hxxps://evil[.]example/y%5C..%5Cx",
+        ),
+        ("https://evil.example/x%2Fy", "hxxps://evil[.]example/x%2Fy"),
         // Inside a URL that is not denied, which is then not left either:
         // what is left is what was checked, not a URL to be read up to
         // the `[` of the one inside it
@@ -704,10 +1131,9 @@ fn what_a_deny_rule_does_not_let_by() {
         links.rewrite(&long, None),
         long.replace("https://ok.example", "hxxps://ok[.]example")
     );
-    // Elsewhere, another port and another path are not the rule's
+    // Elsewhere, and another path, are not the rule's
     for text in [
         "https://ok.example/x",
-        "https://evil.example:8443/x",
         "https://evil.example/xy",
         "https://evil.example/",
     ] {
@@ -746,15 +1172,26 @@ fn a_rule_matches_scheme_host_and_port() {
         !rule("http://example.org:443").allows(&url("https://example.org"))
     );
 
-    // A deny rule on the default port covers both schemes; on another
-    // port, that scheme and port only
-    assert!(r.denies(&url("http://example.org/")));
-    assert!(r.denies(&url("https://example.org/")));
-    assert!(!r.denies(&url("https://example.org:8443/")));
-    assert!(!r.denies(&url("http://example.org:443/")));
+    // A deny rule with no port covers every port and both schemes; with
+    // a port, that port under both
+    for any in [
+        "http://example.org/",
+        "https://example.org/",
+        "https://example.org:8443/",
+        "http://example.org:443/",
+        "http://example.org:1/",
+    ] {
+        assert!(r.denies(&url(any)), "{any}");
+    }
     assert!(port.denies(&url("https://example.org:8443/")));
-    assert!(!port.denies(&url("http://example.org:8443/")));
+    assert!(port.denies(&url("http://example.org:8443/")));
     assert!(!port.denies(&url("https://example.org/")));
+    assert!(!port.denies(&url("http://example.org:8080/")));
+    // A port that is the other scheme's own is written, and is a port
+    let other = rule("http://example.org:443");
+    assert!(other.denies(&url("https://example.org/")));
+    assert!(other.denies(&url("http://example.org:443/")));
+    assert!(!other.denies(&url("http://example.org/")));
 }
 
 #[test]
@@ -885,9 +1322,20 @@ fn dot_segments_and_percent_encoding() {
         "https://example.org/wiki/..%2Fadmin",
         "https://example.org/wiki/..%2fadmin",
         "https://example.org/wiki/..%5Cadmin",
-        "https://example.org/wiki/AC%2FDC",
+        "https://example.org/wiki/..;/admin",
+        "https://example.org/wiki/%252e%252e/admin",
+        "https://example.org/wiki/..%2f..%2fw",
     ] {
         assert!(!r.allows(&url(written)), "{written}");
+        assert!(r.denies(&url(written)), "{written}");
+    }
+    // With no dot segment, an encoded `/`, a `%25` or a `;` is a title
+    for written in [
+        "https://example.org/wiki/AC%2FDC",
+        "https://example.org/wiki/100%25",
+        "https://example.org/wiki/a;b",
+    ] {
+        assert!(r.allows(&url(written)), "{written}");
         assert!(r.denies(&url(written)), "{written}");
     }
     assert!(
@@ -902,8 +1350,37 @@ fn dot_segments_and_percent_encoding() {
     assert_eq!(spaced.to_string(), "https://example.org/a%20b");
     assert!(spaced.allows(&url("https://example.org/a b/c")));
     assert!(spaced.allows(&url("https://example.org/a%20b/c")));
-    // A rule's dot segments are resolved as well
-    assert_eq!(rule("https://example.org/a/../wiki"), r);
+    // A segment's parameters, and an encoded `%`
+    let deep = rule("https://example.org/a/b");
+    // (the rule's segments as written: `b;x=1` is not `b`)
+    for written in [
+        "https://example.org/a;x/b",
+        "https://example.org/a/b;x=1/c",
+        "https://example.org/a/;/b",
+    ] {
+        assert!(!deep.allows(&url(written)), "{written}");
+        assert!(deep.denies(&url(written)), "{written}");
+    }
+    assert!(!r.allows(&url("https://example.org/wiki/..;/admin")));
+    assert!(!r.allows(&url("https://example.org/wiki/..%252Fadmin")));
+    assert!(
+        rule("https://example.org").allows(&url("https://example.org/a;x/b"))
+    );
+    // A rule's own dot segments are refused, not resolved
+    for written in [
+        "https://example.org/a/../wiki",
+        "https://example.org/./wiki",
+        "https://example.org/wiki/..",
+        "https://example.org/wiki/%2e%2E/x",
+        "https://example.org/%2e",
+        "https://*.example.org/a/.%2E/b",
+    ] {
+        assert_eq!(refusal(written), LinkRuleRefusal::DotSegment, "{written}");
+    }
+    assert_eq!(
+        rule("https://example.org/.well-known/x.y").to_string(),
+        "https://example.org/.well-known/x.y"
+    );
 }
 
 #[test]
@@ -976,6 +1453,62 @@ fn refused_rules_say_why() {
     assert_eq!(refusal("https://user@example.org"), Why::Userinfo);
     assert_eq!(refusal("https://user:pw@example.org"), Why::Userinfo);
     assert_eq!(refusal("https://:pw@example.org"), Why::Userinfo);
+    // The `@` alone, which the parser drops
+    assert_eq!(refusal("https://:@example.org"), Why::Userinfo);
+    assert_eq!(refusal("https://@example.org/wiki"), Why::Userinfo);
+    assert_eq!(refusal("https://*.@example.org"), Why::Userinfo);
+    assert_eq!(
+        rule("https://example.org/@user").to_string(),
+        "https://example.org/@user"
+    );
+    // Written the one way: a parser reads each of these as a rule
+    for odd in [
+        "https:/example.org",
+        "https:example.org",
+        "http:///example.org",
+        "https:///example.org/wiki",
+    ] {
+        match refusal(odd) {
+            Why::Slashes => {}
+            // (three slashes: no host where one is read)
+            Why::NotAUrl(_) => {}
+            other => panic!("{odd}: {other}"),
+        }
+    }
+    assert_eq!(refusal("https:/example.org"), Why::Slashes);
+    assert_eq!(refusal("HTTPS:example.org"), Why::Slashes);
+    for slashed in [
+        "https:\\\\example.org",
+        "https://example.org\\wiki",
+        "https://example.org/a\\b",
+    ] {
+        assert_eq!(refusal(slashed), Why::Backslash, "{slashed}");
+    }
+    for control in [
+        "https://exam\tple.org",
+        "https://example.org/wi\nki",
+        "ht\ttps://example.org",
+        "https://example.org/\u{1}",
+    ] {
+        assert_eq!(refusal(control), Why::Control, "{control}");
+    }
+    for dotted in [
+        "https://example.org..",
+        "https://example.org../wiki",
+        "https://*.example.org...",
+    ] {
+        assert_eq!(refusal(dotted), Why::TrailingDots, "{dotted}");
+    }
+    // A wildcard over a whole top-level name
+    for wide in [
+        "https://*.com",
+        "https://*.com.",
+        "http://*.localhost:8080/x",
+        "https://*.uk",
+    ] {
+        assert_eq!(refusal(wide), Why::WildcardSuffix, "{wide}");
+    }
+    assert_eq!(rule("https://*.co.uk").to_string(), "https://*.co.uk");
     assert_eq!(refusal("https://example.org/?q=1"), Why::Query);
     assert_eq!(refusal("https://example.org?"), Why::Query);
     assert_eq!(refusal("https://example.org/#top"), Why::Fragment);
@@ -1036,6 +1569,21 @@ fn refused_rules_say_why() {
     assert!(said.contains("is not a URL"), "{said}");
     let said = "https://example.org/*".parse::<LinkRule>().unwrap_err();
     assert!(said.to_string().contains("only as `*.`"), "{said}");
+    for (given, says) in [
+        (
+            "https:example.org",
+            "does not begin `http://` or `https://`",
+        ),
+        ("https://example.org\\x", "a backslash"),
+        ("https://example.org/\tx", "a control character"),
+        ("https://*.com", "two labels or more"),
+        ("https://example.org..", "more than one dot"),
+        ("https://example.org/a/../b", "`.` or `..` segment"),
+        ("https://@example.org", "the `@` of one"),
+    ] {
+        let said = given.parse::<LinkRule>().unwrap_err().to_string();
+        assert!(said.contains(says), "{said}");
+    }
 }
 
 #[test]
@@ -1065,7 +1613,6 @@ fn a_rule_round_trips_as_written() {
     for (written, shown) in [
         (" HTTPS://Example.ORG:443/ ", "https://example.org"),
         ("https://*.Example.org./", "https://*.example.org"),
-        ("https://example.org/a/./b/../c", "https://example.org/a/c"),
     ] {
         let r = rule(written);
         assert_eq!(r.to_string(), shown);
@@ -1197,4 +1744,280 @@ fn schemas_are_inline() {
     for word in ["links", "mode", "defanged", "raw", "allow", "deny"] {
         assert!(text.contains(word), "{word}: {text}");
     }
+}
+
+// ── Layer 5b: what the review of layer 5 reproduced ─────────────────────
+
+/// Unicode punctuation, a superscript, `~` or a character a parser
+/// ignores after a host ends it, and is not the URL's at its end
+#[test]
+fn a_mark_after_a_host_ends_it() {
+    let links = allow(&["https://docs.rs"]);
+    for text in [
+        "“https://docs.rs”",
+        "‘https://docs.rs’",
+        "«https://docs.rs»",
+        "（https://docs.rs）",
+        "https://docs.rs、次",
+        "https://docs.rs，次",
+        "https://docs.rs—the docs site",
+        "https://docs.rs–x",
+        "https://docs.rs…",
+        "https://docs.rs¹",
+        "https://docs.rs⁽¹⁾",
+        "~~https://docs.rs~~",
+        "https://docs.rs~",
+        // In a path, a possible end: each reading is checked
+        "https://docs.rs/serde”",
+        "https://docs.rs/“serde”/x",
+    ] {
+        let out = links.rewrite(text, None);
+        assert!(matches!(out, Cow::Borrowed(_)), "{text:?} gave {out:?}");
+    }
+    let links = deny(&["https://evil.com"]);
+    for text in [
+        "“https://evil.com”",
+        "https://evil.com—x",
+        "（https://evil.com）",
+        "https://evil.com、次",
+        "https://evil.com¹",
+        "https://evil.com~",
+        "https://evil.com\u{200b}x",
+        "https://evil.com\u{ad}x",
+    ] {
+        let out = links.rewrite(text, None);
+        assert!(out.contains("hxxps://evil[.]com"), "{text:?} gave {out:?}");
+    }
+    // A mark a parser makes a dot of is a dot: what follows is checked
+    let links = allow(&["https://docs.rs"]);
+    for text in [
+        "https://docs.rs。evil.com/x",
+        "https://docs.rs．evil.com/x",
+        "https://docs.rs”.evil.com/x",
+        "https://docs.rs․evil.com/x",
+    ] {
+        let out = links.rewrite(text, None);
+        assert!(out.starts_with("hxxps://"), "{text:?} gave {out:?}");
+    }
+    // A letter or a digit is the host's: an internationalised name goes on
+    assert_eq!(
+        links.rewrite("https://docs.rsé", None),
+        "hxxps://docs[.]rsé"
+    );
+}
+
+/// Punctuation no host name has ends an authority, and a host with it is
+/// allowed by no rule
+#[test]
+fn punctuation_in_an_authority_ends_it() {
+    let links = deny(&["https://evil.com"]);
+    for text in ["https://evil.com,b", "https://evil.com),b"] {
+        let out = links.rewrite(text, None);
+        assert!(out.starts_with("hxxps://"), "{text:?} gave {out:?}");
+    }
+    let links = allow(&["https://*.allowed.example"]);
+    for text in [
+        "https://evil.com,.allowed.example/x",
+        "https://evil.com!.allowed.example/x",
+        "https://evil.com;.allowed.example/x",
+        "https://evil.com~.allowed.example",
+        "https://evil.com'.allowed.example/x",
+    ] {
+        let out = links.rewrite(text, None);
+        assert!(out.starts_with("hxxps://"), "{text:?} gave {out:?}");
+    }
+    let wild = rule("https://*.allowed.example");
+    for host in ["evil.com,.allowed.example", "a~b.allowed.example"] {
+        assert!(
+            !wild.allows(&url(&["https://", host, "/"].concat())),
+            "{host}"
+        );
+    }
+    let links = allow(&["https://docs.rs"]);
+    for text in [
+        "https://docs.rs,b",
+        "https://docs.rs;b",
+        "https://docs.rs!x",
+    ] {
+        let out = links.rewrite(text, None);
+        assert!(matches!(out, Cow::Borrowed(_)), "{text:?} gave {out:?}");
+    }
+}
+
+/// A `[` after a host is not an IPv6 address or a user's: an end
+#[test]
+fn a_bracket_after_a_host_ends_it() {
+    let links = allow(&["https://docs.rs"]);
+    for text in [
+        "https://docs.rs[1]",
+        "https://docs.rs[^1]",
+        "[x](https://docs.rs),[y](https://docs.rs)",
+    ] {
+        let out = links.rewrite(text, None);
+        assert!(matches!(out, Cow::Borrowed(_)), "{text:?} gave {out:?}");
+    }
+    // An address and a user before one are as they were
+    let v6 = allow(&["https://[::1]"]);
+    assert_eq!(v6.rewrite("https://[::1]/", None), "hxxps://[::1]/");
+    assert_eq!(
+        v6.rewrite("https://user@[::1]/", None),
+        "hxxps://user@[::1]/"
+    );
+    assert_eq!(
+        links.rewrite("https://docs.rs[x@evil.com/", None),
+        "hxxps://docs[.]rs[x@evil.com/"
+    );
+}
+
+/// Readings that cannot change a URL's host are not counted against
+/// `MAX_URL_ENDS`
+#[test]
+fn minified_json_leaves_an_allowed_url() {
+    let pairs = |n: usize| {
+        (0..n)
+            .map(|k| format!(",\"k{k}\":\"v\""))
+            .collect::<String>()
+    };
+    for links in [
+        allow(&["https://docs.rs"]),
+        allow(&["https://docs.rs/serde"]),
+        deny(&["https://evil.com"]),
+        deny(&["https://docs.rs/tokio"]),
+    ] {
+        for url in ["https://docs.rs/serde/latest", "https://docs.rs"] {
+            for n in [6, 9, 40, 120] {
+                if url == "https://docs.rs"
+                    && links == allow(&["https://docs.rs/serde"])
+                {
+                    continue;
+                }
+                let text = format!("{{\"url\":\"{url}\"{}}}", pairs(n));
+                let out = links.rewrite(&text, None);
+                assert!(
+                    matches!(out, Cow::Borrowed(_)),
+                    "{links:?} {n}: {out:?}"
+                );
+            }
+        }
+    }
+    // With dotted values after it, under a rule with a path
+    let text = format!(
+        "{{\"url\":\"https://docs.rs/serde/1.0\"{}}}",
+        (0..40)
+            .map(|k| format!(",\"v{k}\":\"1.{k}.0\""))
+            .collect::<String>()
+    );
+    let out = allow(&["https://docs.rs/serde"]).rewrite(&text, None);
+    assert!(matches!(out, Cow::Borrowed(_)), "{out:?}");
+    // A URL that ends at a rule's last segment, with more after the quote:
+    // read to the next space, its segment is `serde",…`, not the rule's
+    let out = allow(&["https://docs.rs/serde"])
+        .rewrite("{\"u\":\"https://docs.rs/serde\",\"k\":\"v\"}", None);
+    assert!(out.contains("hxxps://"), "{out:?}");
+    // A path that leaves the rule's after the first reading still counts
+    let out = allow(&["https://docs.rs/serde"])
+        .rewrite("{\"u\":\"https://docs.rs/serde\",\"k\":\"/../../x\"}", None);
+    assert!(out.contains("hxxps://"), "{out:?}");
+}
+
+/// A slashless scheme is a URL only before a domain name: code and prose
+/// that are not links are left as written
+#[test]
+fn a_slashless_scheme_needs_a_domain() {
+    for code in [
+        "HTTP:200 OK",
+        "x=http:ok",
+        "http:Agent",
+        "#[http:get]",
+        "{http:1.1}",
+        "ENV HTTP_PROXY=http:proxy:3128",
+        "export https_proxy=https:p",
+        "data:text/html,https:x",
+        "http:\u{a0}x",
+        "https:\u{3000}x",
+        "https:\u{2003}x",
+        "https:/\u{a0}x",
+    ] {
+        let out = defang(code);
+        assert!(matches!(out, Cow::Borrowed(_)), "{code:?} gave {out:?}");
+        assert_eq!(fetchable(code), None, "{code:?}");
+    }
+    for (text, want) in [
+        ("https:evil.com/x", "hxxps:evil[.]com/x"),
+        ("https:a.b.co", "hxxps:a[.]b[.]co"),
+        ("http:u:p@evil.com", "hxxp:u:p@evil[.]com"),
+        ("http:(evil.example)", "hxxp:(evil.example)"),
+        ("http:EVIL.COM:8080/x", "hxxp:EVIL[.]COM:8080/x"),
+    ] {
+        assert_eq!(defang(text), want);
+    }
+    // Not seen: the documented limit
+    for unseen in super::oracle::UNSEEN {
+        assert!(matches!(defang(unseen), Cow::Borrowed(_)), "{unseen:?}");
+        assert_eq!(fetchable(unseen), None, "{unseen:?}");
+    }
+}
+
+// ── Ordinary writing: what the policy must not break ────────────────────
+
+/// `fixtures/ordinary-writing.tsv`, one case a line: `(tag, text)`
+fn ordinary_writing() -> impl Iterator<Item = (&'static str, &'static str)> {
+    include_str!("fixtures/ordinary-writing.tsv")
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .map(|l| {
+            l.split_once('\t')
+                .unwrap_or_else(|| panic!("no tag: {l:?}"))
+        })
+}
+
+/// The allow profile of the ordinary-writing fixture
+fn ordinary_allow() -> Links {
+    allow(&[
+        "https://docs.rs",
+        "https://en.wikipedia.org/wiki",
+        "https://ja.wikipedia.org/wiki",
+        "https://github.com/mdegans",
+        "https://github.com/claudeopusagora",
+        "https://doi.org",
+        "https://example.org",
+    ])
+}
+
+/// Links on allowed sites, written the ways people and models write them,
+/// are left as written; the few that leave a rule are defanged; and what
+/// the policy still breaks (`known`) is pinned, so a fix shows up here
+#[test]
+fn ordinary_writing_is_left() {
+    let links = ordinary_allow();
+    let mut failures = Vec::new();
+    let mut counts = std::collections::BTreeMap::<&str, usize>::new();
+    for (tag, text) in ordinary_writing().filter(|(tag, _)| *tag != "code") {
+        *counts.entry(tag).or_default() += 1;
+        let out = links.rewrite(text, None);
+        let ok = match tag {
+            "left" => out == text,
+            "defang" | "known" => out != text,
+            other => panic!("unknown tag {other:?}"),
+        };
+        if !ok {
+            failures.push(format!("{tag}\t{text:?}\n  gave\t{out:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+    assert!(counts["left"] > 300, "{counts:?}");
+}
+
+/// Code and prose that are not links come out of the default config
+/// byte-identical
+#[test]
+fn what_is_not_a_link_is_untouched() {
+    let mut failures = Vec::new();
+    for (_, text) in ordinary_writing().filter(|(tag, _)| *tag == "code") {
+        let out = Links::default().rewrite(text, Some(&site()));
+        if out != text {
+            failures.push(format!("{text:?} gave {out:?}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

@@ -97,6 +97,14 @@ markdown-fuzz count="300000" seed="11400714819323198485":
 markdown-tool:
     cargo clippy --quiet --locked --all-targets --manifest-path tools/markdown-parity/Cargo.toml -- -D warnings
 
+# What the link policy (`display::Links`) changes in real text: the default
+# against the server's old scanner, an allow list's cost and the hosts it
+# lacks, and checks that nothing fetchable or outside a URL slipped
+# (`tools/display-corpus`). Writes `report.md` and `differences.jsonl` to
+# `out`; keep corpus content out of the repo
+display-corpus corpus allow out site="https://subliminal.technology":
+    cargo run --quiet --locked --release --manifest-path tools/display-corpus/Cargo.toml -- {{corpus}} {{allow}} {{site}} {{out}}
+
 # The published-key parity check: the live chain must verify under the
 # genesis key and the ROOT keys compiled into this crate, and the key the
 # platform serves must be the one that walk ends on. Networked, so it is not
