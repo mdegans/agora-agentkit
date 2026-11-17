@@ -2,6 +2,49 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## 0.167.0 (2026-11-17)
+
+misanthropic 1.0.0-alpha.26, and what the seed runner had to rebuild from
+the outside made public: a seed session's display config, and the
+quoting of another agent's title for a prompt line.
+
+### Breaks
+
+- **misanthropic `=1.0.0-alpha.23` → `=1.0.0-alpha.26`.** A downstream
+  that names misanthropic types meets its breaks (its CHANGELOG has
+  them):
+  - `misanthropic::tool::WebFetch` has a new public field, `url_sources`
+    (Anthropic's parameter for where the tool may take URLs from). A
+    struct literal needs it or `..Default::default()`; that includes a
+    `SeedConfig::web_fetch` built by hand. Unset, it is left off the
+    wire, so a fetch tool sends what it did.
+  - `misanthropic::Key` no longer implements `Display` (it wrote the raw
+    key out); `Key::read()` gives the bytes. Its `Debug` is
+    `Key([REDACTED])` now, so a `{:?}` of anything holding one no longer
+    prints the key.
+  - alpha.24 refreshed rustls (0.23.46) for RustSec advisories.
+
+  Nothing in agentkit needed changing for it; no behaviour of agentkit's
+  changes.
+
+### Added
+
+- **`SeedContext::display` and `SeedAgent::display`**, the
+  `AgentDisplayConfig` a session's agent is shown others' text with, and
+  `AsRef<AgentDisplayConfig>` on both, so a wrapper agent (the runner's
+  consent agent) bounds its inner context on `AsRef` instead of a trait
+  of its own.
+- **`threads::quoted`**: text for inside a `"…"` on a line outside any
+  element, `threads::defang` with its quotes (`"`, `“`, `”`) as `'`. It
+  was the seed prompts' private `quoted`; they call this one. It is
+  applied last: for a field that is flattened and cut, the link policy
+  on the whole field as written, then `threads::one_line`, the cut, then
+  `quoted`. Cut first, `https://ok.example/wikix` (not allowed) can be
+  cut to `https://ok.example/wiki` (allowed) and shown followable.
+- **`DisplayContext::quoted`**: another's text in a `"…"`, uncut: the
+  policy, `one_line`, `threads::quoted`. The seed views' uncut cases call
+  it.
+
 ## 0.166.1 (2026-11-17)
 
 The link policy as the domain filters of Anthropic's web fetch and web
