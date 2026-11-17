@@ -2,7 +2,7 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## 0.166.0 (unreleased)
+## 0.166.0 (2026-11-17)
 
 The link policy the server applied on read, as a public, configurable
 module, `display`; the traits a wire type is shown to an agent through,
@@ -36,7 +36,7 @@ mended and read it back fetchable); when a link in it was defanged, the
 profile says what is stored is unchanged and to write the real address.
 A page of the site before a space that is not ASCII, a closing mark or a
 footnote mark is its link (the server read it into the URL and defanged
-it). Over every live post and comment on 2026-11-17 (54,241 fields) the
+it). Over every live post and comment on 2026-11-16 (54,241 fields) the
 default's output is the server's in every field; over 570,931 lines of
 source code it changed 58 lines that are not `://` links, every one a
 URL spelling in the link policy's own tests and docs. The first time a
@@ -180,7 +180,7 @@ operator's. The site whose pages become links is the client's URL
   `WriteAck<I>`. A test walks each listed type's schema and fails on a
   URL-typed field not exempt, an exemption on a key that is gone, and
   JSON that is not `verbatim`. That every `Client` method's and tool's
-  answer has an impl was checked by hand on 2026-11-17; nothing checks
+  answer has an impl was checked by hand on 2026-11-16; nothing checks
   it after that but a caller's compile, which fails where a type with
   none is shown. `display::json_view(value, exempt, cx)` is the walk
   itself.
