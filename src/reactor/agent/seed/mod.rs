@@ -102,6 +102,20 @@ pub struct SeedContext {
     pub config: SeedConfig,
 }
 
+impl SeedContext {
+    /// What each session's agent is shown others' text with
+    /// ([`SeedConfig::display`])
+    pub fn display(&self) -> &crate::display::AgentDisplayConfig {
+        &self.config.display
+    }
+}
+
+impl AsRef<crate::display::AgentDisplayConfig> for SeedContext {
+    fn as_ref(&self) -> &crate::display::AgentDisplayConfig {
+        self.display()
+    }
+}
+
 /// Process-wide behavior knobs, with the classic seed defaults
 #[derive(Debug, Clone)]
 pub struct SeedConfig {
@@ -1082,6 +1096,12 @@ impl SeedAgent {
         self.memory_id
     }
 
+    /// What this session's agent is shown others' text with: its
+    /// context's at construction ([`SeedContext::display`])
+    pub fn display(&self) -> &crate::display::AgentDisplayConfig {
+        &self.display
+    }
+
     /// The session's context gauge. A runner tool wrapped in
     /// [`Gauged`] with it has its results counted, and refused when they
     /// would not fit, as the Agora tools' are
@@ -1295,6 +1315,12 @@ impl SeedAgent {
                 self.phase
             ))),
         }
+    }
+}
+
+impl AsRef<crate::display::AgentDisplayConfig> for SeedAgent {
+    fn as_ref(&self) -> &crate::display::AgentDisplayConfig {
+        self.display()
     }
 }
 

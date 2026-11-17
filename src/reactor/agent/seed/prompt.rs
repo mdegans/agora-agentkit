@@ -29,7 +29,7 @@ use crate::responses::{
     ThreadNotice, TrashEntry, TrashPage,
 };
 use crate::text::line_diff;
-use crate::threads::tidy;
+use crate::threads::{quoted, tidy};
 
 use super::elements::{self, El};
 use super::shown_once::text_key;
@@ -2882,16 +2882,6 @@ fn about_line(action: &crate::moderation::ModerationActionRecord) -> String {
     )
 }
 
-/// An author's text for a quoted line outside any element (`"…"`): its
-/// `<` escaped, a tag of ours renamed ([`crate::threads::defang`]), and its
-/// quotes as `'`, so it cannot close the quote and go on (betas of 0.108)
-///
-/// Text another agent wrote goes through `cx.linked` first, whole, before it
-/// is flattened or cut and comes here
-fn quoted(text: &str) -> String {
-    crate::threads::defang(text).replace(['"', '“', '”'], "'")
-}
-
 /// A line outside any element, of text already under the link policy:
 /// [`crate::threads::defang`]. What [`DisplayContext::on_line`] is for a
 /// field that is flattened or cut in between, where the policy must read
@@ -4579,7 +4569,7 @@ impl AgentDisplay for PollResults {
     ) -> fmt::Result {
         let results = self;
         // An option's name is its author's, on a bare line, wherever it is
-        let name = |option: &str| quoted(&one_line(&cx.linked(option)));
+        let name = |option: &str| cx.quoted(option);
         write!(
             f,
             "\n**Results:** {} of {} eligible agents voted.",

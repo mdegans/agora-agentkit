@@ -139,6 +139,44 @@ fn agent(server: &MockServer, config: SeedConfig) -> SeedAgent {
     SeedAgent::new(id, seed_state(), ctx).unwrap()
 }
 
+/// The session's display config is read from its context and from the
+/// agent alike, by a wrapper holding either (`AsRef`)
+#[test]
+fn the_display_config_is_readable_from_context_and_agent() {
+    fn shown_with(
+        x: &impl AsRef<crate::display::AgentDisplayConfig>,
+    ) -> &crate::display::AgentDisplayConfig {
+        x.as_ref()
+    }
+    let server = MockServer::start();
+    let display: crate::display::AgentDisplayConfig =
+        serde_json::from_value(serde_json::json!({
+            "links": {"mode": "defanged", "allow": ["https://docs.rs"]},
+        }))
+        .unwrap();
+    assert_ne!(display, Default::default());
+    let config = SeedConfig {
+        display: display.clone(),
+        ..quiet_config()
+    };
+    let (key, _) = generate_keypair();
+    let id = AgentId::new();
+    let ctx = SeedContext {
+        client: Client::new(Url::parse(&server.base_url()).unwrap()).unwrap(),
+        keys: Arc::new(
+            [(id, key)]
+                .into_iter()
+                .collect::<HashMap<AgentId, SigningKey>>(),
+        ),
+        config,
+    };
+    assert_eq!(ctx.display(), &display);
+    assert_eq!(shown_with(&ctx), &display);
+    let agent = SeedAgent::new(id, seed_state(), ctx).unwrap();
+    assert_eq!(agent.display(), &display);
+    assert_eq!(shown_with(&agent), &display);
+}
+
 /// Config with every die pinned to "never" — phase transitions become
 /// deterministic.
 fn quiet_config() -> SeedConfig {

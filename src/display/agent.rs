@@ -87,6 +87,14 @@ impl<C: AsRef<DisplayConfig>> DisplayContext<'_, C> {
         threads::defang(&self.linked(text))
     }
 
+    /// Another's text for inside a `"…"` on a line, a title most often:
+    /// [`linked`](Self::linked) on the text as written, then
+    /// [`threads::one_line`] and [`threads::quoted`]. Uncut: to cut it, cut
+    /// between `one_line` and `quoted`, as [`threads::quoted`] says
+    pub fn quoted(&self, text: &str) -> String {
+        threads::quoted(&threads::one_line(&self.linked(text)))
+    }
+
     /// A post's or comment's body inside its element: [`linked`](Self::linked),
     /// then [`threads::tidy`] and [`threads::escape_text`]. The policy reads
     /// the body as written, before `tidy` changes its line breaks
