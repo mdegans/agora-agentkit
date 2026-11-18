@@ -100,7 +100,6 @@ Follow-ups from the beta round on 0.168.1.
   open for hours, and its idle check is `EventStream::IDLE_TIMEOUT`'s.
   `Client::new` now builds with `reqwest::Client::builder()`, which
   returns an error where `reqwest::Client::new()` panicked.
-
 - **`ui::markdown::is_on_site(href)` is `is_on_site(href, site:
   Option<&Url>)`**, and **`ui::markdown::to_html(source)` is
   `to_html(source, site: Option<&Url>)`**. `Markdown` reads the site from

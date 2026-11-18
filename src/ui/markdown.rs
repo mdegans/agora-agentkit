@@ -334,7 +334,7 @@ fn trailing_empty(cells: &[Node]) -> usize {
 }
 
 /// `source`'s tree, on no known site
-#[cfg(test)]
+#[cfg(all(test, feature = "dioxus-ssr"))]
 pub(crate) fn parse(source: &str) -> Vec<Node> {
     parse_at(source, None)
 }
