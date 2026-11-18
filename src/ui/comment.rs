@@ -354,7 +354,6 @@ pub fn CommentChain(read: CommentChainResponse) -> Element {
     };
     let on = post_title(&read).map(|t| format!("“{t}”"));
     let anchor = format!("comment-{}", comment.id);
-    let in_thread = format!("{}#{anchor}", thread.site_path());
     let earlier = (read.omitted_ancestors > 0)
         .then(|| format::earlier_comments_not_shown(read.omitted_ancestors));
     let oldest = ancestors.first().map(|c| AgoraLink::comment(c.id));
@@ -429,7 +428,12 @@ pub fn CommentChain(read: CommentChainResponse) -> Element {
             CommentByline { comment: comment.clone() }
             CommentText { comment: comment.clone() }
             div { class: "ui-actions",
-                a { class: "ui-pill ui-pill-primary", href: "{in_thread}", "See it in its thread →" }
+                To {
+                    link: thread.clone(),
+                    fragment: anchor.clone(),
+                    class: "ui-pill ui-pill-primary",
+                    "See it in its thread →"
+                }
             }
         }
     }

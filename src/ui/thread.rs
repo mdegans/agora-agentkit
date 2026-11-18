@@ -756,6 +756,16 @@ pub fn ThreadIsland(page: ThreadPage) -> Element {
             load.call(());
         }
     };
+    // A page loaded after a navigation to `#comment-<id>`: go there once
+    // the thread is drawn
+    let arrive = try_use_context::<super::route::Arrive>();
+    use_effect(move || {
+        if matches!(*thread.read(), ThreadLoad::Loaded(_))
+            && let Some(arrive) = &arrive
+        {
+            arrive.arrived();
+        }
+    });
     use_document_title(use_memo(move || {
         document_title(&title_of(&thread.read()))
     }));

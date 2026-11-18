@@ -50,6 +50,10 @@
 //!   `<a>` there.
 //! - **Levels**: no page has an `Outlet`, so `render` draws nothing for a
 //!   `level` above 0.
+//! - **A fragment after a navigation**: `pushState` never scrolls, so a
+//!   link to `#comment-<id>` on a page the client then loads would land at
+//!   the top. A link [`To`] a `fragment` puts it in the address, and the
+//!   thread, once drawn, goes to it ([`Arrive`]).
 //!
 //! Links written by authors inside post and comment bodies
 //! ([`markdown`](super::markdown)) stay plain `<a>`s: a full page load.
@@ -58,7 +62,9 @@ use std::{cell::RefCell, fmt, rc::Rc, str::FromStr};
 
 use dioxus::prelude::*;
 use dioxus_history::History;
-use dioxus_router::{Link, ParseRouteError, Routable, Router, SiteMapSegment};
+use dioxus_router::{
+    Link, NavigationTarget, ParseRouteError, Routable, Router, SiteMapSegment,
+};
 use futures::future::LocalBoxFuture;
 
 use super::{
@@ -414,6 +420,9 @@ fn ThreadRoute(post: PostId) -> Element {
             }));
         }
     });
+    use_arrive(
+        data.fetch.is_some() && matches!(page.thread, ThreadLoad::Pending),
+    );
     ThreadIsland(page)
 }
 
@@ -523,23 +532,91 @@ pub(crate) use to;
 /// `a { class, style, href, "{text}" }` would be. Under a router the
 /// `Link` adds its click listener (a hydration marker),
 /// `aria-current="page"` on a link to the page it is on, and a marker
-/// around literal text, and writes `href` before `class`
+/// around literal text, and writes `href` before `class`.
+///
+/// With a `fragment` (`comment-<id>`), the link is to that place on the
+/// page: `#<fragment>` in its `href` and, after a client-side navigation,
+/// in the address bar, where the page goes to it once it is drawn (see
+/// [`Arrive`])
 #[component]
 pub fn To(
     link: AgoraLink,
     #[props(into, default)] class: Option<String>,
     #[props(into, default)] style: Option<String>,
+    #[props(into, default)] fragment: Option<String>,
     children: Element,
 ) -> Element {
     if routed(&link) {
+        let route = Route(link).to_string();
+        let to = match &fragment {
+            Some(fragment) => format!("{route}#{fragment}"),
+            None => route,
+        };
         return rsx! {
-            Link { to: Route(link), class, style, {children} }
+            Link { to: NavigationTarget::Internal(to), class, style, {children} }
         };
     }
-    let href = link.site_path();
+    let mut href = link.site_path();
+    if let Some(fragment) = &fragment {
+        href.push('#');
+        href.push_str(fragment);
+    }
     rsx! {
         a { class, style, href: "{href}", {children} }
     }
+}
+
+/// Going to the address's `#fragment` once a page the client loaded after
+/// a navigation is drawn: the browser scrolls to a fragment on a full
+/// load, never after a `pushState`. The page calls [`arrived`](Self::arrived)
+/// from an effect when its content is in place, once; this asks the
+/// renderer's history to open the address as it is, which in a browser
+/// (dioxus-web's `external`, `location.href`) is a navigation to a
+/// fragment of the same document: it scrolls to the element and replaces
+/// the history entry, loading nothing. Provided only for a page the client
+/// loads (never on the server, nor for a hydrated page, which the browser
+/// already scrolled), and only when the address has a fragment
+#[derive(Clone)]
+pub struct Arrive(Rc<dyn Fn()>);
+
+impl Arrive {
+    /// The page's content is drawn
+    pub fn arrived(&self) {
+        (self.0)()
+    }
+}
+
+impl fmt::Debug for Arrive {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Arrive")
+    }
+}
+
+/// The history the renderer gave, under [`SiteHistory`]: the address as
+/// it is, `#fragment` included
+#[derive(Clone)]
+struct Address(Rc<dyn History>);
+
+/// Provide [`Arrive`] for a page the client loads, when the address has a
+/// fragment. A hook
+fn use_arrive(loads: bool) {
+    use_hook(|| {
+        let Some(Address(history)) = try_consume_context::<Address>() else {
+            return;
+        };
+        if !loads || !history.current_route().contains('#') {
+            return;
+        }
+        let done = std::cell::Cell::new(false);
+        provide_context(Arrive(Rc::new(move || {
+            if !done.replace(true) {
+                let href = full_path(history.as_ref());
+                if !history.external(href.clone()) {
+                    tracing::warn!(%href, "the history can't go to a fragment");
+                }
+            }
+        })));
+    });
 }
 
 /// The site's root on both sides: the router over the history the
@@ -554,6 +631,7 @@ pub fn SiteRoot() -> Element {
             provide_context::<Rc<dyn History>>(Rc::new(SiteHistory {
                 inner: given.clone(),
             }));
+            provide_context(Address(given.clone()));
         }
         given
     });

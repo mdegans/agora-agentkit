@@ -1062,3 +1062,123 @@ async fn a_failed_or_missing_comment_says_so() {
     );
     assert_eq!(client.titles.borrow().last().unwrap(), "Not found — Agora");
 }
+
+/// A comment read whose root post, ancestor and comment each hold an
+/// absolute link to the site's own feed
+fn chain_with_own_links() -> crate::responses::CommentChainResponse {
+    let mut read = fixtures::comment_chain();
+    if let Some(root) = &mut read.root {
+        root.body = format!("The post. [The feed]({OWN_FEED})");
+    }
+    let mut ancestor = read.chain[0].clone();
+    ancestor.id = "c0ffee00-0000-4000-8000-000000000001".parse().unwrap();
+    ancestor.body = format!("An ancestor. [The feed]({OWN_FEED})");
+    read.chain[0].parent_comment_id = Some(ancestor.id);
+    read.chain[0].body = format!("The comment. [The feed]({OWN_FEED})");
+    read.chain.insert(0, ancestor);
+    read
+}
+
+/// A comment on its site: every body's absolute link to the site (the
+/// root post's, an ancestor's, the comment's) gets the site's `rel`
+/// through the router, as without one, and the client's first render is
+/// the server's
+#[tokio::test]
+async fn a_comment_on_its_site_keeps_its_links_rel_under_the_router() {
+    use crate::ui::markdown::{LINK_REL, SITE_LINK_REL};
+    let read = chain_with_own_links();
+    let id = read.chain[1].id;
+    let page: Page = CommentPage::loaded(id, read).at(&site()).into();
+    let routed = ssr::render(base(), page.clone().public()).unwrap().html;
+    let ours = format!("rel=\"{SITE_LINK_REL}\"");
+    assert_eq!(routed.matches(&ours).count(), 3, "{routed}");
+    assert!(!routed.contains(LINK_REL), "{routed}");
+    assert_eq!(
+        without_markers(&routed),
+        without_markers(&pre_render(PageIsland, page.clone()))
+    );
+    let client = Client::new(&format!("/comment/{id}"), page);
+    assert_eq!(client.html(), routed);
+}
+
+/// After a navigation, a comment the client loads is on the site the
+/// client gave (`PageData::at`): its bodies' own links get the site's
+/// `rel`; with no site, the plain one
+#[tokio::test]
+async fn a_comment_loaded_after_a_navigation_is_on_the_site() {
+    use crate::ui::markdown::{LINK_REL, SITE_LINK_REL};
+    for (given, rel) in [(true, SITE_LINK_REL), (false, LINK_REL)] {
+        let mut client = Client::with_data("/feed?sort=date", |api| {
+            let data = PageData::client(feed_page(), api);
+            if given { data.at(&site()) } else { data }
+        });
+        *client.api.comment.borrow_mut() =
+            Some(CommentLoad::Loaded(Box::new(chain_with_own_links())));
+        client.settle(|_| false).await;
+        let id = chain_with_own_links().chain[1].id;
+        client.go(AgoraLink::comment(id));
+        let html = client.settle(|_| false).await;
+        assert!(html.contains("The comment."), "{html}");
+        assert_eq!(
+            html.matches(&format!("rel=\"{rel}\"")).count(),
+            3,
+            "{given}: {html}"
+        );
+    }
+}
+
+/// "See it in its thread" from a comment's page: the address gets the
+/// comment's fragment, the thread is read and drawn, and then (only then,
+/// once) the history is asked to open the address as it is, which a
+/// browser does by going to the fragment; with no fragment, it isn't asked
+#[tokio::test]
+async fn a_link_to_a_comment_in_its_thread_goes_there_after_the_load() {
+    let read = fixtures::comment_chain();
+    let id = read.chain[0].id;
+    let page: Page = CommentPage::loaded(id, read.clone()).into();
+    let mut client = Client::new(&format!("/comment/{id}"), page.clone());
+    client.settle(|_| false).await;
+    let html = client.html();
+    let anchored = format!("/agora/post/{}#comment-{id}", read.post_id);
+    assert!(html.contains(&format!(r#"href="{anchored}""#)), "{html}");
+    let scope = PAGE_SCOPE.get().unwrap();
+    client.dom.in_scope(scope, || {
+        // What `To`'s `Link` pushes for a link with a fragment
+        navigator().push(NavigationTarget::Internal(format!(
+            "/post/{}#comment-{id}",
+            read.post_id
+        )));
+    });
+    client.render();
+    assert_eq!(
+        client.log(),
+        vec![format!("push /post/{}#comment-{id}", read.post_id)]
+    );
+    let html = client.settle(|_| false).await;
+    assert!(html.contains("The body of A fetched post"), "{html}");
+    assert_eq!(client.log()[1..], [format!("external {anchored}")]);
+    client.settle(|_| false).await;
+    assert_eq!(client.log().len(), 2, "once: {:?}", client.log());
+
+    // No fragment: nowhere to go
+    let mut client = Client::new(&format!("/comment/{id}"), page);
+    client.settle(|_| false).await;
+    client.go(AgoraLink::post(read.post_id));
+    client.settle(|_| false).await;
+    assert_eq!(client.log().len(), 1, "{:?}", client.log());
+}
+
+/// Outside a router the link is a plain `<a>` to the anchor
+#[test]
+fn a_link_to_a_place_on_a_page_without_a_router() {
+    #[component]
+    fn One(link: AgoraLink) -> Element {
+        rsx! { To { link, fragment: "comment-x", "In its thread" } }
+    }
+    let link = AgoraLink::post(fixtures::post().id);
+    let html = pre_render(One, OneProps { link: link.clone() });
+    assert!(
+        html.contains(&format!(r#"<a href="{}#comment-x""#, link.site_path())),
+        "{html}"
+    );
+}
