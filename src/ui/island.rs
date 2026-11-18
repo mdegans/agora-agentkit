@@ -80,6 +80,13 @@ pub trait Public {
     fn public(self) -> Self;
 }
 
+/// SPIKE: a page with no data (the router's pages without one)
+impl<P: Public> Public for Option<P> {
+    fn public(self) -> Self {
+        self.map(Public::public)
+    }
+}
+
 /// `props`' public form ([`Public`]) as the text of the data block: JSON
 /// with no `<`, `>`, `&`, U+2028 or U+2029 left in it
 pub fn to_script_text<P: Serialize + Public + Clone>(

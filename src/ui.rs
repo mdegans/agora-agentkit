@@ -144,9 +144,36 @@ pub mod markdown;
 pub mod page;
 #[cfg(all(test, feature = "dioxus-ssr"))]
 mod parse_check;
+#[cfg(feature = "router")]
+pub mod route;
 #[cfg(feature = "dioxus-ssr")]
 pub mod ssr;
 pub mod thread;
+
+/// SPIKE: a link between pages, client-side under the router
+/// ([`route::To`]); a plain `<a>` in a build without it
+#[cfg(feature = "router")]
+pub(crate) fn site_link(
+    link: crate::links::AgoraLink,
+    _href: String,
+    class: &'static str,
+    children: dioxus::prelude::Element,
+) -> dioxus::prelude::Element {
+    use dioxus::prelude::*;
+    rsx! { route::To { link, class, {children} } }
+}
+
+/// SPIKE: see the `router` build's
+#[cfg(not(feature = "router"))]
+pub(crate) fn site_link(
+    _link: crate::links::AgoraLink,
+    href: String,
+    class: &'static str,
+    children: dioxus::prelude::Element,
+) -> dioxus::prelude::Element {
+    use dioxus::prelude::*;
+    rsx! { a { class, href: "{href}", {children} } }
+}
 
 /// How a client gets a page's data again (a Refresh button), provided as
 /// Dioxus context. The server provides none, so a press before hydration

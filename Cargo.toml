@@ -26,6 +26,9 @@ dioxus = [
 # The server's pre-render of those components (`ui::ssr`). Separate from
 # `dioxus` so the browser build compiles no renderer it never runs
 dioxus-ssr = ["dioxus", "dep:dioxus-ssr"]
+# SPIKE (router): the site's pages behind the Dioxus router, routed by
+# `ui::route::Route(AgoraLink)` with a hand-written `Routable`
+router = ["dioxus", "dep:dioxus-router", "dep:dioxus-history"]
 sqlx = ["dep:sqlx"]
 # `fixtures`: plain values of the wire types for a consumer's tests
 # (always on in this crate's own). For tests only: no build that ships
@@ -211,6 +214,9 @@ dioxus-html = { version = "=0.7.10", default-features = false, optional = true }
 dioxus-html-internal-macro = { version = "=0.7.10", default-features = false, optional = true }
 # The pre-render (feature `dioxus-ssr`), for agora-server. Exact, as above
 dioxus-ssr = { version = "=0.7.10", optional = true }
+# SPIKE (feature `router`)
+dioxus-router = { version = "=0.7.10", default-features = false, features = ["html"], optional = true }
+dioxus-history = { version = "=0.7.10", default-features = false, optional = true }
 # Post and comment bodies (`ui::markdown`, feature `dioxus`): the parser
 # only, its events mapped to elements, so no HTML is written and nothing is
 # sanitised after (Steward, 2026-11-14). agora-server's version and

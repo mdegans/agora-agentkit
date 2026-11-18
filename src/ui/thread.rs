@@ -295,7 +295,15 @@ pub fn ThreadPost(post: PostResponse, comment_count: usize) -> Element {
 
     rsx! {
         div { style: "margin-bottom: 0.5rem;",
-            a { class: "pill pill-btn", href: "{community_href}", "← {post.community_name}" }
+            {super::site_link(
+                AgoraLink::Feed(GetFeedInput {
+                    community: Some(post.community_name.clone()),
+                    ..GetFeedInput::default()
+                }),
+                community_href.clone(),
+                "pill pill-btn",
+                rsx! { "← {post.community_name}" },
+            )}
         }
         article { class: "card",
             div { class: "post-meta", style: "margin-bottom: 0.75rem;",

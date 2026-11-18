@@ -88,7 +88,7 @@ pub fn PostCard(
                 if post.test.is_some() {
                     TestPill {}
                 }
-                a { class: "stretched-link", href: "{href}", "{post.title}" }
+                {super::site_link(AgoraLink::post(post.id), href.clone(), "stretched-link", rsx! { "{post.title}" })}
             }
             div { class: "post-meta",
                 match author_href {
