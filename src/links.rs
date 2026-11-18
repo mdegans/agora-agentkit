@@ -649,7 +649,7 @@ pub fn site() -> Option<&'static Url> {
 
 /// Whether `page` is on `site`: the same origin, or `http://` on the same
 /// host as an `https://` site (betas of 0.116.0: refused as "not this site")
-fn same_site(page: &Url, site: &Url) -> bool {
+pub(crate) fn same_site(page: &Url, site: &Url) -> bool {
     page.origin() == site.origin()
         || (page.scheme() == "http"
             && site.scheme() == "https"

@@ -74,6 +74,8 @@ use pulldown_cmark::{
     CodeBlockKind, CowStr, Event, HeadingLevel, LinkType, Options, Parser, Tag,
 };
 
+use url::Url;
+
 use crate::links::AgoraLink;
 
 /// The schemes a link may have, agora-server's sanitiser's (Steward,
@@ -164,11 +166,21 @@ pub(crate) fn options() -> Options {
     Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH
 }
 
+/// The website a body is drawn on, as context for [`Markdown`]: an
+/// absolute link to one of its pages is the site's own ([`is_on_site`]).
+/// Without it (or with `None`) only a relative link is. It comes from the
+/// page's data ([`ThreadPage::site`](super::thread::ThreadPage::site)), so
+/// the server's render and the client's agree
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Site(pub Option<Url>);
+
 /// `source` as markdown, drawn as elements: a fragment of blocks, for the
-/// caller's container (`div { class: "markdown-body", … }`)
+/// caller's container (`div { class: "markdown-body", … }`). Its links'
+/// `rel` reads the [`Site`] in context
 #[component]
 pub fn Markdown(source: String) -> Element {
-    let nodes = parse(&source);
+    let site = try_use_context::<Site>().and_then(|site| site.0);
+    let nodes = parse_at(&source, site.as_ref());
     rsx! {
         {nodes.iter().map(node)}
     }
@@ -176,15 +188,16 @@ pub fn Markdown(source: String) -> Element {
 
 /// `source` drawn as HTML with no hydration markers: a body for a page
 /// that isn't hydrated (the server's own pages), the same elements as
-/// [`Markdown`]
+/// [`Markdown`] on `site`
 #[cfg(feature = "dioxus-ssr")]
-pub fn to_html(source: &str) -> String {
+pub fn to_html(source: &str, site: Option<&Url>) -> String {
     let mut dom = VirtualDom::new_with_props(
         Markdown,
         MarkdownProps {
             source: source.to_string(),
         },
-    );
+    )
+    .with_root_context(Site(site.cloned()));
     dom.rebuild_in_place();
     dioxus_ssr::render(&dom)
 }
@@ -305,6 +318,8 @@ struct Builder {
     /// The tables passed [`TABLE_CELLS`]: the table being built loses its
     /// rows' trailing empty cells
     ragged: bool,
+    /// The website the body is drawn on ([`Site`])
+    site: Option<Url>,
 }
 
 /// How many empty cells end `cells`
@@ -318,9 +333,15 @@ fn trailing_empty(cells: &[Node]) -> usize {
         .count()
 }
 
-/// `source`'s tree
+/// `source`'s tree, on no known site
+#[cfg(test)]
 pub(crate) fn parse(source: &str) -> Vec<Node> {
-    let mut b = Builder::new(source.len());
+    parse_at(source, None)
+}
+
+/// `source`'s tree, on `site` ([`Site`])
+pub(crate) fn parse_at(source: &str, site: Option<&Url>) -> Vec<Node> {
+    let mut b = Builder::new(source.len(), site.cloned());
     for event in Parser::new_ext(source, options()) {
         b.event(event);
     }
@@ -328,9 +349,10 @@ pub(crate) fn parse(source: &str) -> Vec<Node> {
 }
 
 impl Builder {
-    /// A builder for a source of `len` bytes
-    fn new(len: usize) -> Self {
+    /// A builder for a source of `len` bytes, drawn on `site`
+    fn new(len: usize, site: Option<Url>) -> Self {
         Self {
+            site,
             root: Vec::new(),
             frames: Vec::new(),
             open: Vec::new(),
@@ -645,7 +667,9 @@ impl Builder {
         escape_href(&mut href, &dest);
         let href = allowed(&href).then_some(href);
         let rel = match &href {
-            Some(href) if agora || is_on_site(href) => SITE_LINK_REL,
+            Some(href) if agora || is_on_site(href, self.site.as_ref()) => {
+                SITE_LINK_REL
+            }
             _ => LINK_REL,
         };
         // As a browser reads an attribute's NUL, and the server's sanitiser
@@ -695,15 +719,27 @@ fn on_site(dest: &str) -> (CowStr<'_>, bool) {
     }
 }
 
-/// Whether an allowed `href` stays on Agora: a fragment, a query, or a
-/// path from the root (`/…`, not `//host`, which is another site). Not
-/// every relative URL: `page.html` and `//host/x` are relative too
-pub fn is_on_site(href: &str) -> bool {
+/// Whether an allowed `href` stays on Agora: a fragment, a query, a path
+/// from the root (`/…`, not `//host`, which is another site), or, with
+/// `site` known, an `http(s)` URL on it with no user or password: the
+/// site's origin as [`AgoraLink::parse_at`] reads a page URL (`http://` on
+/// an `https://` site's host too), compared as parsed, so case and a
+/// default port are the site's and a trailing dot, another port or a host
+/// that merely begins with the site's are not. Not every relative URL:
+/// `page.html` and `//host/x` are relative too
+pub fn is_on_site(href: &str, site: Option<&Url>) -> bool {
     match href.as_bytes() {
         [b'#' | b'?', ..] => true,
         [b'/', next, ..] => *next != b'/',
         [b'/'] => true,
-        _ => false,
+        _ => site.is_some_and(|site| {
+            Url::parse(href).is_ok_and(|url| {
+                matches!(url.scheme(), "http" | "https")
+                    && url.username().is_empty()
+                    && url.password().is_none()
+                    && crate::links::same_site(&url, site)
+            })
+        }),
     }
 }
 

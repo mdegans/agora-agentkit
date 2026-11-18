@@ -37,7 +37,7 @@ use super::{
     badges::Badges,
     feed::{TestPill, post_author, public},
     format,
-    markdown::Markdown,
+    markdown::{Markdown, Site},
 };
 use crate::{
     enums::RemovedBy,
@@ -600,6 +600,10 @@ pub struct ThreadPage {
     /// The post the page is, for a client that loads it
     pub post: PostId,
     pub thread: ThreadLoad,
+    /// The website the page is on, whose absolute links in bodies are its
+    /// own ([`Site`]); set with [`at`](Self::at)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub site: Option<url::Url>,
 }
 
 impl ThreadPage {
@@ -609,6 +613,7 @@ impl ThreadPage {
         Self {
             post: read.post.id,
             thread: ThreadLoad::Loaded(Box::new(public_read(read))),
+            site: None,
         }
     }
 
@@ -620,7 +625,18 @@ impl ThreadPage {
             }
             other => other,
         };
-        Self { post, thread }
+        Self {
+            post,
+            thread,
+            site: None,
+        }
+    }
+
+    /// The page on `site` (agora-server's public URL): a body's absolute
+    /// links to its pages get [`SITE_LINK_REL`](super::markdown::SITE_LINK_REL)
+    pub fn at(mut self, site: &url::Url) -> Self {
+        self.site = Some(site.clone());
+        self
     }
 
     /// The page's own path, `/agora/post/<id>`
@@ -684,6 +700,7 @@ impl super::island::Public for ThreadPage {
 /// [`Reload<ThreadLoad>`] a client provides when it mounts without it
 #[allow(non_snake_case)]
 pub fn ThreadIsland(page: ThreadPage) -> Element {
+    use_context_provider(|| Site(page.site.clone()));
     let reload = try_use_context::<Reload<ThreadLoad>>();
     let href = page.href();
     let mut thread = use_signal(|| page.thread.clone());

@@ -467,10 +467,12 @@ fn the_first_render_is_the_servers() {
         ThreadPage {
             post: POST.parse().unwrap(),
             thread: ThreadLoad::Pending,
+            site: None,
         },
         ThreadPage {
             post: POST.parse().unwrap(),
             thread: ThreadLoad::Failed("Agora couldn't be reached".into()),
+            site: None,
         },
     ] {
         let server = island_of(thread.clone());
@@ -520,6 +522,7 @@ async fn a_fresh_mount_loads_through_its_reload() {
         ThreadPage {
             post: POST.parse().unwrap(),
             thread: ThreadLoad::Pending,
+            site: None,
         },
     );
     dom.provide_root_context(Reload::<ThreadLoad>::new(move || {
@@ -553,6 +556,7 @@ fn a_failed_thread_offers_a_link_to_try_again() {
     let html = island_of(ThreadPage {
         post: POST.parse().unwrap(),
         thread: ThreadLoad::Failed("Agora couldn't be reached".into()),
+        site: None,
     });
     assert!(html.contains(r#"role="alert""#), "{html}");
     assert!(html.contains("Agora couldn&#39;t be reached"), "{html}");
@@ -607,6 +611,7 @@ fn hostile_text_is_inert() {
     let plain_error = island_of(ThreadPage {
         post: POST.parse().unwrap(),
         thread: ThreadLoad::Failed(PLAIN.into()),
+        site: None,
     });
     for hostile in HOSTILE {
         let page = with(hostile);
@@ -628,6 +633,7 @@ fn hostile_text_is_inert() {
         let error = island_of(ThreadPage {
             post: POST.parse().unwrap(),
             thread: ThreadLoad::Failed((*hostile).into()),
+            site: None,
         });
         assert_eq!(error, plain_error.replace(PLAIN, &escaped(hostile)));
     }

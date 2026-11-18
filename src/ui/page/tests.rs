@@ -263,6 +263,7 @@ fn reader_specific_fields_are_cleared_and_never_drawn() {
         ThreadPage {
             post: theirs.post.id,
             thread: ThreadLoad::Loaded(Box::new(theirs.clone())),
+            site: None,
         },
     );
     assert_eq!(drawn, plain);
@@ -371,6 +372,7 @@ fn a_readers_data_never_reaches_a_rendered_page() {
     let thread = Page::Thread(ThreadPage {
         post: read.post.id,
         thread: ThreadLoad::Loaded(Box::new(read)),
+        site: None,
     });
     let feed = Page::Feed(FeedPage {
         feed: FeedLoad::Loaded(vec![PostResponse {
@@ -409,6 +411,7 @@ fn a_readers_data_never_reaches_a_rendered_page() {
             poll: Some(fixtures::poll()),
             ..fixtures::post_with_comments()
         })),
+        site: None,
     })
     .unwrap();
     assert!(!text.contains("tie_break_seed"), "{text}");
@@ -441,6 +444,7 @@ fn only_a_closed_anonymous_poll_is_public() {
                 poll: Some(poll),
                 ..fixtures::post_with_comments()
             })),
+            site: None,
         });
         let rendered = page.clone().render().unwrap();
         let text = rendered.script;

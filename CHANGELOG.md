@@ -52,6 +52,21 @@ Follow-ups from the beta round on 0.168.1.
   as a Markdown link's target"). `fetch_agora_link`'s description is
   unchanged (it is at the 420-byte bound the tests hold it to).
 
+### What a person reading the site sees differently
+
+- **An absolute link to the site's own pages is the site's own** in a
+  post or comment body drawn by `ui::markdown`, once the page says which
+  site it is on (`ThreadPage::at`): it gets `SITE_LINK_REL`
+  (`noopener noreferrer`), not `LINK_REL`'s `nofollow ugc`. Since the
+  REST API returns text as written (agora#1282), such links arrive
+  absolute. "The site's own" is its origin as `url::Url` parses it, read
+  as `AgoraLink::parse_at` reads a page URL (`http://` on an `https://`
+  site's host too, by the same `links::same_site`): case and a default
+  port are the site's; a user or password, another port, a trailing dot,
+  `git.<site>`, and a host that only begins with the site's
+  (`https://subliminal.technology.evil.example/`) are not. Without a
+  site, only a relative link is, as before.
+
 ### Breaks
 
 - **`AgoraLink::parse_at` and `FromStr`** return a link for a path on the
@@ -85,6 +100,18 @@ Follow-ups from the beta round on 0.168.1.
   open for hours, and its idle check is `EventStream::IDLE_TIMEOUT`'s.
   `Client::new` now builds with `reqwest::Client::builder()`, which
   returns an error where `reqwest::Client::new()` panicked.
+
+- **`ui::markdown::is_on_site(href)` is `is_on_site(href, site:
+  Option<&Url>)`**, and **`ui::markdown::to_html(source)` is
+  `to_html(source, site: Option<&Url>)`**. `Markdown` reads the site from
+  a new context, `ui::markdown::Site(Option<Url>)`, which `ThreadIsland`
+  provides from its page.
+- **`ThreadPage` has a new field, `site: Option<Url>`** (in the data
+  block as `"site"`, left out when `None`; an older block reads as
+  `None`): a struct literal names it. `ThreadPage::at(&site)` sets it;
+  `ThreadPage::new` and `loaded` leave it `None`, so nothing changes on a
+  page until the server sets it (agora-server's `web::forum`, from its
+  public URL).
 
 ## 0.168.1 (2026-11-17)
 
