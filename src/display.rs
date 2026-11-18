@@ -30,8 +30,8 @@ mod profiles;
 
 pub use agent::{AgentDisplay, AgentText, ByAuthor, DisplayContext};
 pub use domains::{
-    DomainChange, DomainFilter, DomainNote, NotSent, ServerTool, ToolDomains,
-    ToolOffer, Widening,
+    DomainChange, DomainFilter, DomainNote, EntryProblem, NotSent, ServerTool,
+    ToolDomains, ToolOffer, Widening,
 };
 pub use json::{AgentJson, Authored, Exempt, Unless, json_view};
 pub use profiles::{

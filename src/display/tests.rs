@@ -3189,3 +3189,176 @@ fn shows_defanged_sees_every_form_the_defanger_emits() {
     }
     assert!(!shows_defanged("Code on github.com and www.example.org"));
 }
+
+// ── A hand-written domain list entry ───────────────────────────────────
+
+/// The seed runner's cases for an operator's `allowed_domains` /
+/// `blocked_domains` entry (agora-agents, `an_operators_entry_the_api_would_refuse_stops_the_load`),
+/// each reason its message's start there
+#[test]
+fn a_hand_written_entry_the_api_would_refuse_or_never_match() {
+    use ServerTool::{WebFetch, WebSearch};
+    for (tool, entry, problem, starts) in [
+        (
+            WebFetch,
+            "https://a.example",
+            EntryProblem::Scheme,
+            "has a scheme",
+        ),
+        (
+            WebSearch,
+            "http://a.example/blog",
+            EntryProblem::Scheme,
+            "has a scheme",
+        ),
+        (
+            WebFetch,
+            "*.a.example",
+            EntryProblem::WildcardDomain,
+            "has a wildcard in the domain",
+        ),
+        (
+            WebSearch,
+            "ex*.com",
+            EntryProblem::WildcardDomain,
+            "has a wildcard in the domain",
+        ),
+        (
+            WebFetch,
+            "a.example/blog",
+            EntryProblem::FetchPath,
+            "has a path: web fetch matches the domain alone",
+        ),
+        (
+            WebSearch,
+            "аmazon.com",
+            EntryProblem::NotAscii,
+            "is not ASCII",
+        ),
+        (
+            WebSearch,
+            "a.example:8080",
+            EntryProblem::Port,
+            "has a port",
+        ),
+        (
+            WebFetch,
+            "a .example",
+            EntryProblem::Whitespace,
+            "has whitespace",
+        ),
+        (WebFetch, "", EntryProblem::Empty, "is empty"),
+        (
+            WebSearch,
+            ".a.example",
+            EntryProblem::NotDomainName,
+            "is not a domain name",
+        ),
+        (
+            WebFetch,
+            "localhost",
+            EntryProblem::NotDomainName,
+            "is not a domain name",
+        ),
+        (
+            WebFetch,
+            "10.0.0.1",
+            EntryProblem::NotDomainName,
+            "is not a domain name",
+        ),
+        (
+            WebSearch,
+            "a_b.example",
+            EntryProblem::NotDomainName,
+            "is not a domain name",
+        ),
+    ] {
+        assert_eq!(
+            tool.entry_problem(entry),
+            Some(problem),
+            "{tool}: {entry:?}"
+        );
+        assert!(problem.to_string().starts_with(starts), "{problem}");
+    }
+    // The runner's entries that load: the docs' own path examples, and
+    // upper case
+    for entry in [
+        "example.com/blog",
+        "example.com/*",
+        "example.com/*/articles",
+        "Example.COM",
+    ] {
+        assert_eq!(WebSearch.entry_problem(entry), None, "{entry:?}");
+    }
+    assert_eq!(WebFetch.entry_problem("Example.COM"), None);
+    assert_eq!(WebFetch.entry_problem("good.example"), None);
+}
+
+#[test]
+fn a_hand_written_entry_the_domain_rules_refuse() {
+    use ServerTool::{WebFetch, WebSearch};
+    let label = "a".repeat(63);
+    let long = [label.as_str(); 4].join(".");
+    for entry in [
+        "example.",
+        "a..example",
+        "-a.example",
+        "a-.example",
+        "example.123",
+        &format!("{label}a.example"),
+        &long,
+        "[::1]",
+        "a.example\t",
+    ] {
+        for tool in [WebFetch, WebSearch] {
+            assert!(tool.entry_problem(entry).is_some(), "{tool}: {entry:?}");
+        }
+    }
+    let longest = format!("{label}.{label}.{label}.{}", "a".repeat(61));
+    assert_eq!(longest.len(), 253);
+    for entry in [
+        format!("{label}.example"),
+        longest,
+        "xn--bcher-kva.example".into(),
+        "a-b.1x.example".into(),
+    ] {
+        for tool in [WebFetch, WebSearch] {
+            assert_eq!(tool.entry_problem(&entry), None, "{tool}: {entry:?}");
+        }
+    }
+    // Web fetch refuses any path, even the bare slash
+    assert_eq!(
+        WebFetch.entry_problem("example.com/"),
+        Some(EntryProblem::FetchPath)
+    );
+    assert_eq!(WebSearch.entry_problem("example.com/"), None);
+}
+
+/// What a policy sends always passes the hand-written rule, and the rule
+/// keeps the notes' reasons for a host it refuses
+#[test]
+fn every_entry_sent_is_one_the_hand_written_rule_takes() {
+    let links = allow(&[
+        "https://docs.rs/serde",
+        "https://example.net:8443/a",
+        "https://*.example.org",
+        "https://en.wikipedia.org/wiki/Main_Page",
+        "https://bücher.example",
+        "https://a_b.example.org",
+        "http://localhost",
+    ]);
+    let raw = deny(&["https://bad.example", "https://worse.example/x"]);
+    for domains in [both(&links), both(&raw)].into_iter().flatten() {
+        let tool = domains.tool();
+        for entry in sent(&domains) {
+            assert_eq!(tool.entry_problem(entry), None, "{tool}: {entry}");
+        }
+    }
+    // A host whose last label is all digits never reaches `sendable` as
+    // a domain: the parse reads it as an address, or refuses it
+    assert!("https://a.123".parse::<LinkRule>().is_err());
+    assert!(matches!(
+        rule("https://1.2.3.4").url.host(),
+        Some(url::Host::Ipv4(_))
+    ));
+}

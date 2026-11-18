@@ -70,6 +70,111 @@ pub enum ServerTool {
     WebSearch,
 }
 
+impl ServerTool {
+    /// What is wrong with `entry` as one entry of this tool's
+    /// `allowed_domains` or `blocked_domains`, as the module docs state the
+    /// rule, or `None` if it may be sent: a domain name (any letter case),
+    /// and for web search, optionally a path. The entries [`ToolDomains`]
+    /// makes always pass. For an entry written by hand (an operator's), to
+    /// refuse at load what would fail every request or never match
+    pub fn entry_problem(&self, entry: &str) -> Option<EntryProblem> {
+        if entry.is_empty() {
+            return Some(EntryProblem::Empty);
+        }
+        if !entry.is_ascii() {
+            return Some(EntryProblem::NotAscii);
+        }
+        if entry.chars().any(char::is_whitespace) {
+            return Some(EntryProblem::Whitespace);
+        }
+        if entry.contains("://") {
+            return Some(EntryProblem::Scheme);
+        }
+        let (host, path) = match entry.split_once('/') {
+            Some((host, _)) => (host, true),
+            None => (entry, false),
+        };
+        if host.contains('*') {
+            return Some(EntryProblem::WildcardDomain);
+        }
+        if host.contains(':') {
+            return Some(EntryProblem::Port);
+        }
+        if !domain_name(host) {
+            return Some(EntryProblem::NotDomainName);
+        }
+        if *self == Self::WebFetch && path {
+            return Some(EntryProblem::FetchPath);
+        }
+        None
+    }
+}
+
+/// Why a hand-written entry cannot be sent to a tool
+/// ([`ServerTool::entry_problem`]). Each says what to write instead,
+/// following the entry (`"x" has a port; …`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, thiserror::Error)]
+#[non_exhaustive]
+pub enum EntryProblem {
+    #[error("is empty; write a domain (`example.com`), or remove the entry")]
+    Empty,
+    #[error(
+        "is not ASCII: the docs warn that a non-ASCII domain can pass for \
+         another (a homograph); write its `xn--` form"
+    )]
+    NotAscii,
+    #[error("has whitespace; write the domain without it (`example.com`)")]
+    Whitespace,
+    #[error(
+        "has a scheme: write the bare domain (`example.com`, not \
+         `https://example.com`)"
+    )]
+    Scheme,
+    #[error(
+        "has a wildcard in the domain, which the API refuses; `example.com` \
+         already covers its subdomains"
+    )]
+    WildcardDomain,
+    #[error(
+        "has a port; write the domain without it (`example.com`, not \
+         `example.com:8080`)"
+    )]
+    Port,
+    #[error(
+        "is not a domain name of two labels or more of letters, digits and \
+         inner hyphens (an address or a single label like `localhost` is \
+         not one)"
+    )]
+    NotDomainName,
+    #[error(
+        "has a path: web fetch matches the domain alone, so this entry would \
+         never match; write the domain alone (`example.com`; paths are for \
+         web search)"
+    )]
+    FetchPath,
+}
+
+/// Two labels or more of letters (either case), digits and inner hyphens,
+/// the last not all digits (an address), within the lengths a domain name
+/// has
+fn domain_name(host: &str) -> bool {
+    let label_ok = |label: &str| {
+        (1..=MAX_LABEL_BYTES).contains(&label.len())
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    };
+    let labels: Vec<&str> = host.split('.').collect();
+    labels.len() >= 2
+        && host.len() <= MAX_DOMAIN_BYTES
+        && labels.iter().all(|label| label_ok(label))
+        && !labels
+            .last()
+            .is_some_and(|last| last.bytes().all(|b| b.is_ascii_digit()))
+}
+
 impl fmt::Display for ServerTool {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
@@ -389,8 +494,8 @@ fn blocked(rules: &[LinkRule], tool: ServerTool) -> ToolDomains {
 /// The rule's domain as an entry (without the `*.` of a wildcard), or why
 /// it cannot be one. The parse has made it lower case and ASCII (an
 /// internationalised name is its `xn--` form) and taken off a trailing
-/// dot; this checks it is a domain name all the same, since one bad entry
-/// fails every request
+/// dot; it is checked as any entry is ([`ServerTool::entry_problem`]) all
+/// the same, since one bad entry fails every request
 fn sendable(rule: &LinkRule) -> Result<&str, NotSent> {
     let domain = match rule.url.host() {
         Some(Host::Domain(domain)) => domain,
@@ -398,22 +503,12 @@ fn sendable(rule: &LinkRule) -> Result<&str, NotSent> {
         // A rule is http or https, which always has a host
         None => return Err(NotSent::NotHostName),
     };
-    let labels: Vec<&str> = domain.split('.').collect();
-    if labels.len() < 2 {
-        return Err(NotSent::SingleLabel);
+    // Without a path, the same for both tools
+    match ServerTool::WebFetch.entry_problem(domain) {
+        None => Ok(domain),
+        Some(_) if !domain.contains('.') => Err(NotSent::SingleLabel),
+        Some(_) => Err(NotSent::NotHostName),
     }
-    let label_ok = |label: &str| {
-        (1..=MAX_LABEL_BYTES).contains(&label.len())
-            && !label.starts_with('-')
-            && !label.ends_with('-')
-            && label
-                .bytes()
-                .all(|b| matches!(b, b'a'..=b'z' | b'0'..=b'9' | b'-'))
-    };
-    if domain.len() > MAX_DOMAIN_BYTES || !labels.into_iter().all(label_ok) {
-        return Err(NotSent::NotHostName);
-    }
-    Ok(domain)
 }
 
 /// The rule's path as an entry's (`/a/b`, without a trailing slash), when
