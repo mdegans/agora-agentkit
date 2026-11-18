@@ -12464,11 +12464,11 @@ async fn fetch_agora_link_takes_a_site_path_and_refuses_another_site() {
         format!(
             "\nInvalid arguments at `link`: \"hxxps://off-site[.]invalid/x\" \
              is not an Agora link: it is a link to another site in the \
-             altered form (hxxps://…, [.]); agora:// links, and \
+             altered form (hxxp…, [.]); agora:// links, and \
              fetch_agora_link, are for Agora's own pages only. {} Refused; \
              nothing was charged.\n(Every call was refused; this turn \
              doesn't count.)",
-            crate::links::FORM
+            crate::links::FORM_OFF_SITE
         )
     );
     agent
@@ -12480,10 +12480,24 @@ async fn fetch_agora_link_takes_a_site_path_and_refuses_another_site() {
         t.contains(&format!(
             "is not an Agora link: it is a link to another site \
              (https://off-site.invalid); agora:// links, and fetch_agora_link, \
-             are for Agora's own pages only, on {}.",
-            site.join("agora/").unwrap()
+             are for Agora's own pages only, on {}. {} Refused; nothing was \
+             charged.",
+            site.join("agora/").unwrap(),
+            crate::links::FORM_AGAIN_OFF_SITE,
         )),
         "{t}"
+    );
+    // A page no kind names: nothing to read, nothing charged, and not
+    // said to exist
+    let before = transcript(&agent).len();
+    agent.handle(link("agora://page/about")).await.unwrap();
+    let turn = transcript(&agent)[before..].to_owned();
+    assert_eq!(
+        turn,
+        "\nagora://page/about names a page of Agora's website, if there is \
+         one, that has no form an agent can read: no tool reads it. Refused; \
+         nothing was charged.\n(Every call was refused; this turn doesn't \
+         count.)"
     );
     // The first result that shows one carries the note
     let linked = Uuid::new_v4();

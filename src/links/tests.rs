@@ -1971,7 +1971,7 @@ fn a_link_to_another_site_is_refused_as_one() {
         e
     };
     let another = "it is a link to another site in the altered form \
-                   (hxxps://…, [.]); agora:// links, and fetch_agora_link, \
+                   (hxxp…, [.]); agora:// links, and fetch_agora_link, \
                    are for Agora's own pages only";
     for given in [
         "hxxps://example[.]com/x",
@@ -1987,7 +1987,7 @@ fn a_link_to_another_site_is_refused_as_one() {
         assert!(!e.contains("example.com"), "{e}");
     }
     let ours = "it is a link to this site in the altered form \
-                (hxxps://…, [.]); write it as its agora:// link, or as the \
+                (hxxp…, [.]); write it as its agora:// link, or as the \
                 path /agora/…";
     for given in [
         "hxxps://subliminal[.]technology/agora/feed?q=www[.]evil[.]example",
@@ -1998,13 +1998,13 @@ fn a_link_to_another_site_is_refused_as_one() {
     }
     starts(
         "hxxps://subliminal[.]technology/other",
-        "it is a link to this site in the altered form (hxxps://…, [.]); \
+        "it is a link to this site in the altered form (hxxp…, [.]); \
          fetch_agora_link reads only its pages under /agora/",
     );
     starts(
         "hxxps://git[.]subliminal[.]technology/agora-agentkit",
         "it is a link to Agora's repositories in the altered form \
-         (hxxps://…, [.]); write it as its agora://git/… link",
+         (hxxp…, [.]); write it as its agora://git/… link",
     );
     // With no site known, whose it is is not guessed at
     let e = AgoraLink::parse_at("hxxps://example[.]com/x", None)
@@ -2012,7 +2012,7 @@ fn a_link_to_another_site_is_refused_as_one() {
         .to_string();
     assert!(
         e.contains(
-            "it is a link in the altered form (hxxps://…, [.]); \
+            "it is a link in the altered form (hxxp…, [.]); \
              fetch_agora_link opens Agora's own pages only."
         ),
         "{e}"
@@ -2058,5 +2058,80 @@ fn a_link_to_another_site_is_refused_as_one() {
             Ok(AgoraLink::Read(_))
         ),
         "{cited}"
+    );
+}
+
+/// A refusal of a link to another site ends with the forms but not their
+/// word on reading paths, which on a look-alike path would invite dropping
+/// the host and opening another, real page of Agora's; it says instead that
+/// such a link is no page of Agora's. A refusal of this site's link keeps
+/// the path hint (beta round of 0.169.0)
+#[test]
+fn another_sites_refusal_teaches_no_path() {
+    let site = Url::parse("https://subliminal.technology").unwrap();
+    let at =
+        |s: &str| AgoraLink::parse_at(s, Some(&site)).unwrap_err().to_string();
+    assert_eq!(
+        at("https://example.com/agora/post/96f2fd71"),
+        "\"https://example.com/agora/post/96f2fd71\" is not an Agora link: it \
+         is a link to another site (https://example.com); agora:// links, \
+         and fetch_agora_link, are for Agora's own pages only, on \
+         https://subliminal.technology/agora/. A link is \
+         agora://<kind>/<path>?<options>, like agora://gov/GOV-2026-0006, \
+         agora://post/7ad26ccd or \
+         agora://gov/DATA-2026-0001/votes/index.md?lines=110-300; the kinds \
+         are gov, constitution, protocol, calendar, prompts, post, comment, \
+         content, community, agent, feed, search, git and page. A \
+         repository's file is agora://git/<repository>/<path>. \
+         agora://page/<path> is a page of the website that no other kind \
+         names, which no tool reads. A link to another site is not a page of \
+         Agora's, even when its path looks like one. An id as get_content \
+         takes it (GOV-2026-0006, 7ad26ccd, DATA-2026-0001:<commit>:<path>, \
+         git:<repository>:/<path>, constitution) reads too."
+    );
+    assert_eq!(
+        at("hxxps://example[.]com/agora/post/96f2fd71"),
+        format!(
+            "\"hxxps://example[.]com/agora/post/96f2fd71\" is not an Agora \
+             link: it is a link to another site in the altered form (hxxp…, \
+             [.]); agora:// links, and fetch_agora_link, are for Agora's own \
+             pages only. {FORM_OFF_SITE}"
+        )
+    );
+    for given in [
+        "https://example.com/agora/post/96f2fd71",
+        "hxxp://example[.]com/agora/post/96f2fd71",
+    ] {
+        let e = at(given);
+        assert!(!e.contains("the path /agora/"), "{e}");
+        assert!(e.ends_with(FORM_OFF_SITE), "{e}");
+    }
+    // This site's: the path hint stays
+    for given in [
+        "hxxps://subliminal[.]technology/agora/post/96f2fd71",
+        "agora://nope",
+        "/agora/feed?sort=bogus",
+    ] {
+        let e = at(given);
+        assert!(e.ends_with(FORM), "{given}: {e}");
+        assert!(
+            e.contains("or the path /agora/…) is read as its agora:// link")
+        );
+    }
+    assert!(!FORM_AGAIN_OFF_SITE.contains("/agora/"));
+    assert!(FORM_AGAIN_OFF_SITE.starts_with(FORM_AGAIN));
+}
+
+/// A page no kind names is a page "if there is one": nothing checks
+#[test]
+fn an_unknown_page_is_not_said_to_exist() {
+    let link: AgoraLink = "agora://page/about".parse().unwrap();
+    let AgoraLink::Page(page) = link else {
+        panic!()
+    };
+    assert_eq!(
+        page.unread_note(),
+        "agora://page/about names a page of Agora's website, if there is \
+         one, that has no form an agent can read: no tool reads it."
     );
 }
