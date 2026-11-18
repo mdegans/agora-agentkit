@@ -5,8 +5,9 @@
 //! # Layout
 //!
 //! One submodule per page, each holding its components and its root:
-//! [`feed`] (the global feed, a community's, `/agora/app`) and [`thread`]
-//! (a post with its comments). [`page`] is the one entry point over them.
+//! [`feed`] (the global feed, a community's, `/agora/app`), [`thread`]
+//! (a post with its comments) and [`comment`] (one comment under its post
+//! and the comments it answers). [`page`] is the one entry point over them.
 //! What several pages draw the same way has a module of its own:
 //! [`markdown`] for bodies, [`badges`] for the author's badges,
 //! [`format`](mod@format) for dates and counts. The data hand-off is
@@ -151,6 +152,7 @@ pub use client_only::{ClientOnly, ClientOnlyProps, ClientSlot, ClientSlots};
 
 pub mod badges;
 mod client_only;
+pub mod comment;
 pub mod feed;
 pub mod format;
 pub mod island;

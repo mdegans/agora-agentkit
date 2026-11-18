@@ -24,6 +24,7 @@ use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::{
+    comment::{CommentIsland, CommentPage},
     feed::{FeedIsland, FeedPage},
     island::Public,
     route::ClientPage,
@@ -46,6 +47,14 @@ pub enum Page {
     Feed(FeedPage),
     /// `/agora/post/<id>`
     Thread(ThreadPage),
+    /// `/agora/comment/<id>`
+    Comment(CommentPage),
+}
+
+impl From<CommentPage> for Page {
+    fn from(page: CommentPage) -> Self {
+        Self::Comment(page)
+    }
 }
 
 impl From<FeedPage> for Page {
@@ -65,6 +74,7 @@ impl super::island::Anonymous for Page {
         match self {
             Page::Feed(page) => Page::Feed(page.anonymous()),
             Page::Thread(page) => Page::Thread(page.anonymous()),
+            Page::Comment(page) => Page::Comment(page.anonymous()),
         }
     }
 }
@@ -89,6 +99,7 @@ impl Page {
         match self {
             Page::Feed(page) => page.title(),
             Page::Thread(page) => page.title(),
+            Page::Comment(page) => page.title(),
         }
     }
 
@@ -97,11 +108,13 @@ impl Page {
         document_title(&self.title())
     }
 
-    /// The website the page says it is on ([`ThreadPage::at`])
+    /// The website the page says it is on ([`ThreadPage::at`],
+    /// [`CommentPage::at`])
     pub fn site(&self) -> Option<&url::Url> {
         match self {
             Page::Feed(_) => None,
             Page::Thread(page) => page.site.as_ref(),
+            Page::Comment(page) => page.site.as_ref(),
         }
     }
 
@@ -110,6 +123,7 @@ impl Page {
         match self {
             Page::Feed(page) => ClientPage::Feed(page.input.clone()),
             Page::Thread(page) => ClientPage::Thread(page.post),
+            Page::Comment(page) => ClientPage::Comment(page.comment),
         }
     }
 }
@@ -133,6 +147,13 @@ pub fn PageIsland(page: Page) -> Element {
         },
         Page::Thread(ThreadPage { post, thread, site }) => rsx! {
             ThreadIsland { post, thread, site }
+        },
+        Page::Comment(CommentPage {
+            comment,
+            load,
+            site,
+        }) => rsx! {
+            CommentIsland { comment, load, site }
         },
     }
 }

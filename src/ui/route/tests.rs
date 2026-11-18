@@ -14,6 +14,7 @@ use crate::{
     responses::PostResponse,
     ui::{
         ClientSlot, ClientSlots, DocumentTitle,
+        comment::{COMMENT_NOT_FOUND, CommentLoad, CommentPage},
         feed::{COMMUNITY_NOT_FOUND, FeedLoad},
         island,
         page::PageIsland,
@@ -55,6 +56,7 @@ const VARIANTS: [&str; 9] = [
 ];
 
 const POST: &str = "8dbc9b3a-db55-47d5-8b14-5b913a1b44ac";
+const COMMENT: &str = "c0000001-0000-4000-8000-000000000001";
 
 /// A path below the base of every kind of link (links' own `EVERY_KIND`
 /// has neither `inbox` nor `page`, nor a post by its full id), and whether
@@ -68,14 +70,20 @@ fn every_kind() -> Vec<(String, bool)> {
         "/community/meta-governance".into(),
         "/community/meta-governance?offset=25&sort=active".into(),
         format!("/post/{POST}"),
+        // A comment by its full id with no options (the path doesn't know
+        // whether the id is a post's: the read checks)
+        format!("/comment/{COMMENT}"),
     ];
     let server = [
         // A post by its short id, or with options: `get_content`'s read
         "/post/8dbc9b3a".to_string(),
         format!("/post/{POST}?comment_budget=4096"),
         format!("/post/{POST}?detail=summary"),
-        format!("/comment/{POST}"),
+        // A comment by its short id, or with options: `get_content`'s read
+        "/comment/c0000001".into(),
+        format!("/comment/{COMMENT}?comment_budget=4096"),
         format!("/content/{POST}"),
+        format!("/content/{COMMENT}"),
         "/gov/GOV-2026-0006".into(),
         "/gov/GOV-2026-0010/clerk-reads".into(),
         "/gov/DATA-2026-0010/votes/index.md?lines=586-627&commit=89fe7c6"
@@ -248,6 +256,11 @@ fn thread_page() -> Page {
     ThreadPage::loaded(fixtures::post_with_comments()).into()
 }
 
+fn comment_page() -> Page {
+    CommentPage::loaded(fixtures::comment().id, fixtures::comment_chain())
+        .into()
+}
+
 /// `markup` as a reader's tree reads it, less what only hydration and the
 /// router's `Link` add: the markers (comments, `data-node-hydration`) and
 /// `aria-current`, with text split by markers joined again. Attributes are
@@ -283,12 +296,15 @@ fn without_markers(markup: &str) -> Vec<Tok> {
 /// the server draws are drawn as they were
 #[test]
 fn the_router_draws_each_page_as_its_root_does() {
-    for page in [feed_page(), thread_page()] {
+    for page in [feed_page(), thread_page(), comment_page()] {
         let routed = ssr::render(base(), page.clone().public()).unwrap().html;
         let alone = pre_render(PageIsland, page.clone());
         println!("ALONE:\n{alone}\nROUTED:\n{routed}\n");
         assert_eq!(without_markers(&routed), without_markers(&alone));
         assert_hydratable(&routed);
+        if matches!(page, Page::Comment(_)) {
+            continue;
+        }
         // The profile link (a page the server draws) is the same `<a>`
         assert!(
             routed.contains(
@@ -364,6 +380,12 @@ fn every_routed_page_reparses_as_drawn() {
             .into(),
         ThreadPage::new(fixtures::post().id, ThreadLoad::Failed("<x>".into()))
             .into(),
+        comment_page(),
+        CommentPage::new(
+            fixtures::comment().id,
+            CommentLoad::Failed("<x>".into()),
+        )
+        .into(),
     ] {
         assert_hydratable(&ssr::render(base(), page.public()).unwrap().html);
     }
@@ -505,6 +527,8 @@ struct Api {
     reads: Rc<RefCell<Vec<String>>>,
     /// What a thread's read answers; loaded when `None`
     thread: Rc<RefCell<Option<ThreadLoad>>>,
+    /// What a comment's read answers; loaded when `None`
+    comment: Rc<RefCell<Option<CommentLoad>>>,
 }
 
 fn post_titled(title: &str) -> PostResponse {
@@ -532,6 +556,22 @@ impl Fetch for Api {
                 Some(_) => page.with_community(fixtures::community()),
                 None => page,
             }
+        })
+    }
+
+    fn comment(
+        &self,
+        comment: CommentId,
+    ) -> LocalBoxFuture<'static, CommentLoad> {
+        self.reads.borrow_mut().push(format!("comment {comment}"));
+        let answer = self.comment.borrow().clone();
+        Box::pin(async move {
+            answer.unwrap_or_else(|| {
+                let mut read = fixtures::comment_chain();
+                read.chain[0].id = comment;
+                read.chain[0].body = "A fetched comment.".into();
+                CommentLoad::Loaded(Box::new(read))
+            })
         })
     }
 
@@ -684,6 +724,10 @@ async fn the_client_hydrates_the_servers_page_and_keeps_the_address() {
                 format!("/post/{POST}").leak() as &str,
                 format!("/post/{POST}#comment-{POST}").leak(),
             ],
+        ),
+        (
+            comment_page(),
+            vec![format!("/comment/{COMMENT}").leak() as &str],
         ),
     ] {
         let server = ssr::render(base(), page.clone().public()).unwrap().html;
@@ -937,4 +981,84 @@ fn the_router_reads_paths_strictly() {
     );
     assert_eq!(at("/agora"), Route::root().0);
     assert!(matches!(ssr::route(""), Err(RouteError::NotAPath(_))));
+}
+
+/// A stub's "Read the whole comment" is the router's link to the comment's
+/// page: a click loads the comment through the client's API (one read),
+/// with no page load and no change to the stub's markup outside a router
+#[tokio::test]
+async fn a_stubs_link_opens_the_comment_client_side() {
+    use crate::responses::PostWithCommentsResponse;
+    let stub = fixtures::comment_stub();
+    let read = PostWithCommentsResponse {
+        comment_stubs: vec![stub.clone()],
+        ..fixtures::post_with_comments()
+    };
+    let page: Page = ThreadPage::loaded(read).into();
+    let routed = ssr::render(base(), page.clone().public()).unwrap().html;
+    let href = format!("/agora/comment/{}", stub.id);
+    // Under the router: the router's link, with its click listener
+    let at = routed
+        .find(&format!(r#"<a href="{href}" data-node-hydration=""#))
+        .unwrap_or_else(|| panic!("{routed}"));
+    let marker = &routed[at..];
+    assert!(
+        marker[..marker.find('>').unwrap()].contains(",click:1"),
+        "{routed}"
+    );
+    // Alone: the plain `<a>` it was
+    let alone = pre_render(PageIsland, page.clone());
+    let plain = format!(r#"<a href="{href}" data-node-hydration=""#);
+    let at = alone.find(&plain).unwrap_or_else(|| panic!("{alone}"));
+    let marker = &alone[at..];
+    assert!(
+        !marker[..marker.find('>').unwrap()].contains("click"),
+        "{alone}"
+    );
+
+    let mut client = Client::new(&format!("/post/{POST}"), page);
+    client.settle(|_| false).await;
+    client.go(AgoraLink::comment(stub.id));
+    let html = client.render();
+    assert!(html.contains("Loading the comment…"), "{html}");
+    let html = client.settle(|_| false).await;
+    assert!(html.contains("A fetched comment."), "{html}");
+    assert_eq!(client.reads(), vec![format!("comment {}", stub.id)]);
+    assert_eq!(
+        client.log(),
+        vec![format!("push {}", Route(AgoraLink::comment(stub.id)))]
+    );
+    assert_eq!(
+        client.titles.borrow().last().unwrap(),
+        "Comment by quinn on “A title” — Agora"
+    );
+}
+
+/// A comment that fails to load says so and offers Try again; one that
+/// isn't there says so
+#[tokio::test]
+async fn a_failed_or_missing_comment_says_so() {
+    let mut client = Client::new("/feed?sort=date", feed_page());
+    client.settle(|_| false).await;
+    *client.api.comment.borrow_mut() =
+        Some(CommentLoad::Failed("Agora couldn't be reached.".into()));
+    client.go(AgoraLink::comment(fixtures::comment().id));
+    let html = client.settle(|_| false).await;
+    assert!(
+        html.contains("The comment couldn&#39;t be loaded"),
+        "{html}"
+    );
+    assert!(html.contains("Try again"), "{html}");
+    assert_eq!(client.titles.borrow().last().unwrap(), "A comment — Agora");
+
+    *client.api.comment.borrow_mut() = Some(CommentLoad::NotFound);
+    let other: CommentId =
+        "c0000009-0000-4000-8000-000000000009".parse().unwrap();
+    client.go(AgoraLink::comment(other));
+    let html = client.settle(|_| false).await;
+    assert!(
+        html.contains(&COMMENT_NOT_FOUND.replace('\'', "&#39;")),
+        "{html}"
+    );
+    assert_eq!(client.titles.borrow().last().unwrap(), "Not found — Agora");
 }

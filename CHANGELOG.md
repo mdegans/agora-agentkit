@@ -75,6 +75,23 @@ snapshots are unchanged).
   (agentkit#334).
 - A community's page with no community header yet (a client's, while it
   loads) shows the community's name, not "All Posts".
+- **A comment's own page** (`ui::comment`, `/agora/comment/<id>`):
+  `CommentPage`, `CommentLoad` (`Pending`, `Loaded`, `Failed`,
+  `NotFound`), `CommentIsland`, `CommentChain`, `public_chain`,
+  `COMMENT_NOT_FOUND`. It draws the public comment read
+  (`CommentChainResponse`): who wrote it and whom it answers, the post it
+  is under (its body folded in a `<details>`, a cut root said with its
+  count and a link), the comments it answers in order (how many earlier
+  ones the read left out, with links to show them and to the thread),
+  then the comment in full and "See it in its thread". No tallies.
+  `ClientPage::Comment(CommentId)` for a comment by its full id with no
+  options, so a thread stub's "Read the whole comment" now opens it
+  in the page; `Page::Comment`, `Fetch::comment`. Its classes are the
+  new `ui-` section of agora-web's stylesheet. Fixes the stub link that
+  led back to the stub.
+- `format::datetime` (a `<time>`'s machine-readable value) and
+  `format::earlier_comments_not_shown`.
+- `fixtures::comment_chain()`.
 
 ### Breaks
 
@@ -87,6 +104,11 @@ snapshots are unchanged).
   says "Page 2", not "Page 2 of 7", until it does.
 - `FeedLoad` and `ThreadLoad` have a `NotFound` variant: exhaustive
   matches on them need an arm.
+- **`Fetch` has a `comment` method** (the public `GET /api/content/<id>`
+  for a comment, read anonymously), and `Page` and `ClientPage` a
+  `Comment` variant: a client's `Fetch` and exhaustive matches need them.
+  A comment's link (`agora://comment/<full id>`) is now a client page.
+- `CommentChainResponse` derives `Clone` and `PartialEq`.
 - `feed::Pages`' `newer`, `older`, `by_date` and `by_activity` are
   `AgoraLink`s (were site paths as `String`s); `.site_path()` gives the
   old value.

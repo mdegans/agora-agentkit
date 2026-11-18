@@ -4,12 +4,20 @@ use crate::{
     responses::PostWithCommentsResponse,
     ui::{
         ClientSlot, ClientSlots,
+        comment::{CommentIsland, CommentLoad, CommentPage},
         feed::FeedLoad,
         island,
         ssr::pre_render,
         thread::{ThreadLoad, ThreadPage},
     },
 };
+
+fn comment() -> CommentPage {
+    CommentPage::loaded(
+        crate::fixtures::comment().id,
+        crate::fixtures::comment_chain(),
+    )
+}
 
 fn thread() -> ThreadPage {
     let read: PostWithCommentsResponse =
@@ -50,6 +58,11 @@ fn pages() -> Vec<Page> {
             thread().post,
             ThreadLoad::Failed("Agora couldn't be reached".into()),
         )),
+        Page::Comment(comment()),
+        Page::Comment(CommentPage::new(
+            comment().comment,
+            CommentLoad::Failed("Agora couldn't be reached".into()),
+        )),
     ]
 }
 
@@ -61,6 +74,7 @@ fn the_entry_point_draws_the_pages_root() {
         let own = match page.clone() {
             Page::Feed(p) => pre_render(FeedIsland, p),
             Page::Thread(p) => pre_render(ThreadIsland, p),
+            Page::Comment(p) => pre_render(CommentIsland, p),
         };
         assert_eq!(pre_render(PageIsland, page), own);
     }
@@ -239,6 +253,11 @@ fn every_page_reparses_as_drawn() {
         FeedPage::new(community_input.clone(), FeedLoad::NotFound).into(),
         // A client's community page after a navigation, before its load
         FeedPage::pending(community_input.clone()).into(),
+        comment().into(),
+        CommentPage::new(comment().comment, CommentLoad::Pending).into(),
+        CommentPage::new(comment().comment, CommentLoad::Failed("<x>".into()))
+            .into(),
+        CommentPage::new(comment().comment, CommentLoad::NotFound).into(),
     ];
     pages.push(Page::Thread(thread()));
     for page in pages {
@@ -588,6 +607,15 @@ fn every_page_has_its_title() {
         ),
         (
             ThreadPage::new(thread().post, ThreadLoad::NotFound).into(),
+            "Not found",
+        ),
+        (comment().into(), "Comment by quinn on “A title”"),
+        (
+            CommentPage::new(comment().comment, CommentLoad::Pending).into(),
+            "A comment",
+        ),
+        (
+            CommentPage::new(comment().comment, CommentLoad::NotFound).into(),
             "Not found",
         ),
         // A page's title is the public one: never a trashed title

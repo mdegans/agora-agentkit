@@ -8,8 +8,8 @@
 //!   draws what [`ClientPage::of`] decides. There is no second table.
 //! - [`ClientPage::of`] is the one list of which links the client draws:
 //!   an exhaustive `match` over the kinds, so a new kind fails to compile
-//!   until someone decides its page. Only the feed and a post's thread
-//!   have components; every other kind is drawn by the server, so
+//!   until someone decides its page. Only the feed, a post's thread and
+//!   a comment have components; every other kind is drawn by the server, so
 //!   `FromStr` refuses it and a link to it is a full page load.
 //! - [`PageData`] is the data source above the router: the first page from
 //!   the data block the server embedded, every page after a client-side
@@ -63,12 +63,13 @@ use futures::future::LocalBoxFuture;
 
 use super::{
     Reload,
+    comment::{CommentIsland, CommentLoad, CommentPage},
     feed::{FeedIsland, FeedPage},
     page::Page,
     thread::{ThreadIsland, ThreadLoad, ThreadPage},
 };
 use crate::{
-    ids::{ContentRef, PostId},
+    ids::{CommentId, ContentRef, PostId},
     links::{AgoraLink, AgoraLinkError, ContentKind, SITE_PREFIX},
     requests::{GetContentInput, GetFeedInput},
 };
@@ -121,6 +122,9 @@ pub enum ClientPage {
     Feed(GetFeedInput),
     /// A post with its comments ([`super::thread`])
     Thread(PostId),
+    /// A comment under its post and the comments it answers
+    /// ([`super::comment`])
+    Comment(CommentId),
 }
 
 impl ClientPage {
@@ -145,10 +149,23 @@ impl ClientPage {
                 }
                 _ => None,
             },
-            // Not ported yet: drawn by the server (askama), as before.
-            // A comment's link is sent to its post's anchor by the server
+            // A comment by its full id with no options is its page; a short
+            // id or a read with options is `get_content`'s, the server's
             AgoraLink::Content {
-                kind: ContentKind::Comment | ContentKind::Either,
+                kind: ContentKind::Comment,
+                read,
+            } => match &read.id {
+                ContentRef::Content(id)
+                    if *read == GetContentInput::new(*id) =>
+                {
+                    Some(Self::Comment(CommentId::from(*id.as_uuid())))
+                }
+                _ => None,
+            },
+            // `content/<id>` names no kind: the server resolves it and
+            // redirects to the post's or the comment's page
+            AgoraLink::Content {
+                kind: ContentKind::Either,
                 ..
             } => None,
             AgoraLink::Read(_) => None,
@@ -167,6 +184,7 @@ impl ClientPage {
         match self {
             Self::Feed(input) => AgoraLink::Feed(input.clone()),
             Self::Thread(post) => AgoraLink::post(*post),
+            Self::Comment(comment) => AgoraLink::comment(*comment),
         }
     }
 }
@@ -263,6 +281,9 @@ impl Routable for Route {
             Some(ClientPage::Thread(post)) => rsx! {
                 ThreadRoute { key: "{key}", post }
             },
+            Some(ClientPage::Comment(comment)) => rsx! {
+                CommentRoute { key: "{key}", comment }
+            },
             None => rsx! {
                 ServerPage { key: "{key}", link: self.0.clone() }
             },
@@ -283,6 +304,13 @@ pub trait Fetch {
     fn feed(&self, input: GetFeedInput) -> LocalBoxFuture<'static, FeedPage>;
     /// The post with its comments
     fn thread(&self, post: PostId) -> LocalBoxFuture<'static, ThreadLoad>;
+    /// The comment under its post, with the comments it answers: the
+    /// public API's comment read (`GET /api/content/<id>`, its
+    /// `ContentResponse::Comment`), anonymously
+    fn comment(
+        &self,
+        comment: CommentId,
+    ) -> LocalBoxFuture<'static, CommentLoad>;
 }
 
 /// The data source above the router, as root context
@@ -387,6 +415,30 @@ fn ThreadRoute(post: PostId) -> Element {
         }
     });
     ThreadIsland(page)
+}
+
+/// A comment's page, as [`FeedRoute`]
+#[component]
+fn CommentRoute(comment: CommentId) -> Element {
+    let data = use_context::<PageData>();
+    let page = use_hook(|| match data.take(&ClientPage::Comment(comment)) {
+        Some(Page::Comment(page)) => page,
+        _ => {
+            let page = CommentPage::new(comment, CommentLoad::Pending);
+            match &data.site {
+                Some(site) => page.at(site),
+                None => page,
+            }
+        }
+    });
+    use_hook(|| {
+        if let Some(fetch) = data.fetch.clone() {
+            provide_context(Reload::<CommentLoad>::new(move || {
+                fetch.comment(comment)
+            }));
+        }
+    });
+    CommentIsland(page)
 }
 
 /// A page the server draws, should the router ever hold one. It doesn't
