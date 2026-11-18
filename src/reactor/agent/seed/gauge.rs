@@ -8,6 +8,7 @@
 use misanthropic::prompt::Prompt;
 use misanthropic::tool::{self, MethodDef, Notifications, Tool, Use};
 
+use crate::display::{ShownOnce, views};
 use crate::ids::{AgentId, ContentRef};
 use crate::requests::GetContentInput;
 
@@ -21,7 +22,7 @@ pub struct Gauged<T> {
     agent_id: Option<AgentId>,
     /// What each result showed in full, committed when it is seated and
     /// discarded when it is left out (0.108)
-    shown_once: Option<super::ShownOnce>,
+    shown_once: Option<ShownOnce>,
     /// The client a refusal that names a prompt's link checks it with
     /// ([`Self::with_prompt_check`])
     prompt_check: Option<crate::client::Client>,
@@ -51,7 +52,7 @@ impl<T> Gauged<T> {
     /// Commit what each result showed in full to `shown_once` when it is
     /// seated, and discard it when the result is left out: an agent never
     /// saw a result replaced by a note, so a later read shows it in full
-    pub fn with_shown_once(mut self, shown_once: super::ShownOnce) -> Self {
+    pub fn with_shown_once(mut self, shown_once: ShownOnce) -> Self {
         self.shown_once = Some(shown_once);
         self
     }
@@ -232,7 +233,7 @@ const LINK_OPTIONS: &str = "With fetch_agora_link these are options in the \
 /// A post read is its body, one line per comment, and full comments up to
 /// the budget, so a smaller budget shrinks only the last part. The part it
 /// can't shrink is measured from the rendered read
-/// ([`super::prompt::unbudgeted_bytes`]: the post, the stub lines and the
+/// ([`views::unbudgeted_bytes`]: the post, the stub lines and the
 /// note under them); for anything else it is at least the result less the
 /// budget's own tokens (0.94.0 took that bound for a post read too, and
 /// undercounted it whenever the full comments did not fill the budget:
@@ -288,7 +289,7 @@ fn instead(call: &str, room: u64, text: &str, requested: &Requested) -> String {
     }
     // Not a post read with comments (a comment's chain, a post with none):
     // no budget shrinks it, so none is offered (the review of 0.94.1)
-    let Some(fixed) = super::prompt::unbudgeted_bytes(text) else {
+    let Some(fixed) = views::unbudgeted_bytes(text) else {
         return format!(
             "A comment_budget does not shrink this read. {}",
             fallbacks(false)
@@ -619,7 +620,7 @@ mod tests {
     /// A tool that marks an item shown each call, as a post read does
     struct Marks {
         len: usize,
-        once: super::super::ShownOnce,
+        once: ShownOnce,
         id: crate::ids::ContentId,
     }
 
@@ -644,7 +645,7 @@ mod tests {
     /// showed is not, since the agent never saw it (0.108)
     #[tokio::test]
     async fn a_result_left_out_marks_nothing_shown() {
-        let once = super::super::ShownOnce::default();
+        let once = ShownOnce::default();
         let id = crate::ids::ContentId::from(uuid::Uuid::from_u128(7));
         let gauge = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
         gauge.set(10_000);
@@ -756,9 +757,8 @@ mod tests {
         // A post read whose post and lines alone overfill the room: no
         // budget is offered and nothing suggests a smaller one
         let text = post_read(2, 40);
-        let fixed = super::super::prompt::unbudgeted_bytes(&text).unwrap()
-            as u64
-            / BYTES_PER_TOKEN;
+        let fixed =
+            views::unbudgeted_bytes(&text).unwrap() as u64 / BYTES_PER_TOKEN;
         let tight = ContextGauge::new(131_072, CONTEXT_BUFFER_TOKENS);
         tight.set(tight.window() - tight.reserve() - (fixed - 1_000));
         let mut tool = Gauged::new(Fixed { text }, tight.clone());
@@ -850,13 +850,13 @@ mod tests {
                 "omitted_comment_count": stubs,
             }))
             .expect("fixture");
-        super::super::prompt::format_post(&post, &"reader".parse().unwrap())
+        views::format_post(&post, &"reader".parse().unwrap())
     }
 
     /// A tool that shows `text` under the default link policy, on the site
     struct Linked {
         text: &'static str,
-        once: super::super::ShownOnce,
+        once: ShownOnce,
     }
 
     #[async_trait::async_trait]
@@ -884,8 +884,8 @@ mod tests {
     /// included) does not, nor does one left out mark it shown
     #[tokio::test]
     async fn the_first_defanged_link_is_explained_once() {
-        use super::super::shown_once::DEFANGED_NOTE;
-        let once = super::super::ShownOnce::default();
+        use crate::display::shown_once::DEFANGED_NOTE;
+        let once = ShownOnce::default();
         let gauge = ContextGauge::new(60_000, CONTEXT_BUFFER_TOKENS);
         let tool = |text| {
             Gauged::new(
@@ -951,9 +951,8 @@ mod tests {
     #[tokio::test]
     async fn a_refused_post_read_measures_what_no_budget_shrinks() {
         let text = post_read(30, 40);
-        let fixed = super::super::prompt::unbudgeted_bytes(&text).unwrap()
-            as u64
-            / BYTES_PER_TOKEN;
+        let fixed =
+            views::unbudgeted_bytes(&text).unwrap() as u64 / BYTES_PER_TOKEN;
         // 36,000 of body, 40 stub lines, the note, and 30 full comments' worth
         // of stub lines: not the read less its
         // budget (a 262144 budget's 87k tokens is more than the read)

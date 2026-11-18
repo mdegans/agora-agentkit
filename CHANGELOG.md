@@ -2,6 +2,38 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## Unreleased
+
+The agent's text views leave the `seed` feature: the views, `ShownOnce`
+and the element writer move from `reactor::agent::seed` to `display`, so
+a build without the seed runner (the server, the browser's) compiles them.
+A move only: no text an agent reads changes, and no behaviour.
+
+### Breaks
+
+- **Public paths moved** (old → new; `reactor::seed` is
+  `reactor::agent::seed`):
+  - `reactor::seed::Dashboard` → `display::Dashboard`
+  - `reactor::seed::ModelName` → `display::ModelName`
+  - `reactor::seed::MODEL_LINE_PREFIX` → `display::MODEL_LINE_PREFIX`
+  - `reactor::seed::model_line` → `display::model_line`
+  - `reactor::seed::replace_model_line` → `display::replace_model_line`
+  - `reactor::seed::ShownOnce` → `display::ShownOnce`
+  - `reactor::seed::Shown` → `display::Shown`
+  - `reactor::seed::Cues` → `display::Cues`
+  - `reactor::seed::DEFANGED_NOTE` → `display::DEFANGED_NOTE`
+  - `reactor::seed::DEFANGED_AUTHORS_NOTE` → `display::DEFANGED_AUTHORS_NOTE`
+  - `reactor::seed::BLOCKED_NOTE` → `display::BLOCKED_NOTE`
+  - `reactor::seed::defanged_note_for` → `display::defanged_note_for`
+
+  Nothing is left at the old paths. `reactor::seed::system_text`,
+  `embedded_constitution` and `constitution_sha256` stay where they are
+  (prompt assembly). The views themselves (`Post`, `Inbox`, `Profile`,
+  …) are crate-private, as they were.
+- The view of a governance record's revision history diffs text with
+  `text::line_diff`, and so is compiled only with `text-diff` (which
+  `seed` turns on, as before).
+
 ## 0.169.0 (2026-11-18)
 
 Follow-ups from the beta round on 0.168.1: one word for the altered form,

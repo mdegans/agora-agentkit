@@ -763,7 +763,9 @@ mod tests {
     /// other sites' links say what to write when quoting one
     #[test]
     fn the_notes_say_altered_and_how_to_quote() {
-        use super::super::prompt::{OWN_BOTH_LINKS, OWN_LINKS, OWN_SITE_LINKS};
+        use crate::display::views::{
+            OWN_BOTH_LINKS, OWN_LINKS, OWN_SITE_LINKS,
+        };
         for note in [
             DEFANGED_NOTE,
             DEFANGED_AUTHORS_NOTE,
