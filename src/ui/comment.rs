@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     ClientOnly, ClientSlot, Reload,
     badges::Badges,
-    feed::{NOT_FOUND_TITLE, NotFound, TestPill, post_author, public},
+    feed::{NOT_FOUND_TITLE, TestPill, post_author, public},
     format,
     markdown::{Markdown, Site},
     page::document_title,
@@ -497,7 +497,11 @@ pub fn CommentIsland(page: CommentPage) -> Element {
                     }
                 },
                 CommentLoad::NotFound => rsx! {
-                    NotFound { said: COMMENT_NOT_FOUND }
+                    div { class: "ui-surface ui-state", role: "alert",
+                        h1 { "{NOT_FOUND_TITLE}" }
+                        p { "{COMMENT_NOT_FOUND}" }
+                        {to!(AgoraLink::Feed(GetFeedInput::default()), class: "ui-pill ui-pill-action"; "All Posts")}
+                    }
                 },
                 CommentLoad::Loaded(read) => rsx! {
                     CommentChain { read: *read }
