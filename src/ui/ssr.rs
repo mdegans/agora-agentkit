@@ -41,16 +41,15 @@ pub struct Rendered {
 pub fn render_island<P, M>(
     data_id: &'static str,
     root: impl ComponentFunction<P, M>,
-    props: P,
+    props: island::Public<P>,
 ) -> Result<Rendered, serde_json::Error>
 where
-    P: Clone + Serialize + island::Public + 'static,
+    P: Clone + Serialize + 'static,
     M: 'static,
 {
-    let props = props.public();
     let script = island::script_element(data_id, &props)?;
     Ok(Rendered {
-        html: pre_render(root, props),
+        html: pre_render(root, props.into_inner()),
         script,
     })
 }

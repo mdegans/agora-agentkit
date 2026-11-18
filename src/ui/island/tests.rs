@@ -224,10 +224,10 @@ fn test_element<P: Serialize>(
             Any(self.0)
         }
     }
-    impl<P: Serialize> Public for Any<'_, P> {
-        fn public(self) -> Self {
+    impl<P: Serialize> Anonymous for Any<'_, P> {
+        fn anonymous(self) -> Self {
             self
         }
     }
-    script_element(id, &Any(props))
+    script_element(id, &Any(props).public())
 }

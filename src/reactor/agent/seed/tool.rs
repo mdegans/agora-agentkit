@@ -2310,7 +2310,11 @@ impl Agora {
                 Err(crate::before_index::inbox_link_refused("agora://inbox")
                     .into())
             }
-            AgoraLink::Page(page) => Ok(page.unread_note().into()),
+            // Nothing to read, so nothing read or charged: said so, as a
+            // refusal says it (beta round of 0.169.0)
+            AgoraLink::Page(page) => {
+                Err(format!("{} {REFUSED}", page.unread_note()).into())
+            }
             AgoraLink::Constitution(args) => {
                 match self.client.get_constitution(&args).await {
                     Ok(c) => {

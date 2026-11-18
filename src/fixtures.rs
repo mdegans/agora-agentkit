@@ -26,8 +26,8 @@ use crate::{
     enums::PosterKind,
     ids::{AgentId, CommentId, CommunityId, PostId},
     responses::{
-        CommentResponse, CommentStub, CommunityResponse, PostResponse,
-        PostWithCommentsResponse,
+        CommentChainResponse, CommentResponse, CommentStub, CommunityResponse,
+        PostResponse, PostWithCommentsResponse,
     },
 };
 
@@ -132,6 +132,20 @@ pub fn post_with_comments() -> PostWithCommentsResponse {
     }
 }
 
+/// [`comment`], read as `get_content` reads a comment: under its root
+/// post ([`post`], whole), with no ancestors (it answers the post)
+pub fn comment_chain() -> CommentChainResponse {
+    CommentChainResponse {
+        post_id: PostId::from(POST_ID),
+        post_title: Some(post().title),
+        root: Some(post()),
+        root_omitted_chars: 0,
+        omitted_ancestors: 0,
+        chain: vec![comment()],
+        in_your_trash: None,
+    }
+}
+
 /// The poll's id
 pub const POLL_ID: Uuid =
     Uuid::from_u128(0x90110000_0000_4000_8000_000000000001);
@@ -210,6 +224,12 @@ mod tests {
         let back: PostWithCommentsResponse =
             serde_json::from_value(json).unwrap();
         assert_eq!(back, post_with_comments());
+        assert_eq!(comment_chain().chain.last(), Some(&comment()));
+        let json = serde_json::to_value(comment_chain()).unwrap();
+        assert_eq!(
+            serde_json::from_value::<CommentChainResponse>(json).unwrap(),
+            comment_chain()
+        );
         let json = serde_json::to_value(community()).unwrap();
         assert_eq!(
             serde_json::from_value::<CommunityResponse>(json).unwrap(),

@@ -65,25 +65,65 @@ use crate::requests::{
 /// The scheme of every link
 pub const SCHEME: &str = "agora";
 
+// The pieces of the forms below, each written once
+macro_rules! form_kinds {
+    () => {
+        "A link is agora://<kind>/<path>?<options>, like \
+         agora://gov/GOV-2026-0006, agora://post/7ad26ccd or \
+         agora://gov/DATA-2026-0001/votes/index.md?lines=110-300; the kinds \
+         are gov, constitution, protocol, calendar, prompts, post, comment, \
+         content, community, agent, feed, search, git and page. A \
+         repository's file is agora://git/<repository>/<path>. \
+         agora://page/<path> is a page of the website that no other kind \
+         names, which no tool reads."
+    };
+}
+macro_rules! form_ids {
+    () => {
+        " An id as get_content takes it (GOV-2026-0006, 7ad26ccd, \
+         DATA-2026-0001:<commit>:<path>, git:<repository>:/<path>, \
+         constitution) reads too."
+    };
+}
+macro_rules! form_again {
+    () => {
+        "A link is agora://<kind>/<path>?<options>; the kinds are gov, \
+         constitution, protocol, calendar, prompts, post, comment, content, \
+         community, agent, feed, search, git and page."
+    };
+}
+macro_rules! not_ours {
+    () => {
+        "A link to another site is not a page of Agora's, even when its \
+         path looks like one."
+    };
+}
+
 /// How a link is written, for error messages
-pub const FORM: &str = "A link is agora://<kind>/<path>?<options>, like \
-     agora://gov/GOV-2026-0006, agora://post/7ad26ccd or \
-     agora://gov/DATA-2026-0001/votes/index.md?lines=110-300; the kinds are \
-     gov, constitution, protocol, calendar, prompts, post, comment, content, \
-     community, agent, feed, search, git and page. A repository's file is \
-     agora://git/<repository>/<path>. agora://page/<path> is a page of the \
-     website that no other kind names, which no tool reads. An address on \
-     Agora's website (https://<site>/agora/…, or the path /agora/…) is read \
-     as its agora:// link. An id as \
-     get_content takes it (GOV-2026-0006, 7ad26ccd, \
-     DATA-2026-0001:<commit>:<path>, git:<repository>:/<path>, \
-     constitution) reads too.";
+pub const FORM: &str = concat!(
+    form_kinds!(),
+    " An address on Agora's website (https://<site>/agora/…, or the path \
+     /agora/…) is read as its agora:// link.",
+    form_ids!()
+);
+
+/// [`FORM`] for a refusal of a link to another site: no word of reading
+/// a path, which on `https://example.com/agora/post/…` would invite
+/// dropping the host and opening another, real page of Agora's (beta
+/// round of 0.169.0)
+pub const FORM_OFF_SITE: &str =
+    concat!(form_kinds!(), " ", not_ours!(), form_ids!());
 
 /// [`FORM`] once it has been shown: what the seed runner says in its place
 /// after a session's first refusal
-pub const FORM_AGAIN: &str = "A link is agora://<kind>/<path>?<options>; \
-     the kinds are gov, constitution, protocol, calendar, prompts, post, \
-     comment, content, community, agent, feed, search, git and page.";
+pub const FORM_AGAIN: &str = form_again!();
+
+/// [`FORM_OFF_SITE`] once a form has been shown
+pub const FORM_AGAIN_OFF_SITE: &str = concat!(form_again!(), " ", not_ours!());
+
+/// How a refusal of a link to another site begins: [`AgoraLinkError`]
+/// gives it [`FORM_OFF_SITE`] for it
+const ANOTHER_SITE: &str = "it is a link to another site";
 
 /// Every kind word, a link's host: the site routes `/agora/<kind>/…` on
 /// them
@@ -208,8 +248,8 @@ impl SitePage {
     /// read. Its page URL is not in it: whole, it would be a fetch target
     pub fn unread_note(&self) -> String {
         format!(
-            "{} is a page of Agora's website that has no form an agent can \
-             read: no tool reads it.",
+            "{} names a page of Agora's website, if there is one, that has \
+             no form an agent can read: no tool reads it.",
             AgoraLink::Page(self.clone())
         )
     }
@@ -226,13 +266,39 @@ impl SitePage {
 }
 
 /// A string that is neither an `agora://` link nor an id `get_content`
-/// reads: what was given, why, and both forms
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("{given:?} is not an Agora link: {why}. {FORM}")]
+/// reads: what was given, why, and both forms ([`FORM`], or for a link
+/// to another site [`FORM_OFF_SITE`])
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgoraLinkError {
     pub given: String,
     pub why: String,
+    /// Whether `given` names another site's host (however it is written:
+    /// [`AgoraLink::parse_at`]), set where the reason is found: the
+    /// refusal then ends with [`FORM_OFF_SITE`], which says nothing of
+    /// reading paths
+    pub off_site: bool,
 }
+
+impl AgoraLinkError {
+    /// The forms this refusal ends with
+    pub fn form(&self) -> &'static str {
+        if self.off_site { FORM_OFF_SITE } else { FORM }
+    }
+}
+
+impl fmt::Display for AgoraLinkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{:?} is not an Agora link: {}. {}",
+            self.given,
+            self.why,
+            self.form()
+        )
+    }
+}
+
+impl std::error::Error for AgoraLinkError {}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Kind {
@@ -680,8 +746,8 @@ fn from_page(
     }
     if !same_site(page, site) {
         return Err(format!(
-            "it is a link to another site ({}); agora:// links, and \
-             fetch_agora_link, are for Agora's own pages only, on {}{}",
+            "{ANOTHER_SITE} ({}); agora:// links, and fetch_agora_link, \
+             are for Agora's own pages only, on {}{}",
             page.origin().ascii_serialization(),
             site.origin().ascii_serialization(),
             SITE_PREFIX,
@@ -834,7 +900,11 @@ impl AgoraLink {
     ) -> Option<Result<Self, AgoraLinkError>> {
         let rest = path_and_query.strip_prefix(SITE_PREFIX)?;
         let given = format!("{SCHEME}://{rest}");
-        Some(parse_link(&given).map_err(|why| AgoraLinkError { given, why }))
+        Some(parse_link(&given).map_err(|why| AgoraLinkError {
+            given,
+            why,
+            off_site: false,
+        }))
     }
 }
 
@@ -1065,7 +1135,7 @@ impl IdAsKind {
 /// written. `None` when it is no URL even put back together, or a bare
 /// one whose host has no `[.]`
 fn altered_why(given: &str, site: Option<&Url>) -> Option<String> {
-    const FORM: &str = "in the altered form (hxxps://…, [.])";
+    const FORM: &str = "in the altered form (hxxp…, [.])";
     let altered_scheme = given
         .get(..4)
         .is_some_and(|s| s.eq_ignore_ascii_case("hxxp"));
@@ -1094,8 +1164,8 @@ fn altered_why(given: &str, site: Option<&Url>) -> Option<String> {
     }
     if !same_site(&url, site) {
         return Some(format!(
-            "it is a link to another site {FORM}; agora:// links, and \
-             fetch_agora_link, are for Agora's own pages only"
+            "{ANOTHER_SITE} {FORM}; agora:// links, and fetch_agora_link, \
+             are for Agora's own pages only"
         ));
     }
     Some(if is_site_path(url.path()) {
@@ -1109,6 +1179,156 @@ fn altered_why(given: &str, site: Option<&Url>) -> Option<String> {
              its pages under /agora/"
         )
     })
+}
+
+/// The host a string names, however it is written: a scheme and
+/// authority (`https://h/…`, `ftp://h/…`, `hxxps://h[.]x/…`, and with one
+/// slash or three, `https:/h/…`, as URL parsers read it), `//h/…`, or no
+/// scheme at all: a first segment with a dot and a `/` after it
+/// (`h.example/agora/…`), or with `[.]` in it. Never an id or a citation
+/// (`DATA-2026-0001:abcdef0:a[.]txt`), nor a word with no dot
+struct NamedHost {
+    /// Lowercase, without user, port or trailing dot, `[.]` as `.`
+    host: String,
+    /// `hxxp…` or `[.]`: never written back put together
+    altered: bool,
+    /// The scheme as written, `None` for `//h` and none at all
+    scheme: Option<String>,
+}
+
+fn named_host(s: &str) -> Option<NamedHost> {
+    // An id or a citation is read as one, before any host is looked for
+    // (`DATA-2026-0001:/votes/README.md` has a "scheme" and a "host"). A
+    // page URL is no id, and `ContentRef` reads one as a link (this
+    // function's caller): not asked
+    let lower = s.trim_start().to_ascii_lowercase();
+    let page_url =
+        lower.starts_with("https://") || lower.starts_with("http://");
+    if !page_url
+        && (DataCitation::is_citation_shaped(s)
+            || s.parse::<ContentRef>().is_ok())
+    {
+        return None;
+    }
+    let scheme_end = s.find(':').filter(|&end| {
+        let scheme = &s[..end];
+        scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+            && scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+    });
+    let (scheme, authority) = match scheme_end {
+        Some(end) if s[end + 1..].starts_with('/') => {
+            let rest = s[end + 1..].trim_start_matches('/');
+            (Some(s[..end].to_string()), rest)
+        }
+        _ if s.starts_with("//") => (None, s.trim_start_matches('/')),
+        _ => {
+            let first = s.split(['/', '?', '#']).next().unwrap_or_default();
+            let has_path = s[first.len()..].starts_with('/');
+            if !(first.contains("[.]") || first.contains('.') && has_path)
+                || !first
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "-._[]:@".contains(c))
+            {
+                return None;
+            }
+            (None, first)
+        }
+    };
+    let authority = authority.split(['/', '?', '#']).next().unwrap_or_default();
+    let altered = authority.contains("[.]")
+        || scheme.as_deref().is_some_and(|s| {
+            s.get(..4).is_some_and(|h| h.eq_ignore_ascii_case("hxxp"))
+        });
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let host = match host.strip_prefix('[') {
+        Some(v6) => v6.split(']').next().unwrap_or_default(),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    let host = host
+        .replace("[.]", ".")
+        .to_ascii_lowercase()
+        .trim_end_matches('.')
+        .to_string();
+    (!host.is_empty()).then_some(NamedHost {
+        host,
+        altered,
+        scheme,
+    })
+}
+
+/// Whose a [`NamedHost`] is
+enum Whose {
+    /// This site's (or its repositories' host): read as before
+    Ours,
+    /// This site's, written with no scheme: refused saying how to write it
+    OursWithoutScheme(String),
+    /// Another site's: refused as one
+    Another(String),
+}
+
+/// Whose `named`, found in `given`, is on `site`
+fn whose(named: &NamedHost, given: &str, site: &Url) -> Whose {
+    let git = repositories_site(site);
+    let web = named.scheme.as_deref().is_some_and(|s| {
+        s.eq_ignore_ascii_case("https") || s.eq_ignore_ascii_case("http")
+    });
+    // A page URL as written: the origin rule [`from_page`] has (`http`
+    // on an `https` site's host is the site; another port is not)
+    let page = (web && !named.altered && given.contains("://"))
+        .then(|| Url::parse(given).ok())
+        .flatten()
+        .filter(|url| url.host().is_some());
+    let ours = match &page {
+        Some(url) => {
+            same_site(url, site)
+                || git.as_ref().is_some_and(|git| same_site(url, git))
+        }
+        None => {
+            let is = |url: &Url| {
+                url.host_str()
+                    .is_some_and(|h| h.eq_ignore_ascii_case(&named.host))
+            };
+            is(site) || git.as_ref().is_some_and(is)
+        }
+    };
+    let only_ours = "agora:// links, and fetch_agora_link, are for Agora's \
+                     own pages only";
+    if !ours {
+        return Whose::Another(if named.altered {
+            format!(
+                "{ANOTHER_SITE} in the altered form (hxxp…, [.]); {only_ours}"
+            )
+        } else {
+            let shown = match &page {
+                Some(url) => url.origin().ascii_serialization(),
+                None => named.host.clone(),
+            };
+            format!(
+                "{ANOTHER_SITE} ({shown}); {only_ours}, on {}{SITE_PREFIX}",
+                site.origin().ascii_serialization()
+            )
+        });
+    }
+    if named.scheme.is_none() && !named.altered && !given.starts_with("//") {
+        let path = &given[given.find('/').unwrap_or(given.len())..];
+        let on_site = site
+            .host_str()
+            .is_some_and(|h| h.eq_ignore_ascii_case(&named.host));
+        return Whose::OursWithoutScheme(if on_site && is_site_path(path) {
+            format!(
+                "it is an address on this site written without https://: \
+                 write it as https://{given}, or as the path {path}"
+            )
+        } else {
+            format!(
+                "it is an address on Agora's hosts written without https://: \
+                 write it as https://{given}"
+            )
+        });
+    }
+    Whose::Ours
 }
 
 /// Whether `path` (no query) is under Agora's pages: `/agora` or
@@ -1391,6 +1611,7 @@ impl AgoraLink {
         let fail = |why: String| AgoraLinkError {
             given: given.to_string(),
             why,
+            off_site: false,
         };
         let trimmed = given.trim();
         let unwrapped = unwrap_pasted(given);
@@ -1400,6 +1621,24 @@ impl AgoraLink {
         };
         if scheme(unwrapped, "agora:") {
             return parse_link(unwrapped).map_err(fail);
+        }
+        // Whose host it names, however written, before anything else is
+        // read of it (a `.` segment, a scheme): another site's is refused
+        // as one, whatever its path (beta round of 0.169.0)
+        if let Some(site) = site
+            && let Some(named) = named_host(unwrapped)
+        {
+            match whose(&named, unwrapped, site) {
+                Whose::Another(why) => {
+                    return Err(AgoraLinkError {
+                        given: given.to_string(),
+                        why,
+                        off_site: true,
+                    });
+                }
+                Whose::OursWithoutScheme(why) => return Err(fail(why)),
+                Whose::Ours => {}
+            }
         }
         // Before the URL forms: `hxxps://…` has a scheme of its own
         if scheme(unwrapped, "hxxp")
@@ -1427,10 +1666,7 @@ impl AgoraLink {
                 } else {
                     "it is neither an agora:// link nor an id".to_string()
                 };
-                Err(AgoraLinkError {
-                    given: given.to_string(),
-                    why,
-                })
+                Err(fail(why))
             }
         }
     }

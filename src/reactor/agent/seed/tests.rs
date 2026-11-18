@@ -12464,11 +12464,11 @@ async fn fetch_agora_link_takes_a_site_path_and_refuses_another_site() {
         format!(
             "\nInvalid arguments at `link`: \"hxxps://off-site[.]invalid/x\" \
              is not an Agora link: it is a link to another site in the \
-             altered form (hxxps://…, [.]); agora:// links, and \
+             altered form (hxxp…, [.]); agora:// links, and \
              fetch_agora_link, are for Agora's own pages only. {} Refused; \
              nothing was charged.\n(Every call was refused; this turn \
              doesn't count.)",
-            crate::links::FORM
+            crate::links::FORM_OFF_SITE
         )
     );
     agent
@@ -12480,10 +12480,24 @@ async fn fetch_agora_link_takes_a_site_path_and_refuses_another_site() {
         t.contains(&format!(
             "is not an Agora link: it is a link to another site \
              (https://off-site.invalid); agora:// links, and fetch_agora_link, \
-             are for Agora's own pages only, on {}.",
-            site.join("agora/").unwrap()
+             are for Agora's own pages only, on {}. {} Refused; nothing was \
+             charged.",
+            site.join("agora/").unwrap(),
+            crate::links::FORM_AGAIN_OFF_SITE,
         )),
         "{t}"
+    );
+    // A page no kind names: nothing to read, nothing charged, and not
+    // said to exist
+    let before = transcript(&agent).len();
+    agent.handle(link("agora://page/about")).await.unwrap();
+    let turn = transcript(&agent)[before..].to_owned();
+    assert_eq!(
+        turn,
+        "\nagora://page/about names a page of Agora's website, if there is \
+         one, that has no form an agent can read: no tool reads it. Refused; \
+         nothing was charged.\n(Every call was refused; this turn doesn't \
+         count.)"
     );
     // The first result that shows one carries the note
     let linked = Uuid::new_v4();
@@ -12504,4 +12518,50 @@ async fn fetch_agora_link_takes_a_site_path_and_refuses_another_site() {
     let turn = transcript(&agent)[before..].to_owned();
     assert!(turn.contains("See hxxps://off-site[.]invalid/x"), "{turn}");
     assert_eq!(turn.matches(super::shown_once::DEFANGED_NOTE).count(), 1);
+}
+
+/// The link forms are taught once each: an off-site refusal coming first
+/// gives the long off-site form and leaves the long own-site form (with
+/// the path hint) for the first refusal of this site's link, and the
+/// other way round; later ones get their short forms (review of 0.170.0)
+#[tokio::test]
+async fn each_link_form_is_shown_in_full_once() {
+    use crate::links::{FORM, FORM_AGAIN, FORM_AGAIN_OFF_SITE, FORM_OFF_SITE};
+    let off = "https://off-site.invalid/agora/post/96f2fd71";
+    let own = "agora://nope";
+    for order in [[off, own], [own, off]] {
+        let server = MockServer::start();
+        let mut agent = agent(&server, quiet_config());
+        seat_start(&mut agent);
+        let link = |l: &str| {
+            tool_use_message(
+                "fetch_agora_link",
+                serde_json::json!({ "link": l }),
+            )
+        };
+        let mut turns = Vec::new();
+        for given in order.iter().chain(order.iter()) {
+            let before = transcript(&agent).len();
+            agent.handle(link(given)).await.unwrap();
+            turns.push((*given, transcript(&agent)[before..].to_owned()));
+        }
+        for (i, (given, turn)) in turns.iter().enumerate() {
+            let first = i < 2;
+            let (long, short) = if *given == off {
+                (FORM_OFF_SITE, FORM_AGAIN_OFF_SITE)
+            } else {
+                (FORM, FORM_AGAIN)
+            };
+            if first {
+                assert!(turn.contains(long), "{order:?} {given}: {turn}");
+            } else {
+                assert!(!turn.contains(long), "{order:?} {given}: {turn}");
+                assert!(turn.contains(short), "{order:?} {given}: {turn}");
+            }
+            // An off-site refusal never teaches the path form
+            if *given == off {
+                assert!(!turn.contains("or the path /agora/"), "{turn}");
+            }
+        }
+    }
 }

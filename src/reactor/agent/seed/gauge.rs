@@ -448,15 +448,35 @@ impl<T: Tool> Tool for Gauged<T> {
         let mut result = self.inner.call(call).await;
         // How a link is written, in full once a session and short after
         // (beta round of 0.112.0: ~90 tokens on every refusal). On the text
-        // as written: a `Content`'s `Display` renders Markdown
-        if let Some(once) = &self.shown_once
-            && super::tool::raw_text(&result.content)
-                .contains(crate::links::FORM)
-            && !once.legend("link form")
-        {
-            super::tool::map_text(&mut result.content, |t| {
-                t.replace(crate::links::FORM, crate::links::FORM_AGAIN)
-            });
+        // as written: a `Content`'s `Display` renders Markdown. A link to
+        // another site's refusal has its own form, without the word on
+        // reading paths (`links::FORM_OFF_SITE`), shown in full once on its
+        // own, so one coming first does not use up the session's one
+        // teaching of the path form (review of 0.170.0)
+        if let Some(once) = &self.shown_once {
+            let text = super::tool::raw_text(&result.content);
+            let own =
+                text.contains(crate::links::FORM) && !once.legend("link form");
+            let off_site = text.contains(crate::links::FORM_OFF_SITE)
+                && !once.legend("link form, another site");
+            if own || off_site {
+                super::tool::map_text(&mut result.content, |t| {
+                    let mut t = t.to_string();
+                    if own {
+                        t = t.replace(
+                            crate::links::FORM,
+                            crate::links::FORM_AGAIN,
+                        );
+                    }
+                    if off_site {
+                        t = t.replace(
+                            crate::links::FORM_OFF_SITE,
+                            crate::links::FORM_AGAIN_OFF_SITE,
+                        );
+                    }
+                    t
+                });
+            }
         }
         // What a defanged link is, the first time a result has one. Never
         // on a refusal: its text echoes the agent's own input (or is the

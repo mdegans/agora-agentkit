@@ -220,6 +220,46 @@ pub fn defanged_note_for(links: &Links) -> Option<&'static str> {
     }
 }
 
+/// The note on a defanged link for a reader with no tools (a review
+/// session told not to use them): [`defanged_note_for`]'s, with its last
+/// clause, "`send_message` to `operator`", as "ask your operator in a
+/// later session". Never for a session with tools: there the note says
+/// how to ask now
+pub fn defanged_note_without_tools(links: &Links) -> Option<&'static str> {
+    defanged_note_for(links).map(|note| match note {
+        DEFANGED_NOTE => DEFANGED_NOTE_WITHOUT_TOOLS,
+        DEFANGED_AUTHORS_NOTE => DEFANGED_AUTHORS_NOTE_WITHOUT_TOOLS,
+        BLOCKED_NOTE => BLOCKED_NOTE_WITHOUT_TOOLS,
+        other => unreachable!("a note without its tool-less form: {other}"),
+    })
+}
+
+/// [`DEFANGED_NOTE`] without tools ([`defanged_note_without_tools`])
+const DEFANGED_NOTE_WITHOUT_TOOLS: &str = "*(Links to other sites are shown \
+     altered, like hxxps://example[.]com, so that no tool opens one by \
+     accident; the text as written, yours included, keeps the real address. \
+     To quote or pass one on, write the real address (https://example.com): \
+     what you write is stored as you write it. Sites your operator has \
+     allowed are shown as written: to have one allowed, ask your operator \
+     in a later session.)*";
+
+/// [`DEFANGED_AUTHORS_NOTE`] without tools
+const DEFANGED_AUTHORS_NOTE_WITHOUT_TOOLS: &str = "*(Links to other sites \
+     are shown altered, like hxxps://example[.]com, so that no tool opens \
+     one by accident; the text as written, yours included, keeps the real \
+     address. To quote or pass one on, write the real address \
+     (https://example.com): what you write is stored as you write it. Sites \
+     your operator has allowed, and text by agents it trusts, are shown as \
+     written: to have a site allowed, ask your operator in a later \
+     session.)*";
+
+/// [`BLOCKED_NOTE`] without tools
+const BLOCKED_NOTE_WITHOUT_TOOLS: &str = "*(Links to sites your operator \
+     has blocked are shown altered, like hxxps://example[.]com, so that no \
+     tool opens one by accident; the text as written, yours included, keeps \
+     the real address. To have a site unblocked, ask your operator in a \
+     later session.)*";
+
 impl ShownOnce {
     /// A result for `read` (what the pointer will call it: `your read of
     /// 7ad26ccd`) is about to be rendered; anything still pending from an
@@ -662,6 +702,66 @@ mod tests {
         }
         assert!(BLOCKED_NOTE.contains("your operator has blocked"));
         assert!(!DEFANGED_NOTE.contains("otherwise as written"));
+    }
+
+    /// The tool-less notes are the notes with the one clause that needs a
+    /// tool replaced, and the notes are as the Steward approved them
+    #[test]
+    fn the_notes_without_tools_differ_in_their_last_clause_only() {
+        // The with-tools notes, byte for byte as 0.169.0 shipped them
+        assert_eq!(
+            DEFANGED_NOTE,
+            "*(Links to other sites are shown altered, like \
+             hxxps://example[.]com, so that no tool opens one by accident; \
+             the text as written, yours included, keeps the real address. To \
+             quote or pass one on, write the real address \
+             (https://example.com): what you write is stored as you write \
+             it. Sites your operator has allowed are shown as written: to \
+             have one allowed, `send_message` to `operator`.)*"
+        );
+        assert_eq!(
+            DEFANGED_AUTHORS_NOTE,
+            "*(Links to other sites are shown altered, like \
+             hxxps://example[.]com, so that no tool opens one by accident; \
+             the text as written, yours included, keeps the real address. To \
+             quote or pass one on, write the real address \
+             (https://example.com): what you write is stored as you write \
+             it. Sites your operator has allowed, and text by agents it \
+             trusts, are shown as written: to have a site allowed, \
+             `send_message` to `operator`.)*"
+        );
+        assert_eq!(
+            BLOCKED_NOTE,
+            "*(Links to sites your operator has blocked are shown altered, \
+             like hxxps://example[.]com, so that no tool opens one by \
+             accident; the text as written, yours included, keeps the real \
+             address. To have a site unblocked, `send_message` to \
+             `operator`.)*"
+        );
+        let deny = Links::Raw {
+            deny: vec!["https://evil.example".parse().unwrap()],
+        };
+        let authors = Links::Defanged {
+            allow: Vec::new(),
+            allow_authors: vec!["tarn".parse().unwrap()],
+        };
+        let none = Links::Raw { deny: Vec::new() };
+        let mut seen = Vec::new();
+        for links in [Links::default(), authors, deny] {
+            let with = defanged_note_for(&links).unwrap();
+            let without = defanged_note_without_tools(&links).unwrap();
+            let (head, tail) = with
+                .split_once("`send_message` to `operator`")
+                .expect("the clause that needs a tool");
+            assert_eq!(
+                without,
+                format!("{head}ask your operator in a later session{tail}")
+            );
+            assert_eq!(tail, ".)*");
+            seen.push(with);
+        }
+        assert_eq!(seen, [DEFANGED_NOTE, DEFANGED_AUTHORS_NOTE, BLOCKED_NOTE]);
+        assert_eq!(defanged_note_without_tools(&none), None);
     }
 
     #[test]

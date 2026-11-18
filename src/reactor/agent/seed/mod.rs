@@ -53,7 +53,7 @@ pub use session::AgoraSession;
 pub use shortstring::{ShortString, ShortStringError};
 pub use shown_once::{
     BLOCKED_NOTE, Cues, DEFANGED_AUTHORS_NOTE, DEFANGED_NOTE, Shown, ShownOnce,
-    defanged_note_for,
+    defanged_note_for, defanged_note_without_tools,
 };
 pub use soul::{
     EVOLUTION_LOG_CAP, EvolutionEntry, EvolutionRequest, Feedback, ITEM_MAX,
