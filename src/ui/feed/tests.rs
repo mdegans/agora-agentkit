@@ -496,8 +496,8 @@ fn a_handler_or_a_reload_changes_nothing_drawn() {
     }
     fn with_reload(feed: FeedLoad) -> String {
         let mut dom = VirtualDom::new_with_props(FeedIsland, page_of(feed));
-        dom.provide_root_context(Reload::<FeedLoad>::new(|| {
-            Box::pin(async { FeedLoad::Pending })
+        dom.provide_root_context(Reload::<FeedPage>::new(|| {
+            Box::pin(async { page_of(FeedLoad::Pending) })
         }));
         dom.rebuild_in_place();
         dioxus_ssr::pre_render(&dom)
@@ -505,6 +505,7 @@ fn a_handler_or_a_reload_changes_nothing_drawn() {
     for feed in [
         FeedLoad::Pending,
         FeedLoad::Failed("e".into()),
+        FeedLoad::NotFound,
         FeedLoad::Loaded(vec![]),
         [post("A"), post("B")].iter().collect(),
     ] {
@@ -566,12 +567,14 @@ async fn a_fresh_mount_loads_through_its_reload() {
     let counted = loads.clone();
     let mut dom =
         VirtualDom::new_with_props(FeedIsland, page_of(FeedLoad::Pending));
-    dom.provide_root_context(Reload::<FeedLoad>::new(move || {
+    dom.provide_root_context(Reload::<FeedPage>::new(move || {
         counted.set(counted.get() + 1);
         Box::pin(async {
-            with_ids(&[(A, "loaded"), (B, "other"), (A, "again")])
-                .iter()
-                .collect()
+            page_of(
+                with_ids(&[(A, "loaded"), (B, "other"), (A, "again")])
+                    .iter()
+                    .collect(),
+            )
         })
     }));
     dom.rebuild_in_place();
@@ -592,9 +595,9 @@ async fn a_hydrating_mount_does_not_load() {
         FeedIsland,
         page_of([post("server")].iter().collect()),
     );
-    dom.provide_root_context(Reload::<FeedLoad>::new(move || {
+    dom.provide_root_context(Reload::<FeedPage>::new(move || {
         counted.set(counted.get() + 1);
-        Box::pin(async { FeedLoad::Loaded(vec![]) })
+        Box::pin(async { page_of(FeedLoad::Loaded(vec![])) })
     }));
     dom.rebuild_in_place();
     let html = settle(&mut dom, |_| false).await;
@@ -736,18 +739,28 @@ fn paging_is_plain_links() {
         ..community_page(full_page(10), input.clone())
     };
     let pages = page.pages();
+    let at = |path: &str| AgoraLink::from_site_path(path).unwrap().unwrap();
     assert_eq!(
         pages,
         Pages {
             page: 2,
             of: Some(3),
-            newer: Some("/agora/community/meta-governance?limit=10&sort=active".into()),
-            older: Some(
-                "/agora/community/meta-governance?limit=10&offset=20&sort=active".into()
+            newer: Some(at(
+                "/agora/community/meta-governance?limit=10&sort=active"
+            )),
+            older: Some(at(
+                "/agora/community/meta-governance?limit=10&offset=20&sort=active"
+            )),
+            by_date: at("/agora/community/meta-governance?limit=10&sort=date"),
+            by_activity: at(
+                "/agora/community/meta-governance?limit=10&sort=active"
             ),
-            by_date: "/agora/community/meta-governance?limit=10&sort=date".into(),
-            by_activity: "/agora/community/meta-governance?limit=10&sort=active".into(),
         }
+    );
+    // Each one's page is the path it was read from: the canonical form
+    assert_eq!(
+        pages.older.unwrap().site_path(),
+        "/agora/community/meta-governance?limit=10&offset=20&sort=active"
     );
     let html = pre_render(FeedIsland, page);
     assert!(

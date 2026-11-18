@@ -35,9 +35,12 @@ use serde::{Deserialize, Serialize};
 use super::{
     ClientOnly, ClientSlot, Reload,
     badges::Badges,
-    feed::{TestPill, post_author, public},
+    feed::{NOT_FOUND_TITLE, NotFound, TestPill, post_author, public},
     format,
     markdown::{Markdown, Site},
+    page::document_title,
+    route::{To, to},
+    use_document_title,
 };
 use crate::{
     enums::RemovedBy,
@@ -247,14 +250,14 @@ fn ReplySlot(target: ReplyTarget) -> Element {
 /// is what the page lists
 #[component]
 pub fn ThreadPost(post: PostResponse, comment_count: usize) -> Element {
-    let community_href = AgoraLink::Feed(GetFeedInput {
+    let community = AgoraLink::Feed(GetFeedInput {
         community: Some(post.community_name.clone()),
         ..GetFeedInput::default()
-    })
-    .site_path();
-    let author_href = post.agent_name.as_ref().map(|name| {
-        AgoraLink::Profile(GetProfileInput { name: name.clone() }).site_path()
     });
+    let author_link = post
+        .agent_name
+        .as_ref()
+        .map(|name| AgoraLink::Profile(GetProfileInput { name: name.clone() }));
     let author = post_author(&post);
     let date = post.created_at.map(format::date_time);
     let removal = removal_sentence(&post);
@@ -283,19 +286,18 @@ pub fn ThreadPost(post: PostResponse, comment_count: usize) -> Element {
             .iter()
             .filter(|t| seen.insert(t.community.clone()))
             .map(|t| {
-                let href = AgoraLink::Feed(GetFeedInput {
+                let link = AgoraLink::Feed(GetFeedInput {
                     community: Some(t.community.clone()),
                     ..GetFeedInput::default()
-                })
-                .site_path();
-                (t.community.clone(), href)
+                });
+                (t.community.clone(), link)
             })
             .collect()
     };
 
     rsx! {
         div { style: "margin-bottom: 0.5rem;",
-            a { class: "pill pill-btn", href: "{community_href}", "← {post.community_name}" }
+            To { link: community, class: "pill pill-btn", "← {post.community_name}" }
         }
         article { class: "card",
             div { class: "post-meta", style: "margin-bottom: 0.75rem;",
@@ -305,8 +307,8 @@ pub fn ThreadPost(post: PostResponse, comment_count: usize) -> Element {
                 if let Some(proposal) = proposal {
                     span { class: "pill pill-green", "{proposal}" }
                 }
-                match author_href {
-                    Some(href) => rsx! { a { href: "{href}", "{author}" } },
+                match author_link {
+                    Some(link) => rsx! { To { link, "{author}" } },
                     None => rsx! { span { "{author}" } },
                 }
                 Badges {
@@ -360,12 +362,12 @@ pub fn ThreadPost(post: PostResponse, comment_count: usize) -> Element {
             if !tags.is_empty() {
                 div { class: "post-meta", style: "margin-top: 0.5rem;",
                     span { "Also relevant to:" }
-                    for (name, href) in tags {
-                        a {
+                    for (name, link) in tags {
+                        To {
                             key: "{name}",
+                            link,
                             class: "pill pill-btn",
                             style: "font-size: 0.75rem;",
-                            href: "{href}",
                             "{name}"
                         }
                     }
@@ -387,10 +389,7 @@ fn RowFrame(id: CommentId, place: Place, children: Element) -> Element {
     let short = place.short_anchor.map(|s| format!("comment-{s}"));
     let reply_label = place.replying_to.as_ref().map(|to| match to {
         ReplyingTo::Author(name) => (
-            Some(
-                AgoraLink::Profile(GetProfileInput { name: name.clone() })
-                    .site_path(),
-            ),
+            Some(AgoraLink::Profile(GetProfileInput { name: name.clone() })),
             name.to_string(),
         ),
         ReplyingTo::Removed => (None, String::new()),
@@ -401,10 +400,10 @@ fn RowFrame(id: CommentId, place: Place, children: Element) -> Element {
                 span { id: "{short}" }
             }
             match reply_label {
-                Some((Some(href), name)) => rsx! {
+                Some((Some(link), name)) => rsx! {
                     div { class: "comment-reply-label",
                         "↳ replying to "
-                        a { href: "{href}", "{name}" }
+                        To { link, "{name}" }
                     }
                 },
                 Some((None, _)) => rsx! {
@@ -425,9 +424,10 @@ fn CommentRow(
     post: PostId,
     locked: bool,
 ) -> Element {
-    let author_href = comment.agent_name.as_ref().map(|name| {
-        AgoraLink::Profile(GetProfileInput { name: name.clone() }).site_path()
-    });
+    let author_link = comment
+        .agent_name
+        .as_ref()
+        .map(|name| AgoraLink::Profile(GetProfileInput { name: name.clone() }));
     let author = comment
         .agent_name
         .as_ref()
@@ -443,8 +443,8 @@ fn CommentRow(
     rsx! {
         RowFrame { id: comment.id, place,
             div { class: "comment-meta",
-                match author_href {
-                    Some(href) => rsx! { a { href: "{href}", "{author}" } },
+                match author_link {
+                    Some(link) => rsx! { To { link, "{author}" } },
                     None => rsx! { span { "{author}" } },
                 }
                 Badges {
@@ -484,21 +484,22 @@ fn CommentRow(
 /// A stub's row: author, date, preview, and where to read the rest
 #[component]
 fn StubRow(stub: CommentStub, place: Place) -> Element {
-    let author_href = stub.agent_name.as_ref().map(|name| {
-        AgoraLink::Profile(GetProfileInput { name: name.clone() }).site_path()
-    });
+    let author_link = stub
+        .agent_name
+        .as_ref()
+        .map(|name| AgoraLink::Profile(GetProfileInput { name: name.clone() }));
     let author = stub
         .agent_name
         .as_ref()
         .map_or_else(|| UNATTRIBUTED.to_string(), ToString::to_string);
     let date = stub.created_at.map(format::date_time);
-    let href = AgoraLink::comment(stub.id).site_path();
+    let whole = AgoraLink::comment(stub.id);
     let replies = format::reply_count(stub.reply_count);
     rsx! {
         RowFrame { id: stub.id, place,
             div { class: "comment-meta",
-                match author_href {
-                    Some(href) => rsx! { a { href: "{href}", "{author}" } },
+                match author_link {
+                    Some(link) => rsx! { To { link, "{author}" } },
                     None => rsx! { span { "{author}" } },
                 }
                 Badges {
@@ -516,7 +517,7 @@ fn StubRow(stub: CommentStub, place: Place) -> Element {
             div { class: "comment-body",
                 p { class: "post-body-preview", "{stub.preview}" }
                 p { class: "post-meta",
-                    a { href: "{href}", "Read the whole comment →" }
+                    {to!(whole; "Read the whole comment →")}
                     span { "·" }
                     span { "{replies}" }
                 }
@@ -592,7 +593,14 @@ pub enum ThreadLoad {
     /// Why it couldn't be loaded, in words for the public, as
     /// [`FeedLoad::Failed`](super::feed::FeedLoad::Failed)
     Failed(String),
+    /// There is no such post: a client's load after a navigation (the
+    /// API's 404). The server answers such a page with its 404 instead
+    NotFound,
 }
+
+/// What a thread's page says when its post doesn't exist: the server's
+/// 404 page's words too
+pub const POST_NOT_FOUND: &str = "That post doesn't exist or has been deleted.";
 
 /// The thread island's data: its root's props, and what the server embeds
 #[derive(Debug, Clone, PartialEq, Props, Serialize, Deserialize)]
@@ -642,6 +650,22 @@ impl ThreadPage {
     /// The page's own path, `/agora/post/<id>`
     pub fn href(&self) -> String {
         AgoraLink::post(self.post).site_path()
+    }
+
+    /// The page's title, before [`TITLE_SUFFIX`](super::page::TITLE_SUFFIX):
+    /// the post's (from the read as the page holds it, so the public one
+    /// on a public page), or "A thread" until it is loaded
+    pub fn title(&self) -> String {
+        title_of(&self.thread)
+    }
+}
+
+/// [`ThreadPage::title`] of a page in the state `thread`
+fn title_of(thread: &ThreadLoad) -> String {
+    match thread {
+        ThreadLoad::Loaded(read) => read.post.title.clone(),
+        ThreadLoad::NotFound => NOT_FOUND_TITLE.to_owned(),
+        ThreadLoad::Pending | ThreadLoad::Failed(_) => "A thread".to_owned(),
     }
 }
 
@@ -697,7 +721,8 @@ impl super::island::Public for ThreadPage {
 
 /// The thread island's root, on both sides: the [`ClientSlot::Session`]
 /// slot, then the thread from the page's data, loaded through the
-/// [`Reload<ThreadLoad>`] a client provides when it mounts without it
+/// [`Reload<ThreadLoad>`] a client provides when it mounts without it,
+/// its title given to the client's [`DocumentTitle`](super::DocumentTitle)
 #[allow(non_snake_case)]
 pub fn ThreadIsland(page: ThreadPage) -> Element {
     use_context_provider(|| Site(page.site.clone()));
@@ -731,6 +756,9 @@ pub fn ThreadIsland(page: ThreadPage) -> Element {
             load.call(());
         }
     };
+    use_document_title(use_memo(move || {
+        document_title(&title_of(&thread.read()))
+    }));
 
     rsx! {
         ClientOnly { slot: ClientSlot::Session }
@@ -751,6 +779,9 @@ pub fn ThreadIsland(page: ThreadPage) -> Element {
                             "Try again"
                         }
                     }
+                },
+                ThreadLoad::NotFound => rsx! {
+                    NotFound { said: POST_NOT_FOUND }
                 },
                 ThreadLoad::Loaded(read) => {
                     let count = rows(&read).len();

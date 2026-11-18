@@ -225,7 +225,7 @@ fn every_page_reparses_as_drawn() {
             .into(),
         FeedPage::new(FeedPage::input(), FeedLoad::Loaded(vec![])).into(),
         FeedPage::new(FeedPage::input(), posts.iter().collect()).into(),
-        FeedPage::new(community_input, posts.iter().collect())
+        FeedPage::new(community_input.clone(), posts.iter().collect())
             .with_community(community())
             .with_total(100)
             .into(),
@@ -235,6 +235,10 @@ fn every_page_reparses_as_drawn() {
         ThreadPage::new(thread().post, ThreadLoad::Pending).into(),
         ThreadPage::new(thread().post, ThreadLoad::Failed("<down>".into()))
             .into(),
+        ThreadPage::new(thread().post, ThreadLoad::NotFound).into(),
+        FeedPage::new(community_input.clone(), FeedLoad::NotFound).into(),
+        // A client's community page after a navigation, before its load
+        FeedPage::pending(community_input.clone()).into(),
     ];
     pages.push(Page::Thread(thread()));
     for page in pages {
@@ -515,4 +519,82 @@ fn a_page_on_a_site_hydrates_with_its_links_rel() {
     dom.provide_root_context(ClientSlots::new());
     dom.rebuild_in_place();
     assert_eq!(dioxus_ssr::pre_render(&dom), rendered.html);
+}
+
+/// A page's title, before " — Agora": what agora-server's forum pages put
+/// in `<title>` (the community's display name, "All Posts", the post's
+/// title, "A thread"), and for the states only a client draws, the
+/// community's name while it loads and "Not found"
+#[test]
+fn every_page_has_its_title() {
+    let community_input = GetFeedInput {
+        community: Some("meta-governance".parse().unwrap()),
+        ..GetFeedInput::default()
+    };
+    let mut trashed = big_thread(1);
+    trashed.post.title = "Mine, trashed".into();
+    trashed.post.deleted_at = Some(crate::fixtures::at());
+    trashed.post.removed_by = Some(crate::enums::RemovedBy::Author);
+    trashed.in_your_trash = Some(
+        serde_json::from_value(serde_json::json!({
+            "entry_id": uuid::Uuid::from_u128(1),
+            "id": trashed.post.id,
+            "kind": "post",
+            "post_id": trashed.post.id,
+            "created_at": "2026-11-04T08:00:00Z",
+            "deleted_at": "2026-11-04T09:00:00Z",
+            "deleted_by": "author",
+            "can_restore": true,
+            "can_delete_permanently": true,
+        }))
+        .unwrap(),
+    );
+    for (page, title) in [
+        (
+            FeedPage::new(FeedPage::input(), FeedLoad::Loaded(vec![])).into(),
+            "All Posts",
+        ),
+        (
+            FeedPage::new(FeedPage::input(), FeedLoad::Failed("x".into()))
+                .into(),
+            "All Posts",
+        ),
+        (
+            FeedPage::new(community_input.clone(), FeedLoad::Loaded(vec![]))
+                .with_community(community())
+                .into(),
+            "Meta <Governance>",
+        ),
+        (
+            FeedPage::pending(community_input.clone()).into(),
+            "meta-governance",
+        ),
+        (
+            FeedPage::new(community_input, FeedLoad::NotFound).into(),
+            "Not found",
+        ),
+        (Page::Thread(thread()), "A title"),
+        (
+            ThreadPage::new(thread().post, ThreadLoad::Pending).into(),
+            "A thread",
+        ),
+        (
+            ThreadPage::new(thread().post, ThreadLoad::Failed("x".into()))
+                .into(),
+            "A thread",
+        ),
+        (
+            ThreadPage::new(thread().post, ThreadLoad::NotFound).into(),
+            "Not found",
+        ),
+        // A page's title is the public one: never a trashed title
+        (
+            Page::Thread(ThreadPage::loaded(trashed)),
+            crate::enums::RemovedBy::Author.placeholder(),
+        ),
+    ] {
+        let page: Page = page;
+        assert_eq!(page.title(), title);
+        assert_eq!(page.document_title(), format!("{title} — Agora"));
+    }
 }

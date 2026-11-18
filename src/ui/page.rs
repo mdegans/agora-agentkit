@@ -14,15 +14,18 @@
 //! ```
 //!
 //! The client provides the [`Reload`](super::Reload) the page's root
-//! reads, by matching on the [`Page`] (`Reload<FeedLoad>` for a feed,
-//! `Reload<ThreadLoad>` for a thread). Links between pages stay plain
-//! `<a href>`s to server-rendered pages: there is no client-side router.
+//! reads, by matching on the [`Page`] (`Reload<FeedPage>` for a feed,
+//! `Reload<ThreadLoad>` for a thread). [`PageIsland`] draws one page with
+//! no router, its links plain `<a href>`s; the site's pages are drawn
+//! through the router by [`route::SiteRoot`](super::route::SiteRoot),
+//! which reads the same [`Page`] from the same data block.
 
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::{
     feed::{FeedIsland, FeedPage},
+    route::ClientPage,
     thread::{ThreadIsland, ThreadPage},
 };
 
@@ -64,6 +67,9 @@ impl super::island::Public for Page {
     }
 }
 
+/// What every page's `<title>` ends with, after [`Page::title`]
+pub const TITLE_SUFFIX: &str = " — Agora";
+
 impl Page {
     /// The island, pre-rendered, with its data block
     /// ([`island::DATA_ID`](super::island::DATA_ID))
@@ -71,6 +77,42 @@ impl Page {
     pub fn render(self) -> Result<super::ssr::Rendered, serde_json::Error> {
         super::ssr::render_island(super::island::DATA_ID, PageIsland, self)
     }
+
+    /// The page's title, before [`TITLE_SUFFIX`]: drawn from what the page
+    /// shows, so from its public form ([`island::Public`](super::island::Public))
+    /// when the page is public
+    pub fn title(&self) -> String {
+        match self {
+            Page::Feed(page) => page.title(),
+            Page::Thread(page) => page.title(),
+        }
+    }
+
+    /// The page's `<title>`: [`title`](Self::title) and [`TITLE_SUFFIX`]
+    pub fn document_title(&self) -> String {
+        document_title(&self.title())
+    }
+
+    /// The website the page says it is on ([`ThreadPage::at`])
+    pub fn site(&self) -> Option<&url::Url> {
+        match self {
+            Page::Feed(_) => None,
+            Page::Thread(page) => page.site.as_ref(),
+        }
+    }
+
+    /// The page the router draws this one as
+    pub fn client_page(&self) -> ClientPage {
+        match self {
+            Page::Feed(page) => ClientPage::Feed(page.input.clone()),
+            Page::Thread(page) => ClientPage::Thread(page.post),
+        }
+    }
+}
+
+/// `title` and [`TITLE_SUFFIX`]
+pub(crate) fn document_title(title: &str) -> String {
+    [title, TITLE_SUFFIX].concat()
 }
 
 /// Every page's root: the page's own root, from its data

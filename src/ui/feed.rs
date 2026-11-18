@@ -8,16 +8,21 @@
 //! [`plain_preview`]); the body is in the page's data, so a card can later
 //! open in place without another fetch.
 //!
-//! Paging and sorting are plain links to the server's pages
-//! ([`AgoraLink::site_path`] of the page's [`GetFeedInput`]), so a reader
-//! without JavaScript pages through the same feed
+//! Paging and sorting are links to the server's pages ([`To`] of the
+//! page's [`GetFeedInput`]), so a reader without JavaScript pages through
+//! the same feed; under the router they navigate client-side
 
 use dioxus::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    ClientOnly, ClientSlot, Reload, badges::Badges, format,
+    ClientOnly, ClientSlot, Reload,
+    badges::Badges,
+    format,
     markdown::plain_preview,
+    page::document_title,
+    route::{To, to},
+    use_document_title,
 };
 use crate::{
     enums::FeedSort,
@@ -58,17 +63,17 @@ pub fn PostCard(
     #[props(default = true)]
     show_community: bool,
 ) -> Element {
-    let href = AgoraLink::post(post.id).site_path();
-    let community_href = show_community.then(|| {
+    let title = AgoraLink::post(post.id);
+    let community = show_community.then(|| {
         AgoraLink::Feed(GetFeedInput {
             community: Some(post.community_name.clone()),
             ..GetFeedInput::default()
         })
-        .site_path()
     });
-    let author_href = post.agent_name.as_ref().map(|name| {
-        AgoraLink::Profile(GetProfileInput { name: name.clone() }).site_path()
-    });
+    let author_link = post
+        .agent_name
+        .as_ref()
+        .map(|name| AgoraLink::Profile(GetProfileInput { name: name.clone() }));
     let author = post_author(&post);
     let date = post.created_at.map(format::date);
     let comments = format::comment_count(post.comment_count.unwrap_or(0));
@@ -88,11 +93,11 @@ pub fn PostCard(
                 if post.test.is_some() {
                     TestPill {}
                 }
-                a { class: "stretched-link", href: "{href}", "{post.title}" }
+                To { link: title, class: "stretched-link", "{post.title}" }
             }
             div { class: "post-meta",
-                match author_href {
-                    Some(author_href) => rsx! { a { href: "{author_href}", "{author}" } },
+                match author_link {
+                    Some(link) => rsx! { To { link, "{author}" } },
                     None => rsx! { span { "{author}" } },
                 }
                 Badges {
@@ -102,12 +107,12 @@ pub fn PostCard(
                     via: post.via,
                     author: post.agent_name.clone(),
                 }
-                if let Some(community_href) = community_href {
+                if let Some(link) = community {
                     span { "·" }
-                    a {
+                    To {
+                        link,
                         class: "pill",
                         style: "font-size: 0.6875rem;",
-                        href: "{community_href}",
                         "{post.community_name}"
                     }
                 }
@@ -153,7 +158,15 @@ pub enum FeedLoad {
     /// the public ("Agora couldn't be reached"), never an internal error,
     /// a path or anything about the request
     Failed(String),
+    /// There is no such community: a client's load after a navigation
+    /// (the API's 404). The server answers such a page with its 404
+    /// instead, so it never draws this
+    NotFound,
 }
+
+/// What a feed page says when its community doesn't exist: the server's
+/// 404 page's words too
+pub const COMMUNITY_NOT_FOUND: &str = "That community doesn't exist.";
 
 impl FromIterator<PostResponse> for FeedLoad {
     fn from_iter<I: IntoIterator<Item = PostResponse>>(posts: I) -> Self {
@@ -193,6 +206,23 @@ impl FeedPage {
         GetFeedInput::default()
     }
 
+    /// The page of `input`'s feed, not loaded yet: a client's after a
+    /// navigation
+    pub fn pending(input: GetFeedInput) -> Self {
+        Self::new(input, FeedLoad::Pending)
+    }
+
+    /// The page's title, before [`TITLE_SUFFIX`](super::page::TITLE_SUFFIX):
+    /// the community's name, or "All Posts"
+    pub fn title(&self) -> String {
+        match (&self.feed, &self.community, &self.input.community) {
+            (FeedLoad::NotFound, ..) => NOT_FOUND_TITLE.to_owned(),
+            (_, Some(c), _) => c.display_name.clone(),
+            (_, None, Some(name)) => name.to_string(),
+            (_, None, None) => "All Posts".to_owned(),
+        }
+    }
+
     /// The page of `input`'s feed that `feed` is, as a reader who isn't
     /// signed in sees it: what depends on the reader (`you_commented`) is
     /// cleared
@@ -229,14 +259,13 @@ impl FeedPage {
     }
 
     /// This feed, at another offset and sort
-    fn at(&self, offset: u64, sort: Option<FeedSort>) -> String {
+    fn at(&self, offset: u64, sort: Option<FeedSort>) -> AgoraLink {
         let offset = u32::try_from(offset).unwrap_or(u32::MAX);
         AgoraLink::Feed(GetFeedInput {
             offset: (offset > 0).then_some(offset),
             sort,
             ..self.input.clone()
         })
-        .site_path()
     }
 
     /// Where this page is in the feed, and the links around it, as the
@@ -288,18 +317,21 @@ pub(crate) fn public(mut post: PostResponse) -> PostResponse {
     post
 }
 
-/// A feed page's place in its feed, and the site paths around it
+/// A feed page's place in its feed, and the pages around it
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Pages {
     /// 1 for the first
     pub page: u64,
     /// How many there are, when the page knows
     pub of: Option<u64>,
-    pub newer: Option<String>,
-    pub older: Option<String>,
-    pub by_date: String,
-    pub by_activity: String,
+    pub newer: Option<AgoraLink>,
+    pub older: Option<AgoraLink>,
+    pub by_date: AgoraLink,
+    pub by_activity: AgoraLink,
 }
+
+/// The title of a page whose post or community doesn't exist
+pub const NOT_FOUND_TITLE: &str = "Not found";
 
 /// A feed page: its header, sort links, posts and paging, with its
 /// loading, error and empty states. `on_refresh`, which a client gives,
@@ -339,10 +371,18 @@ pub fn FeedListing(
         "The network is quiet. Check back soon!"
     };
 
+    if matches!(page.feed, FeedLoad::NotFound) {
+        return rsx! {
+            section { class: "agora-web",
+                NotFound { said: COMMUNITY_NOT_FOUND }
+            }
+        };
+    }
+
     rsx! {
         section { class: "agora-web",
-            match &page.community {
-                Some(c) => rsx! {
+            match (&page.community, &page.input.community) {
+                (Some(c), _) => rsx! {
                     div { class: "page-header",
                         h1 { "{c.display_name}" }
                         if let Some(description) = &c.description {
@@ -360,7 +400,14 @@ pub fn FeedListing(
                         }
                     }
                 },
-                None => rsx! {
+                // A client's page after a navigation, before its load: the
+                // community's name, its header to come
+                (None, Some(name)) => rsx! {
+                    div { class: "page-header",
+                        h1 { "{name}" }
+                    }
+                },
+                (None, None) => rsx! {
                     div { class: "page-header",
                         h1 { "All Posts" }
                         p { "Everything happening across Agora, in one place." }
@@ -368,8 +415,8 @@ pub fn FeedListing(
                 },
             }
             div { class: "sort-bar",
-                a { class: by_date, href: "{pages.by_date}", "New" }
-                a { class: by_activity, href: "{pages.by_activity}", "Active" }
+                {to!(pages.by_date, class: by_date; "New")}
+                {to!(pages.by_activity, class: by_activity; "Active")}
                 a {
                     id: "agora-refresh",
                     class: "pill pill-btn",
@@ -396,6 +443,8 @@ pub fn FeedListing(
                         }
                     }
                 },
+                // Drawn above, in place of the page
+                FeedLoad::NotFound => rsx! {},
                 FeedLoad::Loaded(list) if list.is_empty() => rsx! {
                     div { class: "empty-state",
                         h3 { "No posts yet" }
@@ -415,8 +464,8 @@ pub fn FeedListing(
             }
             if pages.newer.is_some() || pages.older.is_some() {
                 div { class: "pagination",
-                    if let Some(newer) = &pages.newer {
-                        a { class: "pill pill-btn", href: "{newer}", "← Previous" }
+                    if let Some(newer) = pages.newer {
+                        {to!(newer, class: "pill pill-btn"; "← Previous")}
                     }
                     span { class: "pagination-info",
                         match pages.of {
@@ -424,8 +473,8 @@ pub fn FeedListing(
                             None => rsx! { "Page {pages.page}" },
                         }
                     }
-                    if let Some(older) = &pages.older {
-                        a { class: "pill pill-btn", href: "{older}", "Next →" }
+                    if let Some(older) = pages.older {
+                        {to!(older, class: "pill pill-btn"; "Next →")}
                     }
                 }
             }
@@ -443,14 +492,15 @@ fn unique(posts: &[PostResponse]) -> impl Iterator<Item = &PostResponse> {
 }
 
 /// The feed island's root, on both sides: the [`ClientSlot::Session`] slot,
-/// then [`FeedListing`] from the page's data, refreshed through the
-/// [`Reload<FeedLoad>`] a client provides (without one, Refresh is a link
-/// to the page)
+/// then [`FeedListing`] from the page's data, loaded and refreshed through
+/// the [`Reload<FeedPage>`] a client provides (without one, Refresh is a
+/// link to the page), its title given to the client's
+/// [`DocumentTitle`](super::DocumentTitle)
 #[allow(non_snake_case)]
 pub fn FeedIsland(page: FeedPage) -> Element {
-    let reload = try_use_context::<Reload<FeedLoad>>();
+    let reload = try_use_context::<Reload<FeedPage>>();
     let can_reload = reload.is_some();
-    let mut feed = use_signal(|| page.feed.clone());
+    let mut shown = use_signal(|| page);
     let mut refreshing = use_signal(|| false);
     let refresh = use_callback(move |()| {
         let Some(reload) = reload.clone() else {
@@ -462,28 +512,38 @@ pub fn FeedIsland(page: FeedPage) -> Element {
         refreshing.set(true);
         spawn(async move {
             let loaded = reload.load().await;
-            feed.set(loaded);
+            shown.set(loaded);
             refreshing.set(false);
         });
     });
     // A client mounting without the server's data loads now, after the
     // first render
     use_effect(move || {
-        if matches!(*feed.peek(), FeedLoad::Pending) {
+        if matches!(shown.peek().feed, FeedLoad::Pending) {
             refresh.call(());
         }
     });
-    let shown = FeedPage {
-        feed: feed(),
-        ..page
-    };
+    use_document_title(use_memo(move || document_title(&shown.read().title())));
 
     rsx! {
         ClientOnly { slot: ClientSlot::Session }
         FeedListing {
-            page: shown,
+            page: shown(),
             refreshing: refreshing(),
             on_refresh: can_reload.then_some(refresh),
+        }
+    }
+}
+
+/// A page whose post or community doesn't exist (a client's load after a
+/// navigation: the server answers its 404 instead), with a way on
+#[component]
+pub fn NotFound(said: &'static str) -> Element {
+    rsx! {
+        div { class: "empty-state", role: "alert",
+            h3 { "{NOT_FOUND_TITLE}" }
+            p { "{said}" }
+            {to!(AgoraLink::Feed(GetFeedInput::default()), class: "pill pill-btn"; "All Posts")}
         }
     }
 }
