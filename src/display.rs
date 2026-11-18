@@ -27,7 +27,13 @@ mod json;
 #[cfg(test)]
 pub(crate) mod oracle;
 mod profiles;
+pub(crate) mod shown_once;
 
+#[cfg(any(test, all(feature = "seed", feature = "misanthropic")))]
+pub(crate) use agent::views;
+pub use agent::views::{
+    Dashboard, MODEL_LINE_PREFIX, ModelName, model_line, replace_model_line,
+};
 pub use agent::{AgentDisplay, AgentText, ByAuthor, DisplayContext};
 pub use domains::{
     DomainChange, DomainFilter, DomainNote, NotSent, ServerTool, ToolDomains,
@@ -37,6 +43,10 @@ pub use json::{AgentJson, Authored, Exempt, Unless, json_view};
 pub use profiles::{
     AgentDisplayProfiles, DisplaySelection, ProfileName, ProfileNameError,
     ResolvedDisplay, SelectedBy, UnknownProfile,
+};
+pub use shown_once::{
+    BLOCKED_NOTE, Cues, DEFANGED_AUTHORS_NOTE, DEFANGED_NOTE, Shown, ShownOnce,
+    defanged_note_for,
 };
 
 /// Options common to every view, an agent's or a human's.

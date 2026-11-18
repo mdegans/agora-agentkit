@@ -3,7 +3,8 @@
 
 use misanthropic::tool::{self, Tool, ToolBox, Use};
 
-use super::{Agora, ContextGauge, Gauged, ShownIds, ShownOnce};
+use super::{Agora, ContextGauge, Gauged, ShownIds};
+use crate::display::ShownOnce;
 use crate::tools::ToolCall;
 
 /// An [`Agora`] in a [`Gauged`] in a flat [`ToolBox`], as the runner seats

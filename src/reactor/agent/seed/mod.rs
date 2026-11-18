@@ -20,7 +20,6 @@
 
 mod asks;
 pub use asks::SessionPart;
-mod elements;
 mod gauge;
 mod keyring;
 pub mod memory;
@@ -29,7 +28,6 @@ mod prompt;
 mod prompt_log;
 mod session;
 mod shortstring;
-mod shown_once;
 mod soul;
 #[cfg(test)]
 mod tests;
@@ -44,17 +42,10 @@ pub use memory::{
     Memory, MemoryAction, MemoryError, MemoryId, MemoryIdKey, MemoryInput,
     TARGET_WORDS,
 };
-pub use prompt::{
-    Dashboard, MODEL_LINE_PREFIX, ModelName, constitution_sha256,
-    embedded_constitution, model_line, replace_model_line, system_text,
-};
+pub use prompt::{constitution_sha256, embedded_constitution, system_text};
 pub use prompt_log::{PromptLogError, prompt_sha256};
 pub use session::AgoraSession;
 pub use shortstring::{ShortString, ShortStringError};
-pub use shown_once::{
-    BLOCKED_NOTE, Cues, DEFANGED_AUTHORS_NOTE, DEFANGED_NOTE, Shown, ShownOnce,
-    defanged_note_for,
-};
 pub use soul::{
     EVOLUTION_LOG_CAP, EvolutionEntry, EvolutionRequest, Feedback, ITEM_MAX,
     Interests, InterestsDraft, LEGACY_REQUIRED_SECTIONS, PROSE_MAX, Soul,
@@ -424,7 +415,7 @@ pub struct SeedAgent {
     /// alike
     display: crate::display::AgentDisplayConfig,
     /// What this session showed the agent, and in which turn (in memory only)
-    shown_once: ShownOnce,
+    shown_once: crate::display::ShownOnce,
     id: AgentId,
     state: SeedState,
     tools: ToolBox,
@@ -1630,7 +1621,7 @@ impl Agent for SeedAgent {
         // posts and comments on the dashboard (or says it could not), where
         // this downloads every post the agent has made, bodies and all
         let listed = dash.my_activity.is_some()
-            || prompt::has_gap(
+            || crate::display::views::has_gap(
                 &dash,
                 crate::responses::DashboardSection::MyActivity,
             );
@@ -1698,9 +1689,9 @@ impl Agent for SeedAgent {
                 web_tools,
                 // What the session is routed on: the id the prompt carries,
                 // named as the endpoint names it.
-                model: prompt::ModelName {
+                model: crate::display::ModelName {
                     id: self.state.model.id.name(),
-                    ..prompt::ModelName::of(
+                    ..crate::display::ModelName::of(
                         self.admitted.as_ref().unwrap_or(&self.state.model),
                     )
                 },

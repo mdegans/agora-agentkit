@@ -637,9 +637,7 @@ fn its_own_profile_is_under_the_policy_as_anothers_is() {
         assert_eq!(shown.matches(DEFANGED).count(), 4, "{shown}");
         assert_eq!(shown.matches("agora://post/8dbc9b3a").count(), 4);
     }
-    use crate::reactor::agent::seed::prompt::{
-        OWN_BOTH_LINKS, OWN_LINKS, OWN_SITE_LINKS,
-    };
+    use crate::display::views::{OWN_BOTH_LINKS, OWN_LINKS, OWN_SITE_LINKS};
     // Defanged links and a site page's link: both said
     assert!(
         own.contains(&format!(
@@ -681,16 +679,14 @@ fn its_own_profile_is_under_the_policy_as_anothers_is() {
     linked.bio = Some("Mine: https://example.com/x".into());
     let shown = profile(&linked);
     assert!(
-        shown.contains(&format!(
-            "(Here {}.)",
-            crate::reactor::agent::seed::prompt::OWN_LINKS
-        )),
+        shown
+            .contains(&format!("(Here {}.)", crate::display::views::OWN_LINKS)),
         "{shown}"
     );
 }
 
 fn inbox() -> InboxResponse {
-    let (mut inbox, _) = crate::reactor::agent::seed::tests::inbox_with(LINKS);
+    let (mut inbox, _) = crate::display::views::tests::inbox_with(LINKS);
     let mut broadcast = inbox.messages[0].clone();
     broadcast.id = crate::ids::MessageId::from(uuid::Uuid::from_u128(9));
     broadcast.recipient_id = None;
@@ -834,7 +830,7 @@ fn data_file_entry() -> GovernanceEntryResponse {
     let file: crate::govlog::DataFile = serde_json::from_value(json!({
         "path": path,
         "bytes": text.len(),
-        "sha256": constitution_sha256(&text),
+        "sha256": crate::govlog::DataFile::of(path.clone(), text.as_bytes()).sha256,
     }))
     .expect("a data set's file");
     entry.data_file = Some(
@@ -984,7 +980,7 @@ fn what_the_server_never_rewrote_of_agents_text_is_under_the_policy() {
     // The header a community's link reads over its feed
     no_links(
         &default_on_site(|cx| {
-            crate::reactor::agent::seed::tool::CommunityHeader {
+            crate::display::views::CommunityHeader {
                 community: &communities[0],
             }
             .agent_display(cx)

@@ -11,6 +11,9 @@ use super::{AgentDisplayConfig, DisplayConfig, Links};
 use crate::names::AgentName;
 use crate::threads;
 
+mod elements;
+pub(crate) mod views;
+
 /// What a view is rendered with: the reader's config, and the site whose
 /// page URLs are written as `agora://` links.
 ///

@@ -37,10 +37,13 @@ use crate::links::AgoraLink;
 use crate::requests::{FetchAgoraLinkInput, SubmitFeedbackPayload};
 use crate::responses::VoteCast;
 
-use crate::display::{AgentDisplay, AgentDisplayConfig, DisplayContext};
+use crate::display::{
+    AgentDisplay, AgentDisplayConfig, Cues, DisplayContext, ShownOnce,
+};
 
 use super::gauge::{ContextGauge, estimate_tokens};
 use super::prompt;
+use crate::display::views;
 
 /// Full governance reads allowed per session.
 ///
@@ -536,7 +539,7 @@ pub struct Agora {
     shown: ShownIds,
     /// Posts and comments shown in full this session, so none is shown
     /// twice (0.108; committed by [`super::Gauged`])
-    shown_once: super::ShownOnce,
+    shown_once: ShownOnce,
     /// Deletions, restores and erasures spent this session (see
     /// [`MAX_TRASH_WRITES`])
     trash_writes: usize,
@@ -551,7 +554,7 @@ pub struct Agora {
     /// again (review of 0.113.0). In memory only, gone with the session
     history_cache: HashMap<crate::ids::GovernanceLogId, serde_json::Value>,
     /// Documents over [`DOCUMENT_SIZED_BYTES`] whose outline a read showed
-    /// this session, by [`ShownOnce::document_key`](super::ShownOnce::document_key):
+    /// this session, by [`ShownOnce::document_key`](ShownOnce::document_key):
     /// the next read of one shows it whole
     sized_documents: HashSet<String>,
     /// The messages `get_inbox` listed this session, by id, with the
@@ -592,7 +595,7 @@ impl Agora {
             verbatim_read: false,
             context: ContextGauge::default(),
             shown: ShownIds::default(),
-            shown_once: super::ShownOnce::default(),
+            shown_once: ShownOnce::default(),
             trash_writes: 0,
             trash_listed: ShownIds::default(),
             by_link: false,
@@ -648,7 +651,7 @@ impl Agora {
 
     /// Show each post and comment once a session, with `shown_once`: the
     /// same set the [`super::Gauged`] around this tool commits to
-    pub fn with_shown_once(mut self, shown_once: super::ShownOnce) -> Self {
+    pub fn with_shown_once(mut self, shown_once: ShownOnce) -> Self {
         shown_once.set_links(self.display.links());
         self.shown_once = shown_once;
         self
@@ -779,7 +782,7 @@ impl Agora {
 
     /// Tell the renderers how this result points at further reads
     fn set_cues(&self) {
-        self.shown_once.set_cues(super::Cues {
+        self.shown_once.set_cues(Cues {
             links: self.by_link,
             full_reads_left: self.full_reads_left(),
         });
@@ -887,7 +890,7 @@ impl Agora {
             },
             // One the agent was shown is a pointer, and costs the budget
             // nothing (review of 0.113.0)
-            |id| once.earlier_part(&prompt::changes_key(id)).is_some(),
+            |id| once.earlier_part(&views::changes_key(id)).is_some(),
             history,
         );
         self.history_cache.extend(fetched);
@@ -895,12 +898,12 @@ impl Agora {
     }
 
     /// A governance entry as this session reads it, rendered once: each
-    /// call marks what it shows ([`prompt::GovernanceEntry`])
+    /// call marks what it shows ([`views::GovernanceEntry`])
     fn governance_entry(
         &self,
         entry: &crate::responses::GovernanceEntryResponse,
     ) -> String {
-        prompt::GovernanceEntry {
+        views::GovernanceEntry {
             entry,
             once: &self.shown_once,
         }
@@ -917,14 +920,14 @@ impl Agora {
         let communities = self.client.list_communities().await.ok()?;
         let c = communities.iter().find(|c| c.name == *name)?;
         Some(
-            CommunityHeader { community: c }
+            views::CommunityHeader { community: c }
                 .agent_display(self.cx())
                 .to_string(),
         )
     }
 
     /// The comment lines for a `detail="summary"` read of `post`
-    /// ([`prompt::summary_comment_index`]), from a second read of it at the
+    /// ([`views::summary_comment_index`]), from a second read of it at the
     /// smallest comment budget: every comment comes back, in full or as a
     /// stub, and only its author, date, id and size are shown. `None` when
     /// that read fails; the summary then says only how many there are
@@ -949,7 +952,7 @@ impl Agora {
         let crate::responses::ContentResponse::Post(thread) = read.ok()? else {
             return None;
         };
-        let (lines, listed) = prompt::summary_comment_index(
+        let (lines, listed) = views::summary_comment_index(
             &thread,
             &self.agent_name,
             &self.shown_once,
@@ -1060,35 +1063,6 @@ fn with_limit_note(
     match note {
         Some(note) => format!("{note}\n\n{text}"),
         None => text,
-    }
-}
-
-/// A community's name, description and members, over its feed
-pub(super) struct CommunityHeader<'a> {
-    pub community: &'a crate::responses::CommunityResponse,
-}
-
-impl AgentDisplay for CommunityHeader<'_> {
-    fn fmt_agent(
-        &self,
-        f: &mut dyn std::fmt::Write,
-        cx: DisplayContext<'_>,
-    ) -> std::fmt::Result {
-        use crate::responses::one_line;
-        let c = self.community;
-        writeln!(
-            f,
-            "## {} ({})",
-            prompt::linked_line(&one_line(&cx.linked(&c.display_name))),
-            c.name.canonical()
-        )?;
-        if let Some(d) = c.description.as_deref().filter(|d| !d.is_empty()) {
-            writeln!(f, "{}", prompt::linked_line(&one_line(&cx.linked(d))))?;
-        }
-        if let Some(n) = c.member_count {
-            writeln!(f, "{n} member(s)")?;
-        }
-        f.write_char('\n')
     }
 }
 
@@ -1373,7 +1347,7 @@ impl Agora {
             crate::responses::ContentResponse::Governance(entry)
                 if !part_keys.is_empty() && !capped =>
             {
-                prompt::part_content_key(entry).map(|k| (k, entry.clone()))
+                views::part_content_key(entry).map(|k| (k, entry.clone()))
             }
             _ if capped
                 && part_keys
@@ -1383,7 +1357,7 @@ impl Agora {
             {
                 match self.client.get_content(&asked_input).await {
                     Ok(crate::responses::ContentResponse::Governance(e)) => {
-                        prompt::part_content_key(&e).map(|k| (k, e.clone()))
+                        views::part_content_key(&e).map(|k| (k, e.clone()))
                     }
                     _ => None,
                 }
@@ -1399,7 +1373,7 @@ impl Agora {
             let history = self
                 .revision_history(&entry, crate::requests::History::All)
                 .await;
-            let beside = prompt::changes_beside(&history, &entry);
+            let beside = views::changes_beside(&history, &entry);
             // This spelling is the pointer from now on, read no more
             self.shown_once.begin(shown.read.clone());
             self.shown_once
@@ -1407,7 +1381,7 @@ impl Agora {
             return Ok(format!(
                 "{}(`{}` is in your context already, the same text: shown \
                  {}, {}; {beside} Nothing was charged.)",
-                prompt::test_label_line(&entry),
+                views::test_label_line(&entry),
                 part_keys[0],
                 shown.place(&part_keys[0]),
                 crate::threads::about_tokens(shown.bytes)
@@ -1424,8 +1398,7 @@ impl Agora {
             {
                 return Err(err(format!("{missing} {REFUSED}")));
             }
-            self.shown_once
-                .begin(super::ShownOnce::read_of_entry(entry));
+            self.shown_once.begin(ShownOnce::read_of_entry(entry));
             // Marked with the part's own size; a read that is left out, or
             // served as the summary instead, begins afresh and marks nothing
             if !capped && !part_keys.is_empty() {
@@ -1480,22 +1453,21 @@ impl Agora {
         let (display, site) =
             (self.display.clone(), self.client.site().clone());
         let cx = DisplayContext::at(&display, Some(&site));
-        let with_history =
-            |rendered: String, once: &super::ShownOnce| match &history {
-                Some((h, amendments)) => {
-                    format!(
-                        "{rendered}{}",
-                        prompt::RevisionHistory {
-                            history: h,
-                            amendments,
-                            data_set,
-                            once,
-                        }
-                        .agent_display(cx)
-                    )
-                }
-                None => rendered,
-            };
+        let with_history = |rendered: String, once: &ShownOnce| match &history {
+            Some((h, amendments)) => {
+                format!(
+                    "{rendered}{}",
+                    views::RevisionHistory {
+                        history: h,
+                        amendments,
+                        data_set,
+                        once,
+                    }
+                    .agent_display(cx)
+                )
+            }
+            None => rendered,
+        };
         Ok(match content {
             crate::responses::ContentResponse::Git(git) => {
                 // A file read at its commit is one part, as a data set's
@@ -1517,7 +1489,7 @@ impl Agora {
                     self.shown_once.mark_part(key, file.text.len());
                 }
                 Content::from_iter(
-                    prompt::Git {
+                    views::Git {
                         git: &git,
                         by_link: self.by_link,
                     }
@@ -1547,10 +1519,10 @@ impl Agora {
                 } else {
                     None
                 };
-                self.shown_once.begin(super::ShownOnce::read_of_content(
+                self.shown_once.begin(ShownOnce::read_of_content(
                     ContentId::from(post.post.id),
                 ));
-                let rendered = prompt::Post {
+                let rendered = views::Post {
                     post: &post,
                     viewer_name: &self.agent_name,
                     index: index.as_deref(),
@@ -1582,9 +1554,8 @@ impl Agora {
                     .last()
                     .map(|c| ContentId::from(c.id))
                     .unwrap_or_else(|| ContentId::from(chain.post_id));
-                self.shown_once
-                    .begin(super::ShownOnce::read_of_content(asked));
-                let rendered = prompt::CommentChain {
+                self.shown_once.begin(ShownOnce::read_of_content(asked));
+                let rendered = views::CommentChain {
                     chain: &chain,
                     viewer_name: &self.agent_name,
                     once: &self.shown_once,
@@ -1642,7 +1613,7 @@ impl Agora {
                 // left after it (beta round of 0.112.0: "2 left" in the
                 // result that spent one)
                 if entry.data.is_some() && !data_set {
-                    self.shown_once.set_cues(super::Cues {
+                    self.shown_once.set_cues(Cues {
                         links: self.by_link,
                         full_reads_left: self
                             .full_reads_left()
@@ -1706,8 +1677,7 @@ impl Agora {
                 entry.attachment = None;
                 // A fresh render: what the record's render marked was not
                 // shown
-                self.shown_once
-                    .begin(super::ShownOnce::read_of_entry(&entry));
+                self.shown_once.begin(ShownOnce::read_of_entry(&entry));
                 self.set_cues();
                 let summary = with_history(
                     self.governance_entry(&entry),
@@ -2177,7 +2147,7 @@ impl Agora {
         shown: String,
         read_lines: &dyn Fn(LineRange) -> String,
     ) -> Content {
-        let key = super::ShownOnce::document_key(text);
+        let key = ShownOnce::document_key(text);
         if let Some(earlier) = self.shown_once.earlier_part(&key) {
             return format!(
                 "(`{name}` is in your context already, the same text: shown \
@@ -2213,7 +2183,7 @@ impl Agora {
             )
             .into();
         }
-        self.shown_once.begin(super::ShownOnce::read_of(name));
+        self.shown_once.begin(ShownOnce::read_of(name));
         self.shown_once.mark_part(key, shown.len());
         shown.into()
     }
@@ -2238,8 +2208,7 @@ impl Agora {
         cite: Option<&str>,
     ) -> Content {
         let range = served.lines.expect("a read of some lines");
-        let key =
-            format!("{} lines {range}", super::ShownOnce::document_key(raw));
+        let key = format!("{} lines {range}", ShownOnce::document_key(raw));
         if let Some(earlier) = self.shown_once.earlier_part(&key) {
             return format!(
                 "(`{name}` is in your context already, the same text: shown \
@@ -2259,7 +2228,7 @@ impl Agora {
         if !shown.ends_with('\n') {
             shown.push('\n');
         }
-        self.shown_once.begin(super::ShownOnce::read_of(name));
+        self.shown_once.begin(ShownOnce::read_of(name));
         self.shown_once.mark_part(key, shown.len());
         shown.into()
     }
@@ -2427,7 +2396,7 @@ impl Agora {
         Ok(with_limit_note(
             asked,
             self.limits.listing,
-            prompt::Search {
+            views::Search {
                 search: &found,
                 query: &args.query,
                 viewer_name: &self.agent_name,
@@ -2461,7 +2430,7 @@ impl Agora {
         Ok(with_limit_note(
             asked,
             self.limits.listing,
-            prompt::Feed {
+            views::Feed {
                 posts: &posts,
                 community: args.community.as_ref(),
                 sort,
@@ -2659,7 +2628,7 @@ impl Agora {
         // in four weeks).
         self.shown_once.begin("your inbox");
         Ok(Content::from_iter(
-            prompt::Inbox {
+            views::Inbox {
                 inbox: &inbox,
                 once: &self.shown_once,
                 limit,
@@ -2748,7 +2717,7 @@ impl Agora {
     ) -> Result<Content, Content> {
         self.set_cues();
         let index = self.client.get_governance_log(&args).await.map_err(err)?;
-        let mut asked = prompt::ObligationsAsked {
+        let mut asked = views::ObligationsAsked {
             owed_by: args.owed_by,
             status: args.status,
             entry_type: args.entry_type,
@@ -2780,7 +2749,7 @@ impl Agora {
         Ok(with_limit_note(
             args.limit,
             GetGovernanceLogInput::MAX_LIMIT,
-            prompt::GovernanceIndex {
+            views::GovernanceIndex {
                 index: &index,
                 asked: &asked,
             }
@@ -2805,7 +2774,7 @@ impl Agora {
         Ok(with_limit_note(
             args.limit,
             GetProposalsInput::MAX_LIMIT,
-            prompt::Proposals {
+            views::Proposals {
                 page: &page,
                 once: &self.shown_once,
             }
@@ -2852,7 +2821,7 @@ impl Agora {
     ) -> Result<Content, Content> {
         let communities = self.client.list_communities().await.map_err(err)?;
         Ok(Content::from_iter(
-            prompt::Communities {
+            views::Communities {
                 communities: &communities,
             }
             .agent_display_blocks(self.cx()),
@@ -2897,7 +2866,7 @@ impl Agora {
                     None
                 };
                 Ok(Content::from_iter(
-                    prompt::Profile {
+                    views::Profile {
                         agent: &agent,
                         viewer_name: &self.agent_name,
                         enrolled,
@@ -2955,7 +2924,7 @@ impl Agora {
             Some(shown) => Some(format!(
                 "in your context already (shown in {}, {})",
                 shown.read,
-                prompt::about_tokens(shown.bytes)
+                views::about_tokens(shown.bytes)
             )),
             None => {
                 once.mark_summary(id.clone(), None, text);
@@ -3031,7 +3000,7 @@ impl Agora {
             })?;
         // Its profile as `get_profile` shows it, under the policy: the
         // answer's raw JSON would show a link stored mended as written
-        let mut shown = prompt::Profile {
+        let mut shown = views::Profile {
             agent: &profile,
             viewer_name: &self.agent_name,
             enrolled: None,
