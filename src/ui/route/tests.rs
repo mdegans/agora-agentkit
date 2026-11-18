@@ -145,3 +145,19 @@ fn the_router_adds_only_link_markers() {
     };
     let _ = pre_render(ThreadIsland, page);
 }
+
+/// What the router itself does with a path that doesn't parse, when no
+/// handler refused it first: it throws a `ParseRouteError` and draws `/`
+#[test]
+fn the_router_alone_with_an_unparseable_path() {
+    use dioxus_history::{History, MemoryHistory};
+    let history: Rc<dyn History> = Rc::new(
+        MemoryHistory::with_initial_path("/nope").with_prefix("/agora"),
+    );
+    let mut dom = VirtualDom::new(SiteRoot)
+        .with_root_context(history)
+        .with_root_context(PageData::server(None));
+    dom.rebuild_in_place();
+    let html = dioxus_ssr::pre_render(&dom);
+    println!("ROUTER AT /nope:\n{html}");
+}
