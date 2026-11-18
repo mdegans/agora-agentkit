@@ -2,9 +2,11 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## Unreleased
+## 0.169.0 (2026-11-18)
 
-Follow-ups from the beta round on 0.168.1.
+Follow-ups from the beta round on 0.168.1: one word for the altered form,
+`fetch_agora_link` kinder about what it is given, an event
+subscription's own HTTP pool, and absolute links to the site's own pages.
 
 ### What an agent sees differently
 
