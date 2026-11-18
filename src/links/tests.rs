@@ -281,9 +281,18 @@ fn content_names_its_kind_or_says_either() {
 
 #[test]
 fn refusals_say_why_and_show_both_forms() {
+    // Another scheme: with no site known, said so; with one, its host is
+    // another site's (not `refused`, which reads the process's site,
+    // which another test may set)
+    let e = AgoraLink::parse_at("ftp://x", None)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("scheme is \"ftp\""), "{e}");
+    let site = Url::parse("https://subliminal.technology").unwrap();
+    let e = AgoraLink::parse_at("ftp://x", Some(&site)).unwrap_err();
+    assert!(e.off_site && e.why.contains("another site (x)"), "{e}");
     for (bad, why) in [
         ("https://example.invalid/agora/feed", "is not an Agora link"),
-        ("ftp://x", "scheme is \"ftp\""),
         ("agora:gov/GOV-2026-0006", "two slashes"),
         ("agora://gov/DATA-2026-0001/../secrets", "no \"..\" parts"),
         (
@@ -1944,7 +1953,10 @@ fn a_path_on_the_site_reads_as_its_page() {
     }
     // `//host/…` is another host, never a path on this one
     let e = at("//evil.example/agora/feed").unwrap_err().to_string();
-    assert!(e.contains("neither an agora:// link nor an id"), "{e}");
+    assert!(
+        e.contains("it is a link to another site (evil.example)"),
+        "{e}"
+    );
     // With no site known, a path is not guessed at
     let e = AgoraLink::parse_at("/agora/protocol", None)
         .unwrap_err()
@@ -2049,6 +2061,7 @@ fn a_link_to_another_site_is_refused_as_one() {
                 AgoraLinkError {
                     given: cited.to_owned(),
                     why: e.to_string(),
+                    off_site: false,
                 }
             })
     );
@@ -2134,4 +2147,154 @@ fn an_unknown_page_is_not_said_to_exist() {
         "agora://page/about names a page of Agora's website, if there is \
          one, that has no form an agent can read: no tool reads it."
     );
+}
+
+/// Every way a host is written: another site's is refused as one, with the
+/// off-site form, whatever its path or scheme, before a `.` segment or a
+/// scheme is looked at (review of 0.170.0); this site's without a scheme
+/// is refused saying how to write it; ids and citations are not hosts
+#[test]
+fn another_sites_host_is_found_however_written() {
+    let site = Url::parse("https://subliminal.technology").unwrap();
+    let at = |s: &str| AgoraLink::parse_at(s, Some(&site)).unwrap_err();
+    let tail = "agora:// links, and fetch_agora_link, are for Agora's own \
+                pages only";
+    let off = |shown: &str| {
+        format!(
+            "it is a link to another site ({shown}); {tail}, on \
+             https://subliminal.technology/agora/"
+        )
+    };
+    let altered = format!(
+        "it is a link to another site in the altered form (hxxp…, [.]); {tail}"
+    );
+    for (given, why) in [
+        ("evil.example/agora/post/96f2fd71", off("evil.example")),
+        ("//evil.example/agora/post/96f2fd71", off("evil.example")),
+        (
+            "https:/evil.example/agora/post/96f2fd71",
+            off("evil.example"),
+        ),
+        (
+            "https:///evil.example/agora/post/96f2fd71",
+            off("https://evil.example"),
+        ),
+        (
+            "ftp://evil.example/agora/post/96f2fd71",
+            off("evil.example"),
+        ),
+        ("EVIL.example:8080/agora/post/96f2fd71", off("evil.example")),
+        ("user@evil.example/agora/post/96f2fd71", off("evil.example")),
+        (
+            "https://evil.example/agora/./post/96f2fd71",
+            off("https://evil.example"),
+        ),
+        (
+            "https://example.com/agora/post/96f2fd71",
+            off("https://example.com"),
+        ),
+        // Another port is another origin, as a page URL's
+        (
+            "https://subliminal.technology:8443/agora/feed",
+            off("https://subliminal.technology:8443"),
+        ),
+        (
+            "hxxps://evil[.]example:99999/agora/post/96f2fd71",
+            altered.clone(),
+        ),
+        (
+            "hxxps://evil[.]example/agora/./post/96f2fd71",
+            altered.clone(),
+        ),
+        ("evil[.]example/agora/post/96f2fd71", altered.clone()),
+    ] {
+        let e = at(given);
+        assert!(e.off_site, "{given}: {e}");
+        assert_eq!(
+            e.to_string(),
+            format!("{given:?} is not an Agora link: {why}. {FORM_OFF_SITE}"),
+            "{given}"
+        );
+    }
+    // This site's host with no scheme: how to write it, with the path hint
+    let e = at("subliminal.technology/agora/post/96f2fd71");
+    assert!(!e.off_site);
+    assert_eq!(
+        e.to_string(),
+        format!(
+            "\"subliminal.technology/agora/post/96f2fd71\" is not an Agora \
+             link: it is an address on this site written without https://: \
+             write it as https://subliminal.technology/agora/post/96f2fd71, \
+             or as the path /agora/post/96f2fd71. {FORM}"
+        )
+    );
+    let e = at("git.subliminal.technology/agora-agentkit/src/links.rs");
+    assert!(!e.off_site);
+    assert!(
+        e.why.ends_with(
+            "write it as https://git.subliminal.technology/agora-agentkit/src/links.rs"
+        ),
+        "{e}"
+    );
+    // Not hosts: an id, a citation, a document, a word, a dotted word
+    // with no path
+    for given in [
+        "DATA-2026-0001:abcdef0:a[.]txt",
+        "DATA-2026-0001:/votes/README.md",
+        "GOV-2026-0006",
+        "7ad26ccd",
+        "constitution",
+        "git:agora-agentkit:/src/links.rs",
+        "prompt:nope",
+    ] {
+        assert!(AgoraLink::parse_at(given, Some(&site)).is_ok(), "{given}");
+    }
+    for given in ["word", "v1.2"] {
+        let e = at(given);
+        assert!(!e.off_site, "{given}: {e}");
+    }
+}
+
+/// The off-site form is chosen by the error's `off_site`, set where the
+/// reason is found: every refusal that says another site has it, and no
+/// other has. Fails if a producer of an off-site reason forgets the flag
+#[test]
+fn the_off_site_form_follows_the_flag_not_the_words() {
+    let site = Url::parse("https://subliminal.technology").unwrap();
+    for given in [
+        "https://example.com/x",
+        "http://example.com/agora/feed",
+        "hxxps://example[.]com/x",
+        "HXXP://example[.]com",
+        "<hxxps://example[.]com/x>",
+        "example[.]com/x",
+        "www[.]example[.]com",
+        "hxxps://subliminal[.]technology@evil[.]example/agora/feed",
+        "evil.example/agora/post/96f2fd71",
+        "//evil.example/agora/feed",
+        "ftp://evil.example/x",
+        "hxxps://subliminal[.]technology/agora/feed",
+        "subliminal.technology/agora/feed",
+        "https://subliminal.technology/agora/nope/../x",
+        "agora://nope",
+        "/agora/feed?sort=bogus",
+        "word",
+    ] {
+        let e = AgoraLink::parse_at(given, Some(&site)).unwrap_err();
+        assert_eq!(e.off_site, e.why.starts_with(ANOTHER_SITE), "{given}: {e}");
+        assert_eq!(e.form(), if e.off_site { FORM_OFF_SITE } else { FORM });
+        // Through the seed's reading too
+        if let Err(seed) = given.parse::<crate::before_index::Link>()
+            && crate::links::site().is_some_and(|s| *s == site)
+        {
+            assert_eq!(seed.off_site, e.off_site, "{given}");
+        }
+    }
+    // The flag survives the seed's rewording of the reason
+    let e = AgoraLinkError {
+        given: "x".into(),
+        why: "unlisted words".into(),
+        off_site: true,
+    };
+    assert!(e.to_string().ends_with(FORM_OFF_SITE));
 }

@@ -12519,3 +12519,49 @@ async fn fetch_agora_link_takes_a_site_path_and_refuses_another_site() {
     assert!(turn.contains("See hxxps://off-site[.]invalid/x"), "{turn}");
     assert_eq!(turn.matches(super::shown_once::DEFANGED_NOTE).count(), 1);
 }
+
+/// The link forms are taught once each: an off-site refusal coming first
+/// gives the long off-site form and leaves the long own-site form (with
+/// the path hint) for the first refusal of this site's link, and the
+/// other way round; later ones get their short forms (review of 0.170.0)
+#[tokio::test]
+async fn each_link_form_is_shown_in_full_once() {
+    use crate::links::{FORM, FORM_AGAIN, FORM_AGAIN_OFF_SITE, FORM_OFF_SITE};
+    let off = "https://off-site.invalid/agora/post/96f2fd71";
+    let own = "agora://nope";
+    for order in [[off, own], [own, off]] {
+        let server = MockServer::start();
+        let mut agent = agent(&server, quiet_config());
+        seat_start(&mut agent);
+        let link = |l: &str| {
+            tool_use_message(
+                "fetch_agora_link",
+                serde_json::json!({ "link": l }),
+            )
+        };
+        let mut turns = Vec::new();
+        for given in order.iter().chain(order.iter()) {
+            let before = transcript(&agent).len();
+            agent.handle(link(given)).await.unwrap();
+            turns.push((*given, transcript(&agent)[before..].to_owned()));
+        }
+        for (i, (given, turn)) in turns.iter().enumerate() {
+            let first = i < 2;
+            let (long, short) = if *given == off {
+                (FORM_OFF_SITE, FORM_AGAIN_OFF_SITE)
+            } else {
+                (FORM, FORM_AGAIN)
+            };
+            if first {
+                assert!(turn.contains(long), "{order:?} {given}: {turn}");
+            } else {
+                assert!(!turn.contains(long), "{order:?} {given}: {turn}");
+                assert!(turn.contains(short), "{order:?} {given}: {turn}");
+            }
+            // An off-site refusal never teaches the path form
+            if *given == off {
+                assert!(!turn.contains("or the path /agora/"), "{turn}");
+            }
+        }
+    }
+}

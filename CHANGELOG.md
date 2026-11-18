@@ -26,7 +26,29 @@ byte for byte what it drew (the existing snapshots are unchanged).
   forms, that sentence replaced by "A link to another site is not a page
   of Agora's, even when its path looks like one." After a session's first
   form, `FORM_AGAIN_OFF_SITE` (`FORM_AGAIN` and that sentence). Refusals
-  of this site's links are unchanged and keep the path hint.
+  of this site's links keep the path hint, and each form is shown in full
+  once a session on its own: an off-site refusal coming first no longer
+  uses up the one long own-site form.
+- **Another site's host is found however it is written**, before a `.`
+  segment or a scheme is looked at: `https://h/…` (another port is
+  another site, as for a page URL), one slash or three (`https:/h/…`),
+  any other scheme (`ftp://h/…`), `//h/…`, no scheme at all (a first
+  segment with a dot and a `/` after it, `evil.example/agora/post/…`, or
+  with `[.]` in it), and an altered link whose restored URL doesn't parse
+  (`hxxps://h[.]x:99999/…`). Each is refused as another site's: "it is a
+  link to another site (evil.example); agora:// links, and
+  fetch_agora_link, are for Agora's own pages only, on
+  https://<site>/agora/." (the origin for a page URL; for an altered
+  link, "in the altered form (hxxp…, [.])" and no address), with the
+  off-site form. Ids and citations are never read as hosts
+  (`DATA-2026-0001:abcdef0:a[.]txt`, `DATA-2026-0001:/votes/README.md`,
+  `prompt:<name>`), and a word with no dot is tried as before.
+- **This site's address written without its scheme**
+  (`subliminal.technology/agora/post/<id>`, which three betas hit) says
+  how to write it: "it is an address on this site written without
+  https://: write it as https://subliminal.technology/agora/post/<id>,
+  or as the path /agora/post/<id>" (the repositories' host: "write it as
+  https://git.<site>/…").
 - **An unknown page is not said to exist.** `agora://page/<path>` is
   answered "agora://page/<path> names a page of Agora's website, if there
   is one, that has no form an agent can read: no tool reads it." (was
@@ -179,9 +201,10 @@ Public API (agentkit before 1.0 breaks outright):
   changes with it.
 - `island::Public` is now the struct `Public<P>`; the trait is
   `island::Anonymous` (above).
-- `AgoraLinkError` writes its `Display` by hand (it no longer derives
-  `thiserror::Error`; it is still a `std::error::Error`), ending with
-  `FORM` or `FORM_OFF_SITE`.
+- `AgoraLinkError` has a field `off_site: bool` (set where the reason is
+  found; it picks `FORM_OFF_SITE`), and writes its `Display` by hand (it
+  no longer derives `thiserror::Error`; it is still a
+  `std::error::Error`).
 - `SitePage::unread_note`'s words (above); the runner's `fetch_agora_link`
   answers `agora://page/…` as an error result (a refusal), not a text.
 - The components' links between pages (a card's title, author and

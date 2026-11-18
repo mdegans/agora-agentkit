@@ -1182,3 +1182,60 @@ fn a_link_to_a_place_on_a_page_without_a_router() {
         "{html}"
     );
 }
+
+thread_local! {
+    static TICK: Cell<Option<Signal<u32>>> = const { Cell::new(None) };
+}
+
+/// `Arrive` asks the history once, however often the page's effect runs
+/// again (a signal it reads changing, a re-render): the guard, tested
+/// apart from the thread, whose signal nothing changes once loaded
+#[tokio::test]
+async fn arriving_asks_the_history_once_however_often_it_is_called() {
+    #[allow(non_snake_case)]
+    fn Arriving() -> Element {
+        use_arrive(true);
+        let arrive = use_context::<Arrive>();
+        let tick = use_signal(|| 0u32);
+        use_hook(|| TICK.set(Some(tick)));
+        use_effect(move || {
+            let _ = tick();
+            arrive.arrived();
+        });
+        rsx! { p { "{tick}" } }
+    }
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let history: Rc<dyn History> = Rc::new(Recorder {
+        inner: MemoryHistory::with_initial_path(format!(
+            "/post/{POST}#comment-x"
+        ))
+        .with_prefix(base()),
+        log: log.clone(),
+    });
+    let mut dom = VirtualDom::new(Arriving).with_root_context(Address(history));
+    dom.rebuild_in_place();
+    let settle = async |dom: &mut VirtualDom| {
+        for _ in 0..10 {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(10),
+                dom.wait_for_work(),
+            )
+            .await;
+            dom.render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
+        }
+    };
+    settle(&mut dom).await;
+    for n in 1..=3 {
+        dom.in_runtime(|| {
+            let mut tick = TICK.get().unwrap();
+            tick.set(n);
+        });
+        dom.mark_all_dirty();
+        settle(&mut dom).await;
+        assert!(dioxus_ssr::pre_render(&dom).contains(&format!(">{n}<")));
+    }
+    assert_eq!(
+        *log.borrow(),
+        vec![format!("external /agora/post/{POST}#comment-x")]
+    );
+}

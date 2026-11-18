@@ -107,6 +107,7 @@ impl std::str::FromStr for Link {
         let refused = || AgoraLinkError {
             given: raw.to_owned(),
             why: "\"inbox\" is not a kind of link".to_owned(),
+            off_site: false,
         };
         let lower = raw.trim().to_ascii_lowercase();
         if let Some(rest) = lower.strip_prefix("agora://inbox")
