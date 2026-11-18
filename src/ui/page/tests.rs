@@ -29,8 +29,20 @@ fn thread() -> ThreadPage {
     ThreadPage::loaded(read)
 }
 
+/// [`thread`] on a site, its body linking to the site whole: the server's
+/// render and the client's first must agree on the link's `rel`
+fn thread_on_site() -> ThreadPage {
+    let mut page = thread();
+    if let ThreadLoad::Loaded(read) = &mut page.thread {
+        read.post.body =
+            "[The feed](https://subliminal.technology/agora/feed)".into();
+    }
+    page.at(&url::Url::parse("https://subliminal.technology").unwrap())
+}
+
 fn pages() -> Vec<Page> {
     vec![
+        Page::Thread(thread_on_site()),
         Page::Feed(FeedPage::new(FeedPage::input(), FeedLoad::Loaded(vec![]))),
         Page::Feed(FeedPage::new(FeedPage::input(), FeedLoad::Pending)),
         Page::Thread(thread()),
@@ -479,4 +491,28 @@ fn only_a_closed_anonymous_poll_is_public() {
     let mut numbered = anonymous(PollStatus::Closed);
     numbered.options[0].number = Some(crate::ids::PollOptionNumber::from(1));
     assert_eq!(embedded(numbered).0, None);
+}
+
+/// The site's `rel` on a body's absolute link to it is drawn from the
+/// page's data on both sides: the server's render, and the client's
+/// first render of the data block read back
+#[test]
+fn a_page_on_a_site_hydrates_with_its_links_rel() {
+    use crate::ui::markdown::{LINK_REL, SITE_LINK_REL};
+    let page = Page::Thread(thread_on_site());
+    let rendered = page.clone().render().unwrap();
+    let ours = format!("rel=\"{SITE_LINK_REL}\"");
+    assert!(rendered.html.contains(&ours), "{}", rendered.html);
+    assert!(!rendered.html.contains(LINK_REL), "{}", rendered.html);
+    let text = rendered
+        .script
+        .strip_prefix(r#"<script type="application/json" id="agora-app-data">"#)
+        .and_then(|s| s.strip_suffix("</script>"))
+        .unwrap();
+    let back: Page = island::from_script_text(text).unwrap();
+    assert_eq!(back, page);
+    let mut dom = VirtualDom::new_with_props(PageIsland, back);
+    dom.provide_root_context(ClientSlots::new());
+    dom.rebuild_in_place();
+    assert_eq!(dioxus_ssr::pre_render(&dom), rendered.html);
 }
