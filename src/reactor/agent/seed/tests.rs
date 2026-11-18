@@ -12365,7 +12365,7 @@ async fn the_feedback_tools_description_agrees_with_its_result() {
 async fn an_update_is_shown_under_the_policy_and_names_a_defanged_link() {
     for (sent, noted) in [
         (
-            serde_json::json!({ "bio": "Mine: hxxps://example[.]com/x" }),
+            serde_json::json!({ "bio": "Mine: hxxps://bio[.]invalid/x" }),
             Some("bio"),
         ),
         (
@@ -12373,11 +12373,11 @@ async fn an_update_is_shown_under_the_policy_and_names_a_defanged_link() {
             Some("display name and bio"),
         ),
         (
-            serde_json::json!({ "bio": "Mine: https://example.com/x" }),
+            serde_json::json!({ "bio": "Mine: https://bio.invalid/x" }),
             None,
         ),
         (
-            serde_json::json!({ "bio": "Dots like example[.]com, and hxxp alone" }),
+            serde_json::json!({ "bio": "Dots like bio[.]invalid, and hxxp alone" }),
             None,
         ),
     ] {
@@ -12407,16 +12407,101 @@ async fn an_update_is_shown_under_the_policy_and_names_a_defanged_link() {
         stored.assert();
         let t = transcript(&agent);
         assert!(t.contains("## test-agent"), "{t}");
-        assert!(!t.contains("https://example.com"), "{t}");
+        // A bio's link is never shown whole
+        assert!(!t.contains("https://bio.invalid"), "{t}");
         match noted {
             Some(fields) => assert!(
                 t.contains(&format!("(Your {fields} ")) && t.contains(
-                    "a link in the defanged form (hxxps://…); if you meant a \
+                    "a link in the altered form (hxxps://…); if you meant a \
                      real link, update it again with the https:// address.)"
                 ),
                 "{t}"
             ),
-            None => assert!(!t.contains("in the defanged form"), "{t}"),
+            None => assert!(!t.contains("in the altered form"), "{t}"),
         }
     }
+}
+
+/// `fetch_agora_link` takes a path on the site as its page (beta round of
+/// 0.168.1), and refuses a link to another site saying what it is
+#[tokio::test]
+async fn fetch_agora_link_takes_a_site_path_and_refuses_another_site() {
+    let server = MockServer::start();
+    let id = Uuid::new_v4();
+    let read = server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/agora/api/content/{id}").as_str());
+        then.status(200).json_body(post_content(id));
+    });
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let link = |l: &str| {
+        tool_use_message("fetch_agora_link", serde_json::json!({ "link": l }))
+    };
+    agent
+        .handle(link(&format!("/agora/post/{id}")))
+        .await
+        .unwrap();
+    // The site the process reads page URLs of (the first client's)
+    let site = crate::links::site().expect("a client set the site");
+    let page = site.join(&format!("agora/c/tech/{id}")).unwrap();
+    agent.handle(link(page.as_str())).await.unwrap();
+    read.assert_calls(2);
+    let t = transcript(&agent);
+    assert_eq!(t.matches("Compilers are underrated").count(), 2, "{t}");
+
+    // Not example.com: a client test may have made it the process's site
+    let before = transcript(&agent).len();
+    agent
+        .handle(link("hxxps://off-site[.]invalid/x"))
+        .await
+        .unwrap();
+    let turn = transcript(&agent)[before..].to_owned();
+    // The whole turn: the refusal echoes the agent's own input, so no
+    // link note, which waits for a result that shows an altered link
+    assert_eq!(
+        turn,
+        format!(
+            "\nInvalid arguments at `link`: \"hxxps://off-site[.]invalid/x\" \
+             is not an Agora link: it is a link to another site in the \
+             altered form (hxxps://…, [.]); agora:// links, and \
+             fetch_agora_link, are for Agora's own pages only. {} Refused; \
+             nothing was charged.\n(Every call was refused; this turn \
+             doesn't count.)",
+            crate::links::FORM
+        )
+    );
+    agent
+        .handle(link("https://off-site.invalid/x"))
+        .await
+        .unwrap();
+    let t = transcript(&agent);
+    assert!(
+        t.contains(&format!(
+            "is not an Agora link: it is a link to another site \
+             (https://off-site.invalid); agora:// links, and fetch_agora_link, \
+             are for Agora's own pages only, on {}.",
+            site.join("agora/").unwrap()
+        )),
+        "{t}"
+    );
+    // The first result that shows one carries the note
+    let linked = Uuid::new_v4();
+    let mut body = post_content(linked);
+    body["post"]["body"] = "See https://off-site.invalid/x".into();
+    server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/agora/api/content/{linked}").as_str());
+        then.status(200).json_body(body);
+    });
+    let before = transcript(&agent).len();
+    agent
+        .handle(link(
+            &crate::links::AgoraLink::post(PostId::from(linked)).to_string(),
+        ))
+        .await
+        .unwrap();
+    let turn = transcript(&agent)[before..].to_owned();
+    assert!(turn.contains("See hxxps://off-site[.]invalid/x"), "{turn}");
+    assert_eq!(turn.matches(super::shown_once::DEFANGED_NOTE).count(), 1);
 }

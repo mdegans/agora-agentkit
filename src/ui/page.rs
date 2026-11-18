@@ -85,8 +85,8 @@ pub fn PageIsland(page: Page) -> Element {
         }) => rsx! {
             FeedIsland { feed, input, community, total }
         },
-        Page::Thread(ThreadPage { post, thread }) => rsx! {
-            ThreadIsland { post, thread }
+        Page::Thread(ThreadPage { post, thread, site }) => rsx! {
+            ThreadIsland { post, thread, site }
         },
     }
 }

@@ -231,15 +231,61 @@ impl crate::reactor::RetryAfter for Error {
 #[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
+    /// What `http` connects over, for an [`EventSubscription`]'s own
+    transport: Transport,
     base_url: Url,
     /// The website `base_url` is the API of
     site: Url,
 }
 
+/// How long an HTTP client this crate builds waits for a connection (TCP,
+/// TLS, or a Unix socket) before giving up. There is no read or total
+/// timeout: an event stream is open for hours, and a read may be long
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What a [`Client`]'s HTTP clients connect over
+#[derive(Debug, Clone)]
+enum Transport {
+    Tcp,
+    #[cfg(unix)]
+    UnixSocket(std::sync::Arc<std::path::Path>),
+}
+
+impl Transport {
+    /// A new HTTP client, with a connection pool of its own
+    fn http(&self) -> Result<reqwest::Client, Error> {
+        let builder =
+            reqwest::Client::builder().connect_timeout(CONNECT_TIMEOUT);
+        let builder = match self {
+            Self::Tcp => builder,
+            #[cfg(unix)]
+            Self::UnixSocket(path) => builder.unix_socket(path.clone()),
+        };
+        Ok(builder.build()?)
+    }
+}
+
 impl Client {
     /// A client rooted at `url` (e.g. `https://subliminal.technology`); the
     /// `agora/` API prefix is appended here
-    pub fn new(mut url: Url) -> Result<Self, Error> {
+    pub fn new(url: Url) -> Result<Self, Error> {
+        Self::over(url, Transport::Tcp)
+    }
+
+    /// [`Client::new`] through the Unix socket at `path`, as the Agora
+    /// Council reaches the server (0.109). `url` still names the host and
+    /// paths the requests carry (and a signed GET signs); nothing is
+    /// resolved
+    #[cfg(unix)]
+    pub fn over_socket(
+        url: Url,
+        path: impl Into<std::path::PathBuf>,
+    ) -> Result<Self, Error> {
+        let path: std::path::PathBuf = path.into();
+        Self::over(url, Transport::UnixSocket(path.into()))
+    }
+
+    fn over(mut url: Url, transport: Transport) -> Result<Self, Error> {
         // Ensure the path ends with / so join() resolves "agora/" beneath it
         // rather than replacing the last segment.
         if !url.path().ends_with('/') {
@@ -250,12 +296,24 @@ impl Client {
         let base_url = url
             .join("agora/")
             .map_err(|e| Error::Url(format!("joining /agora/: {e}")))?;
+        // Built first: a client that fails to build sets no site
+        let http = transport.http()?;
         // Page URLs of this site read as the links they show (0.112.0)
         crate::links::set_site(&url);
         Ok(Self {
-            http: reqwest::Client::new(),
+            http,
+            transport,
             base_url,
             site: url,
+        })
+    }
+
+    /// The same server over a new HTTP client: a connection pool shared
+    /// with no other `Client`
+    fn with_own_pool(&self) -> Result<Self, Error> {
+        Ok(Self {
+            http: self.transport.http()?,
+            ..self.clone()
         })
     }
 
@@ -267,17 +325,6 @@ impl Client {
     /// [`links::site`]: crate::links::site
     pub fn site(&self) -> &Url {
         &self.site
-    }
-
-    /// [`Client::new`] over `http`, a client of the caller's own building:
-    /// one that connects through a Unix socket, say, as the Agora Council
-    /// reaches the server (0.109). `url` still names the host and paths the
-    /// requests carry (and a signed GET signs)
-    pub fn with_http(url: Url, http: reqwest::Client) -> Result<Self, Error> {
-        Ok(Self {
-            http,
-            ..Self::new(url)?
-        })
     }
 
     // -- Identity --
@@ -715,9 +762,13 @@ impl Client {
 
     /// Open `GET /agora/events` as `auth`, resuming after `last_event_id`
     /// when given (0.101). One connection: when it ends,
-    /// [`EventStream::next`] returns `None`. [`EventSubscription`]
-    /// reconnects and resumes on its own.
-    pub async fn events(
+    /// [`EventStream::next`] returns `None`.
+    ///
+    /// Only an [`EventSubscription`] calls it, on a client of its own: on a
+    /// pool that requests share, hyper's HTTP/1 pool can take the stream's
+    /// connection back as idle while it is still streaming, and a request
+    /// put on it then waits for ever (the Council's hang, 2026-11-17)
+    async fn events(
         &self,
         auth: &EventAuth,
         last_event_id: Option<&crate::sse::EventCursor>,
@@ -1607,7 +1658,7 @@ impl std::fmt::Debug for EventAuth {
     }
 }
 
-/// One connection to `GET /agora/events` ([`Client::events`]) (0.101)
+/// One connection to `GET /agora/events` (an [`EventSubscription`]'s) (0.101)
 pub struct EventStream {
     resp: reqwest::Response,
     parser: crate::sse::SseParser,
@@ -1702,8 +1753,10 @@ pub struct ReceivedEvent {
 
 /// `GET /agora/events`, reconnected whenever it drops and resumed with
 /// `Last-Event-ID` after the last event it returned, so no event is missed
-/// or repeated across a reconnect (0.101)
+/// or repeated across a reconnect (0.101). It has an HTTP client, and so a
+/// connection pool, of its own
 pub struct EventSubscription {
+    /// Its own: no request is ever sent through it
     client: Client,
     auth: EventAuth,
     last_event_id: Option<crate::sse::EventCursor>,
@@ -1732,22 +1785,24 @@ impl EventSubscription {
         (UNIT * (1u32 << failures.min(6))).min(Self::MAX_BACKOFF)
     }
 
-    /// A subscription as `auth`, starting after `last_event_id` (a fresh
-    /// one, `None`, starts with the agent's unread messages)
+    /// A subscription to `client`'s server as `auth`, starting after
+    /// `last_event_id` (a fresh one, `None`, starts with the agent's unread
+    /// messages), over an HTTP client of its own built as `client`'s was.
+    /// An error only if that client cannot be built
     pub fn new(
-        client: Client,
+        client: &Client,
         auth: EventAuth,
         last_event_id: Option<crate::sse::EventCursor>,
-    ) -> Self {
-        Self {
-            client,
+    ) -> Result<Self, Error> {
+        Ok(Self {
+            client: client.with_own_pool()?,
             auth,
             last_event_id,
             key: None,
             stream: None,
             failures: 0,
             retry_wait: None,
-        }
+        })
     }
 
     /// Refuse events `key` did not sign: the events signing key, pinned
@@ -2003,10 +2058,10 @@ mod tests {
             .unwrap();
         assert_eq!(c.base_url.as_str(), "https://example.com/sub/agora/");
 
-        // Over a client of the caller's own, the same root
-        let c = Client::with_http(
+        // Over a Unix socket, the same root
+        let c = Client::over_socket(
             Url::parse("http://council.local").unwrap(),
-            reqwest::Client::new(),
+            "/nonexistent/agora.sock",
         )
         .unwrap();
         assert_eq!(c.base_url.as_str(), "http://council.local/agora/");
@@ -2456,10 +2511,11 @@ mod tests {
             .await;
 
         let mut sub = EventSubscription::new(
-            client(&server),
+            &client(&server),
             EventAuth::Bearer(crate::secrets::Secret::new("tok".into())),
             None,
         )
+        .unwrap()
         .verifying_with(public);
         assert_eq!(sub.next().await.unwrap(), first);
         assert_eq!(sub.next().await.unwrap(), second);
@@ -2552,10 +2608,11 @@ mod tests {
             })
             .await;
         let mut sub = EventSubscription::new(
-            client(&server),
+            &client(&server),
             EventAuth::Bearer(crate::secrets::Secret::new("tok".into())),
             Some("c0".to_owned().into()),
         )
+        .unwrap()
         .verifying_with(pinned);
         assert!(matches!(
             sub.next().await,
@@ -2582,10 +2639,11 @@ mod tests {
             })
             .await;
         let mut sub = EventSubscription::new(
-            client(&server),
+            &client(&server),
             EventAuth::Bearer(crate::secrets::Secret::new("tok".into())),
             None,
-        );
+        )
+        .unwrap();
         // Backoff in tests is a thousandth of the real one: 2, 4, … 64 ms
         let _ =
             tokio::time::timeout(Duration::from_millis(400), sub.next()).await;
@@ -2607,13 +2665,14 @@ mod tests {
             })
             .await;
         let mut sub = EventSubscription::new(
-            client(&server),
+            &client(&server),
             EventAuth::Signed {
                 agent_id: AgentId::new(),
                 key: Box::new(generate_keypair().0),
             },
             None,
         )
+        .unwrap()
         .verifying_with(public);
         assert!(matches!(
             sub.next().await,
@@ -2625,6 +2684,181 @@ mod tests {
             "a genuine event for another agent is the server's position: \
              the cursor moves past it, unlike a forged one"
         );
+    }
+
+    /// The connections a fake server accepted, each with the paths of the
+    /// requests it carried, in order
+    type Conns = std::sync::Arc<std::sync::Mutex<Vec<Vec<String>>>>;
+
+    /// Serve one connection as HTTP/1.1 with keep-alive: `GET
+    /// /agora/events` is answered with `frame` and then nothing, the
+    /// connection held open; anything else with a 404 and no body
+    async fn keep_alive<C>(
+        mut conn: C,
+        frame: std::sync::Arc<str>,
+        conns: Conns,
+    ) where
+        C: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let id = {
+            let mut conns = conns.lock().unwrap();
+            conns.push(Vec::new());
+            conns.len() - 1
+        };
+        let mut buf = Vec::new();
+        loop {
+            let end = loop {
+                if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n")
+                {
+                    break at + 4;
+                }
+                let mut chunk = [0u8; 1024];
+                match conn.read(&mut chunk).await {
+                    Ok(0) | Err(_) => return,
+                    Ok(k) => buf.extend_from_slice(&chunk[..k]),
+                }
+            };
+            let head = String::from_utf8_lossy(&buf[..end]).into_owned();
+            buf.drain(..end);
+            let path = head
+                .split_whitespace()
+                .nth(1)
+                .unwrap_or_default()
+                .to_owned();
+            conns.lock().unwrap()[id].push(path.clone());
+            if path == "/agora/events" {
+                let body = format!("{:x}\r\n{frame}\r\n", frame.len());
+                let _ = conn
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\
+                          transfer-encoding: chunked\r\n\r\n",
+                    )
+                    .await;
+                let _ = conn.write_all(body.as_bytes()).await;
+                // Open and idle until the test ends
+                std::future::pending::<()>().await;
+            }
+            let _ = conn
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n",
+                )
+                .await;
+        }
+    }
+
+    /// A request first (its connection idle in the pool, as the Council
+    /// fetched the events key and then subscribed), a subscription, then
+    /// requests while its stream is open and idle: each completes, and the
+    /// stream's connection carried nothing else. On one pool, the stream
+    /// took the idle connection, and a request could be queued on it for
+    /// ever (the Council's hang, 2026-11-17)
+    async fn requests_beside_a_stream(
+        client: Client,
+        conns: Conns,
+        frame: ReceivedEvent,
+    ) {
+        // Far past what each takes (milliseconds), so a hang fails
+        const BOUND: Duration = Duration::from_secs(20);
+        let name: crate::names::AgentName = "someone".parse().unwrap();
+        let request = || async {
+            tokio::time::timeout(BOUND, client.get_agent(&name))
+                .await
+                .expect("a request completes beside an open stream")
+                .unwrap()
+        };
+        assert!(request().await.is_none());
+        let mut sub = EventSubscription::new(
+            &client,
+            EventAuth::Bearer(crate::secrets::Secret::new("tok".into())),
+            None,
+        )
+        .unwrap();
+        let first = tokio::time::timeout(BOUND, sub.next())
+            .await
+            .expect("the stream opens")
+            .unwrap();
+        assert_eq!(first, frame);
+        for _ in 0..8 {
+            assert!(request().await.is_none());
+        }
+        let conns = conns.lock().unwrap().clone();
+        let streams: Vec<&Vec<String>> = conns
+            .iter()
+            .filter(|c| c.iter().any(|p| p == "/agora/events"))
+            .collect();
+        assert_eq!(streams, [&vec!["/agora/events".to_owned()]], "{conns:?}");
+        assert_eq!(
+            conns
+                .iter()
+                .flatten()
+                .filter(|p| p.starts_with("/agora/api/"))
+                .count(),
+            9,
+            "{conns:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_subscription_has_a_pool_of_its_own() {
+        let (key, _) = generate_keypair();
+        let (first, frame) = signed_frame(&key, 1);
+        let frame: std::sync::Arc<str> = frame.into();
+        let conns = Conns::default();
+        let listener =
+            tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = {
+            let conns = conns.clone();
+            tokio::spawn(async move {
+                while let Ok((conn, _)) = listener.accept().await {
+                    tokio::spawn(keep_alive(
+                        conn,
+                        frame.clone(),
+                        conns.clone(),
+                    ));
+                }
+            })
+        };
+        let client = Client::new(
+            Url::parse(&format!("http://127.0.0.1:{port}")).unwrap(),
+        )
+        .unwrap();
+        requests_beside_a_stream(client, conns, first).await;
+        server.abort();
+    }
+
+    /// The same through a Unix socket ([`Client::over_socket`]): a
+    /// subscription's own client connects as its `Client` does
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_subscription_over_a_socket_has_a_pool_of_its_own() {
+        let (key, _) = generate_keypair();
+        let (first, frame) = signed_frame(&key, 1);
+        let frame: std::sync::Arc<str> = frame.into();
+        let conns = Conns::default();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agora.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let server = {
+            let conns = conns.clone();
+            tokio::spawn(async move {
+                while let Ok((conn, _)) = listener.accept().await {
+                    tokio::spawn(keep_alive(
+                        conn,
+                        frame.clone(),
+                        conns.clone(),
+                    ));
+                }
+            })
+        };
+        let client = Client::over_socket(
+            Url::parse("http://council.local").unwrap(),
+            &path,
+        )
+        .unwrap();
+        requests_beside_a_stream(client, conns, first).await;
+        server.abort();
     }
 }
 
@@ -2836,13 +3070,14 @@ mod subscription_props {
                 let port = serve(entries.clone(), cuts, log.clone()).await;
                 let url = Url::parse(&format!("http://127.0.0.1:{port}")).unwrap();
                 let mut sub = EventSubscription::new(
-                    Client::new(url).unwrap(),
+                    &Client::new(url).unwrap(),
                     EventAuth::Signed {
                         agent_id: me,
                         key: Box::new(crypto::generate_keypair().0),
                     },
                     None,
                 )
+        .unwrap()
                 .verifying_with(public);
 
                 let expected: Vec<&str> = entries

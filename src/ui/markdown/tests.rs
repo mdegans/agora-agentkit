@@ -119,7 +119,7 @@ fn the_corpus_draws_what_the_server_draws() {
 #[test]
 fn to_html_draws_the_corpus_without_markers() {
     for case in corpus() {
-        let html = to_html(&case.input);
+        let html = to_html(&case.input, None);
         assert!(!html.contains("<!--"), "{html}");
         assert!(!html.contains("data-node-hydration"), "{html}");
         assert_eq!(
@@ -196,7 +196,9 @@ fn canonical(html: &str, site_rel: bool) -> String {
                     .into_iter()
                     .filter(|(k, _)| k != "data-node-hydration")
                     .map(|(k, v)| match (&href, k.as_str()) {
-                        (Some(href), "rel") if site_rel && is_on_site(href) => {
+                        (Some(href), "rel")
+                            if site_rel && is_on_site(href, None) =>
+                        {
                             (k, SITE_LINK_REL.to_string())
                         }
                         _ => (k, v),
@@ -363,7 +365,7 @@ fn check_tree(nodes: &[Node], parent: Option<&Kind>, depth: usize) -> usize {
                         assert!(LINK_SCHEMES.contains(&url.scheme()), "{href}");
                     }
                     if *rel == SITE_LINK_REL {
-                        assert!(is_on_site(href), "{href}");
+                        assert!(is_on_site(href, None), "{href}");
                     }
                 } else {
                     assert_eq!(*rel, LINK_REL);
@@ -438,7 +440,7 @@ fn check_markup(html: &str) {
                 ("a", "href") => assert!(allowed(value), "{value}"),
                 ("a", "title") => {}
                 ("a", "rel") => match href {
-                    Some(href) if is_on_site(href) => {
+                    Some(href) if is_on_site(href, None) => {
                         assert_eq!(value, SITE_LINK_REL)
                     }
                     _ => assert_eq!(value, LINK_REL),
@@ -577,7 +579,11 @@ fn only_links_to_agoras_own_pages_drop_nofollow() {
         assert_eq!(got.as_deref(), href, "{source}");
         assert_eq!(*got_rel, rel, "{source}");
     }
-    assert!(!is_on_site("//x") && !is_on_site("") && is_on_site("/"));
+    assert!(
+        !is_on_site("//x", None)
+            && !is_on_site("", None)
+            && is_on_site("/", None)
+    );
 }
 
 /// The bound on `href` and title bytes binds before pulldown-cmark's own
@@ -769,7 +775,7 @@ fn nothing_but_parts_go_in_a_table_or_list() {
         Event::Text("stray".into()),
         Event::End(TagEnd::Item),
     ];
-    let mut b = Builder::new(1_000);
+    let mut b = Builder::new(1_000, None);
     for event in events {
         b.event(event);
     }
@@ -1217,7 +1223,7 @@ fn where_the_budget_binds_the_words_survive() {
 fn a_small_element_budget_keeps_every_word() {
     let source = "# Title\n\nSome *emphasis* and [a link](/x).\n\n- one\n- two\n  - three\n\n| a | b |\n|---|---|\n| c | d |\n| e | f |\n\n> quoted **text**\n\nlast words";
     for budget in [0, 1, 2, 3, 5, 8, 13] {
-        let mut b = Builder::new(source.len());
+        let mut b = Builder::new(source.len(), None);
         b.elements = budget;
         for event in Parser::new_ext(source, options()) {
             b.event(event);
@@ -1257,4 +1263,124 @@ fn a_small_element_budget_keeps_every_word() {
     fn Tree(nodes: Vec<Node>) -> Element {
         rsx! { {nodes.iter().map(node)} }
     }
+}
+
+/// With the site known, an absolute link to it is the site's own: its
+/// origin as parsed, so nothing that only looks like it
+#[test]
+fn an_absolute_link_to_the_site_is_on_it() {
+    let site = Url::parse("https://subliminal.technology").unwrap();
+    for href in [
+        "https://subliminal.technology/agora/post/7ad26ccd",
+        "https://subliminal.technology",
+        "https://subliminal.technology/other",
+        "HTTPS://SUBLIMINAL.TECHNOLOGY/agora/feed",
+        "https://subliminal.technology:443/agora/feed",
+        "https://subliminal%2Etechnology/agora/feed",
+        // The site's host over http, as a page URL reads it
+        "http://subliminal.technology/agora/feed",
+        "/agora/feed",
+    ] {
+        assert!(is_on_site(href, Some(&site)), "{href}");
+    }
+    for href in [
+        "https://subliminal.technology.evil.example/agora/feed",
+        "https://subliminal.technology@evil.example/agora/feed",
+        "https://subliminal.technology:443@evil.example/",
+        "https://evil.example/https://subliminal.technology/",
+        "https://evil.example/?subliminal.technology",
+        "https://user@subliminal.technology/agora/feed",
+        "https://user:pw@subliminal.technology/agora/feed",
+        "https://:pw@subliminal.technology/agora/feed",
+        "https://subliminal.technology:8443/agora/feed",
+        "http://subliminal.technology:8080/agora/feed",
+        "https://subliminal.technology./agora/feed",
+        "https://git.subliminal.technology/agora-agentkit",
+        "https://technology/agora/feed",
+        "mailto:steward@subliminal.technology",
+        "ftp://subliminal.technology/agora/feed",
+        "//subliminal.technology/agora/feed",
+    ] {
+        assert!(!is_on_site(href, Some(&site)), "{href}");
+    }
+    // With none known, only a relative link is
+    assert!(!is_on_site(
+        "https://subliminal.technology/agora/feed",
+        None
+    ));
+}
+
+/// A body's absolute link to the site gets the site's `rel` where the
+/// page says which site it is on, and only there
+#[test]
+fn a_body_on_the_site_links_to_it_as_its_own() {
+    let site = Url::parse("https://subliminal.technology").unwrap();
+    let rel = |source: &str, site: Option<&Url>| -> Vec<&'static str> {
+        fn rels(nodes: &[Node], out: &mut Vec<&'static str>) {
+            for node in nodes {
+                if let Node::Element(kind, children) = node {
+                    if let Kind::Link { rel, .. } = kind {
+                        out.push(*rel);
+                    }
+                    rels(children, out);
+                }
+            }
+        }
+        let mut out = Vec::new();
+        rels(&parse_at(source, site), &mut out);
+        out
+    };
+    let source = "[ours](https://subliminal.technology/agora/post/7ad26ccd) \
+                  [theirs](https://subliminal.technology.evil.example/) \
+                  [path](/agora/feed)";
+    assert_eq!(
+        rel(source, Some(&site)),
+        [SITE_LINK_REL, LINK_REL, SITE_LINK_REL]
+    );
+    assert_eq!(rel(source, None), [LINK_REL, LINK_REL, SITE_LINK_REL]);
+}
+
+/// The site reaches a body through the page's data, so the server's
+/// render and the client's read the same one
+#[cfg(feature = "dioxus-ssr")]
+#[test]
+fn the_site_comes_from_the_page() {
+    use crate::ui::thread::{ThreadLoad, ThreadPage};
+    let site = Url::parse("https://subliminal.technology").unwrap();
+    let mut read = crate::fixtures::post_with_comments();
+    read.post.body =
+        "[ours](https://subliminal.technology/agora/feed)".to_owned();
+    let page =
+        ThreadPage::new(read.post.id, ThreadLoad::Loaded(Box::new(read)));
+    let ours = format!("rel=\"{SITE_LINK_REL}\"");
+    let off = format!("rel=\"{LINK_REL}\"");
+    let at = crate::ui::page::Page::from(page.clone().at(&site))
+        .render()
+        .unwrap();
+    assert!(
+        at.html.contains(&ours) && !at.html.contains(&off),
+        "{}",
+        at.html
+    );
+    // The data block holds the site, for the client's first render
+    let back: crate::ui::page::Page = crate::ui::island::from_script_text(
+        at.script
+            .split_once('>')
+            .unwrap()
+            .1
+            .rsplit_once("</script>")
+            .unwrap()
+            .0,
+    )
+    .unwrap();
+    assert!(
+        matches!(back, crate::ui::page::Page::Thread(ThreadPage { site: Some(ref s), .. }) if *s == site)
+    );
+    let nowhere = crate::ui::page::Page::from(page).render().unwrap();
+    assert!(nowhere.html.contains(&off), "{}", nowhere.html);
+    assert_eq!(
+        to_html("<https://subliminal.technology/x>", Some(&site)),
+        to_html("[https://subliminal.technology/x](/x)", None)
+            .replace("href=\"/x\"", "href=\"https://subliminal.technology/x\"")
+    );
 }

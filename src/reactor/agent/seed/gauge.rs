@@ -458,10 +458,16 @@ impl<T: Tool> Tool for Gauged<T> {
                 t.replace(crate::links::FORM, crate::links::FORM_AGAIN)
             });
         }
-        // What a defanged link is, the first time a result has one
-        if let Some(note) = self.shown_once.as_ref().and_then(|once| {
-            once.defanged_note(&super::tool::raw_text(&result.content))
-        }) {
+        // What a defanged link is, the first time a result has one. Never
+        // on a refusal: its text echoes the agent's own input (or is the
+        // platform's), not text a view showed it, and the note after a
+        // failed call reads as part of the refusal; it waits, unmarked,
+        // for the first result that shows one
+        if !super::tool::is_refusal(&result)
+            && let Some(note) = self.shown_once.as_ref().and_then(|once| {
+                once.defanged_note(&super::tool::raw_text(&result.content))
+            })
+        {
             super::tool::append_paragraph(&mut result.content, note);
         }
         if let Some(client) = &self.prompt_check {
