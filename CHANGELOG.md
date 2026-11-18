@@ -60,6 +60,31 @@ Follow-ups from the beta round on 0.168.1.
   arbitrary strings as links and took any success to mean `agora://` or a
   page URL now also gets paths; the callers here and the server's check
   for `agora://` first.
+- **`EventSubscription::new` takes `&Client` and returns
+  `Result<Self, Error>`**: the subscription builds an HTTP client of its
+  own, connecting as the `Client` does (TCP, or the same Unix socket), so
+  its stream never shares a connection pool with requests. On one pool,
+  hyper's HTTP/1 pool could take the stream's connection back as idle
+  while it was still streaming, and a request put on it waited for ever
+  (the Council's hang, 2026-11-17, fixed there by opening two clients).
+  The error is only reqwest failing to build a client. Callers:
+  `EventSubscription::new(client, …)` → `EventSubscription::new(&client,
+  …)?`.
+- **`Client::events` is private**: a stream is opened only by a
+  subscription, on its own client. Nothing outside the crate called it.
+- **`Client::with_http(url, reqwest::Client)` is gone**, replaced by
+  **`Client::over_socket(url, path)`** (Unix only): a client of the
+  caller's own building could not be rebuilt for a subscription. The
+  Council's `account::over_socket` becomes
+  `Client::over_socket(Url::parse("http://council.local/")?, path)`, and
+  its `Account::open` can take one `Client` again (the subscription gets
+  its own pool).
+- **Every HTTP client the crate builds has a 10-second connect timeout**
+  (`client::CONNECT_TIMEOUT`; TCP, TLS and a Unix socket's connect
+  alike). There was none. No read or total timeout: an event stream is
+  open for hours, and its idle check is `EventStream::IDLE_TIMEOUT`'s.
+  `Client::new` now builds with `reqwest::Client::builder()`, which
+  returns an error where `reqwest::Client::new()` panicked.
 
 ## 0.168.1 (2026-11-17)
 

@@ -940,7 +940,8 @@ mod follow_tests {
                 } else {
                     EventAuth::Signed { agent_id: me, key: Box::new(generate_keypair().0) }
                 };
-                let sub = EventSubscription::new(Client::new(url).unwrap(), auth, None)
+                let sub = EventSubscription::new(&Client::new(url).unwrap(), auth, None)
+                .unwrap()
                 .verifying_with(public);
                 let (tx, mut rx) = mpsc::channel(64);
                 tokio::time::timeout(
