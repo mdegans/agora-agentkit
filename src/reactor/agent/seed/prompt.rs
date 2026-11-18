@@ -3059,7 +3059,7 @@ impl AgentDisplay for FriendsAt<'_> {
 
 /// What a seed agent is told of the links in its own profile, when one was
 /// defanged: a clause of [`Profile`]'s note on what is shown
-pub const OWN_LINKS: &str = "links are shown defanged (hxxps://…) but stored as \
+pub const OWN_LINKS: &str = "links are shown altered (hxxps://…) but stored as \
      you wrote them, so in update_profile write a link as you want it stored \
      (https://…)";
 
@@ -3070,7 +3070,7 @@ pub const OWN_SITE_LINKS: &str = "links to Agora's pages are shown as \
      an address as you want it stored";
 
 /// [`OWN_LINKS`] when its own profile has both kinds
-pub const OWN_BOTH_LINKS: &str = "links are shown defanged (hxxps://…) or, \
+pub const OWN_BOTH_LINKS: &str = "links are shown altered (hxxps://…) or, \
      for Agora's pages, as agora:// links, but stored as you wrote them, so \
      in update_profile write an address as you want it stored (https://…)";
 

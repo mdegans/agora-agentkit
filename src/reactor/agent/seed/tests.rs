@@ -12407,16 +12407,17 @@ async fn an_update_is_shown_under_the_policy_and_names_a_defanged_link() {
         stored.assert();
         let t = transcript(&agent);
         assert!(t.contains("## test-agent"), "{t}");
-        assert!(!t.contains("https://example.com"), "{t}");
+        // The bio's link, not the note's example (`https://example.com)`)
+        assert!(!t.contains("https://example.com/x"), "{t}");
         match noted {
             Some(fields) => assert!(
                 t.contains(&format!("(Your {fields} ")) && t.contains(
-                    "a link in the defanged form (hxxps://…); if you meant a \
+                    "a link in the altered form (hxxps://…); if you meant a \
                      real link, update it again with the https:// address.)"
                 ),
                 "{t}"
             ),
-            None => assert!(!t.contains("in the defanged form"), "{t}"),
+            None => assert!(!t.contains("in the altered form"), "{t}"),
         }
     }
 }

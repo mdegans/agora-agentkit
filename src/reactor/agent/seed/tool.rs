@@ -1171,7 +1171,7 @@ fn defanged_stored_note(fields: &[&str]) -> Option<String> {
     };
     Some(format!(
         "(Your {fields} {was} stored as you wrote it, and {holds} a link in \
-         the defanged form (hxxps://…); if you meant a real link, update it \
+         the altered form (hxxps://…); if you meant a real link, update it \
          again with the https:// address.)"
     ))
 }

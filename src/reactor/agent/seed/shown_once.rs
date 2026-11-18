@@ -183,9 +183,10 @@ pub struct ShownOnce(Arc<RwLock<Inner>>);
 /// time a result defangs one ([`ShownOnce::defanged_note`])
 pub const DEFANGED_NOTE: &str = "*(Links to other sites are shown altered, like \
      hxxps://example[.]com, so that no tool opens one by accident; the text \
-     as written, yours included, keeps the real address. Sites your operator \
-     has allowed are shown as written: to have one allowed, `send_message` \
-     to `operator`.)*";
+     as written, yours included, keeps the real address. To quote or pass \
+     one on, write the real address (https://example.com): what you write is \
+     stored as you write it. Sites your operator has allowed are shown as \
+     written: to have one allowed, `send_message` to `operator`.)*";
 
 /// [`DEFANGED_NOTE`] when the operator lists authors whose links are
 /// shown as written (`allow_authors`): a link left whole in one agent's
@@ -193,9 +194,11 @@ pub const DEFANGED_NOTE: &str = "*(Links to other sites are shown altered, like 
 /// the first is not allowed
 pub const DEFANGED_AUTHORS_NOTE: &str = "*(Links to other sites are shown altered, \
      like hxxps://example[.]com, so that no tool opens one by accident; the \
-     text as written, yours included, keeps the real address. Sites your \
-     operator has allowed, and text by agents it trusts, are shown as \
-     written: to have a site allowed, `send_message` to `operator`.)*";
+     text as written, yours included, keeps the real address. To quote or \
+     pass one on, write the real address (https://example.com): what you \
+     write is stored as you write it. Sites your operator has allowed, and \
+     text by agents it trusts, are shown as written: to have a site allowed, \
+     `send_message` to `operator`.)*";
 
 /// The same under [`Links::Raw`] with deny rules
 pub const BLOCKED_NOTE: &str = "*(Links to sites your operator has blocked are \
@@ -754,5 +757,32 @@ mod tests {
             deny: vec!["https://evil.example".parse().unwrap()],
         };
         assert_eq!(defanged_note_for(&deny), Some(BLOCKED_NOTE));
+    }
+
+    /// An agent reads one word for the altered form, and the notes on
+    /// other sites' links say what to write when quoting one
+    #[test]
+    fn the_notes_say_altered_and_how_to_quote() {
+        use super::super::prompt::{OWN_BOTH_LINKS, OWN_LINKS, OWN_SITE_LINKS};
+        for note in [
+            DEFANGED_NOTE,
+            DEFANGED_AUTHORS_NOTE,
+            BLOCKED_NOTE,
+            OWN_LINKS,
+            OWN_SITE_LINKS,
+            OWN_BOTH_LINKS,
+        ] {
+            assert!(!note.to_lowercase().contains("defang"), "{note}");
+        }
+        for note in [DEFANGED_NOTE, DEFANGED_AUTHORS_NOTE] {
+            assert!(
+                note.contains(
+                    "To quote or pass one on, write the real address \
+                     (https://example.com): what you write is stored as you \
+                     write it."
+                ),
+                "{note}"
+            );
+        }
     }
 }
