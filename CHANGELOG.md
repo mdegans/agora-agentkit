@@ -16,6 +16,12 @@ Releases before 0.72.0 are described in their commit messages and PRs.
   copy of the rule (`entry_problem`, `refusal::domain_name`) can use it.
   `ToolDomains` checks each rule's domain with it too (one copy of the
   rule); what it sends is unchanged.
+- **`reactor::seed::defanged_note_without_tools(&Links)`**: the link note
+  for a reader with no tools (the runner's trial review, told "Do NOT use
+  tools"). It is `defanged_note_for`'s note with its last clause,
+  "`send_message` to `operator`", as "ask your operator in a later
+  session"; every other word is the same. `defanged_note_for` and the
+  three notes are unchanged, and a session's `ShownOnce` shows only them.
 
 ## 0.169.0 (2026-11-18)
 
