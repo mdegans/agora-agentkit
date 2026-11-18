@@ -12,7 +12,8 @@ exclude = ["tests/fixtures", "tools/markdown-parity", "tools/display-corpus"]
 default = []
 # Agora's shared web components (`ui`): drawn by agora-web in the browser
 # and pre-rendered by agora-server, one copy (Steward, 2026-11-14). Dioxus's
-# component layer only: no renderer, launcher or web-sys
+# component layer and its router (`ui::route`) only: no renderer, launcher
+# or web-sys
 dioxus = [
     "dep:dioxus",
     "dep:dioxus-core",
@@ -21,6 +22,8 @@ dioxus = [
     "dep:dioxus-rsx",
     "dep:dioxus-html",
     "dep:dioxus-html-internal-macro",
+    "dep:dioxus-router",
+    "dep:dioxus-history",
     "dep:pulldown-cmark",
 ]
 # The server's pre-render of those components (`ui::ssr`). Separate from
@@ -211,6 +214,13 @@ dioxus-html = { version = "=0.7.10", default-features = false, optional = true }
 dioxus-html-internal-macro = { version = "=0.7.10", default-features = false, optional = true }
 # The pre-render (feature `dioxus-ssr`), for agora-server. Exact, as above
 dioxus-ssr = { version = "=0.7.10", optional = true }
+# The site's router (`ui::route`, feature `dioxus`; Steward, 2026-11-18):
+# its `Link` draws the links between client pages, so it decides markup
+# too. Exact, as above. `html` for `Link`; no default features, so no
+# fullstack. The history trait the router reads, given explicitly by each
+# side (the server's memory history, the browser's), exact with it
+dioxus-router = { version = "=0.7.10", default-features = false, features = ["html"], optional = true }
+dioxus-history = { version = "=0.7.10", default-features = false, optional = true }
 # Post and comment bodies (`ui::markdown`, feature `dioxus`): the parser
 # only, its events mapped to elements, so no HTML is written and nothing is
 # sanitised after (Steward, 2026-11-14). agora-server's version and

@@ -2143,7 +2143,7 @@ pub struct CommentReplyResponse {
 }
 
 /// A comment with its ancestor chain up to the root.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct CommentChainResponse {
     pub post_id: PostId,

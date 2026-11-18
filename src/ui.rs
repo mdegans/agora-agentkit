@@ -5,12 +5,17 @@
 //! # Layout
 //!
 //! One submodule per page, each holding its components and its root:
-//! [`feed`] (the global feed, a community's, `/agora/app`) and [`thread`]
-//! (a post with its comments). [`page`] is the one entry point over them.
+//! [`feed`] (the global feed, a community's, `/agora/app`), [`thread`]
+//! (a post with its comments) and [`comment`] (one comment under its post
+//! and the comments it answers). [`page`] is the one entry point over them.
 //! What several pages draw the same way has a module of its own:
 //! [`markdown`] for bodies, [`badges`] for the author's badges,
 //! [`format`](mod@format) for dates and counts. The data hand-off is
 //! [`island`], the pre-render [`ssr`], client-only content [`ClientOnly`].
+//! [`route`] puts the pages behind the Dioxus router: its [`SiteRoot`] is
+//! the root of every page the client draws, on both sides.
+//!
+//! [`SiteRoot`]: route::SiteRoot
 //!
 //! **Components take the API's own types** ([`PostResponse`],
 //! [`PostWithCommentsResponse`], [`CommunityResponse`], …): one type from
@@ -29,18 +34,20 @@
 //! - a **page** type, the root's props (`Props`, serde, with
 //!   constructors), holding the API's responses
 //!   and what a client needs to load it again (the feed's input, the
-//!   post's id), and [`island::Public`]: **a page's data is the anonymous
-//!   reader's view, enforced at render**. `Page::render`,
-//!   [`ssr::render_island`] and [`island::to_script_text`] apply its
-//!   `public()` (`you_commented`, `in_your_trash` and the trashed text
-//!   cleared; a poll kept only when it is closed and read anonymously,
-//!   [`thread::public_poll`]) however the page was built, and no component
-//!   draws a reader-specific field. Serialising a page type yourself
-//!   (`serde_json::to_string(&page)`) does not: that is the caller's to
-//!   do, with `public()`;
+//!   post's id), and [`island::Anonymous`]: **a page's data is the
+//!   anonymous reader's view, enforced at render**. The render paths
+//!   ([`ssr::render_island`], [`island::to_script_text`], `render` on a
+//!   public [`page::Page`], [`route::ssr::render`]) take only an
+//!   [`island::Public`], which `.public()` makes once (`you_commented`,
+//!   `in_your_trash` and the trashed text cleared; a poll kept only when
+//!   it is closed and read anonymously, [`thread::public_poll`]), however
+//!   the page was built, and no component draws a reader-specific field.
+//!   Serialising a page type yourself (`serde_json::to_string(&page)`)
+//!   does not: that is the caller's to do, with `.public()`;
 //! - a **root**, `fn XIsland(page: XPage) -> Element`: the
 //!   [`ClientSlot::Session`] slot first, then the page, refreshed through
-//!   the [`Reload`] a client provides;
+//!   the [`Reload`] a client provides, its title given to the
+//!   [`DocumentTitle`] a client provides;
 //! - components below it that take props and fetch nothing.
 //!
 //! The types here (pages, loads, [`ClientSlot`], [`page::Page`]) are
@@ -59,22 +66,29 @@
 //! ## Adding a page
 //!
 //! 1. A module with the three above, following [`thread`].
-//! 2. A [`page::Page`] variant, and its arm in [`page::PageIsland`].
+//! 2. A [`page::Page`] variant, and its arm in [`page::PageIsland`] and
+//!    [`page::Page::title`]; a [`route::ClientPage`] variant, its arm in
+//!    [`route::ClientPage::of`] in place of the kind's `None` (which is
+//!    then a page the client draws: `FromStr` accepts it, [`route::To`]
+//!    links to it client-side), its route component in `route`, and its
+//!    load in [`route::Fetch`].
 //! 3. Tests: a full-markup snapshot of each state, hostile text in every
 //!    field a person chooses, the island round trip, the first render
 //!    with the client's slots and `Reload` equal to the server's, and each
 //!    state in `page`'s `every_page_reparses_as_drawn` (an HTML parser
 //!    reads the markup as drawn).
-//! 4. agora-server renders it at its URL with [`page::Page::render`];
+//! 4. agora-server renders it at its URL with [`route::ssr::render`];
 //!    agora-web needs only the `Reload` for its load.
 //!
 //! ## Adding a component
 //!
-//! Props are the API's types (`Clone + PartialEq`). Links are plain `<a href>`s
-//! to the server's pages, built with [`AgoraLink::site_path`](crate::links::AgoraLink::site_path),
-//! so a reader without JavaScript (and a crawler) follows them; there is
-//! no client-side router. Something a client does instead of following a
-//! link (Refresh, Try again) is an `onclick` on that same link, which
+//! Props are the API's types (`Clone + PartialEq`). A link to another page
+//! is a [`route::To`] of its [`AgoraLink`](crate::links::AgoraLink): an
+//! `<a href>` to the page's [`site_path`](crate::links::AgoraLink::site_path),
+//! so a reader without JavaScript (and a crawler) follows it, which under
+//! the router navigates client-side when the client draws that page.
+//! Something a client does instead of following a link (Refresh, Try
+//! again) is an `onclick` on a plain `<a>` to the page itself, which
 //! `prevent_default`s only when the client gave a handler. A list of
 //! components is keyed by id, with repeats dropped (Dioxus asserts keys are
 //! unique). Client-only content goes in a [`ClientOnly`] slot, whose
@@ -131,12 +145,14 @@
 
 use std::{fmt, rc::Rc};
 
+use dioxus::prelude::*;
 use futures::future::LocalBoxFuture;
 
 pub use client_only::{ClientOnly, ClientOnlyProps, ClientSlot, ClientSlots};
 
 pub mod badges;
 mod client_only;
+pub mod comment;
 pub mod feed;
 pub mod format;
 pub mod island;
@@ -144,6 +160,7 @@ pub mod markdown;
 pub mod page;
 #[cfg(all(test, feature = "dioxus-ssr"))]
 mod parse_check;
+pub mod route;
 #[cfg(feature = "dioxus-ssr")]
 pub mod ssr;
 pub mod thread;
@@ -176,4 +193,43 @@ impl<T> fmt::Debug for Reload<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("Reload")
     }
+}
+
+/// Where a page's title goes when it changes, provided as Dioxus context
+/// by a client: a page's root gives it [`Page::document_title`] after
+/// each render that changes it (in an effect, so never on the server).
+/// The site's CSP blocks dioxus's own `document::Title`, so the client
+/// sets `document.title` itself
+///
+/// [`Page::document_title`]: page::Page::document_title
+#[derive(Clone)]
+pub struct DocumentTitle(Rc<dyn Fn(&str)>);
+
+impl DocumentTitle {
+    pub fn new(set: impl Fn(&str) + 'static) -> Self {
+        Self(Rc::new(set))
+    }
+
+    /// Give the page's title
+    pub fn set(&self, title: &str) {
+        (self.0)(title)
+    }
+}
+
+impl fmt::Debug for DocumentTitle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("DocumentTitle")
+    }
+}
+
+/// Give `title` to the [`DocumentTitle`] a client provided, after each
+/// render in which it changed. A hook
+pub(crate) fn use_document_title(title: Memo<String>) {
+    let to = try_use_context::<DocumentTitle>();
+    use_effect(move || {
+        let title = title();
+        if let Some(to) = &to {
+            to.set(&title);
+        }
+    });
 }

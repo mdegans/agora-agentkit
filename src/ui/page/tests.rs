@@ -1,15 +1,23 @@
 use super::*;
-use crate::ui::island::Public as _;
+use crate::ui::island::Anonymous as _;
 use crate::{
     responses::PostWithCommentsResponse,
     ui::{
         ClientSlot, ClientSlots,
+        comment::{CommentIsland, CommentLoad, CommentPage},
         feed::FeedLoad,
         island,
         ssr::pre_render,
         thread::{ThreadLoad, ThreadPage},
     },
 };
+
+fn comment() -> CommentPage {
+    CommentPage::loaded(
+        crate::fixtures::comment().id,
+        crate::fixtures::comment_chain(),
+    )
+}
 
 fn thread() -> ThreadPage {
     let read: PostWithCommentsResponse =
@@ -50,6 +58,11 @@ fn pages() -> Vec<Page> {
             thread().post,
             ThreadLoad::Failed("Agora couldn't be reached".into()),
         )),
+        Page::Comment(comment()),
+        Page::Comment(CommentPage::new(
+            comment().comment,
+            CommentLoad::Failed("Agora couldn't be reached".into()),
+        )),
     ]
 }
 
@@ -61,6 +74,7 @@ fn the_entry_point_draws_the_pages_root() {
         let own = match page.clone() {
             Page::Feed(p) => pre_render(FeedIsland, p),
             Page::Thread(p) => pre_render(ThreadIsland, p),
+            Page::Comment(p) => pre_render(CommentIsland, p),
         };
         assert_eq!(pre_render(PageIsland, page), own);
     }
@@ -71,7 +85,7 @@ fn the_entry_point_draws_the_pages_root() {
 #[test]
 fn a_page_round_trips_through_the_island() {
     for page in pages() {
-        let rendered = page.clone().render().unwrap();
+        let rendered = page.clone().public().render().unwrap();
         let text = rendered
             .script
             .strip_prefix(
@@ -225,7 +239,7 @@ fn every_page_reparses_as_drawn() {
             .into(),
         FeedPage::new(FeedPage::input(), FeedLoad::Loaded(vec![])).into(),
         FeedPage::new(FeedPage::input(), posts.iter().collect()).into(),
-        FeedPage::new(community_input, posts.iter().collect())
+        FeedPage::new(community_input.clone(), posts.iter().collect())
             .with_community(community())
             .with_total(100)
             .into(),
@@ -235,6 +249,15 @@ fn every_page_reparses_as_drawn() {
         ThreadPage::new(thread().post, ThreadLoad::Pending).into(),
         ThreadPage::new(thread().post, ThreadLoad::Failed("<down>".into()))
             .into(),
+        ThreadPage::new(thread().post, ThreadLoad::NotFound).into(),
+        FeedPage::new(community_input.clone(), FeedLoad::NotFound).into(),
+        // A client's community page after a navigation, before its load
+        FeedPage::pending(community_input.clone()).into(),
+        comment().into(),
+        CommentPage::new(comment().comment, CommentLoad::Pending).into(),
+        CommentPage::new(comment().comment, CommentLoad::Failed("<x>".into()))
+            .into(),
+        CommentPage::new(comment().comment, CommentLoad::NotFound).into(),
     ];
     pages.push(Page::Thread(thread()));
     for page in pages {
@@ -307,7 +330,7 @@ fn reader_specific_fields_are_cleared_and_never_drawn() {
         .unwrap_or_else(|e| panic!("{e}")),
     );
     let page = ThreadPage::loaded(trashed);
-    let text = island::to_script_text(&page).unwrap();
+    let text = island::to_script_text(&page.clone().public()).unwrap();
     assert!(!text.contains("trashed words"), "{text}");
     assert!(!text.contains("in_your_trash"), "{text}");
 }
@@ -321,10 +344,10 @@ fn the_data_block_is_the_responses() {
     let posts: Vec<PostResponse> =
         (0..25).map(|i| post(i, "A title")).collect();
     let feed = FeedPage::new(FeedPage::input(), posts.iter().collect());
-    let feed_json = island::to_script_text(&feed).unwrap();
+    let feed_json = island::to_script_text(&feed.clone().public()).unwrap();
     let posts_json = serde_json::to_string(&posts).unwrap();
     let thread = ThreadPage::loaded(big_thread(200));
-    let thread_json = island::to_script_text(&thread).unwrap();
+    let thread_json = island::to_script_text(&thread.clone().public()).unwrap();
     let ThreadLoad::Loaded(read) = &thread.thread else {
         panic!()
     };
@@ -396,7 +419,7 @@ fn a_readers_data_never_reaches_a_rendered_page() {
         total: None,
     });
     for page in [thread, feed] {
-        let rendered = page.render().unwrap();
+        let rendered = page.public().render().unwrap();
         for secret in [
             "SECRET",
             "you_commented",
@@ -417,14 +440,17 @@ fn a_readers_data_never_reaches_a_rendered_page() {
         }
     }
     // And the low-level hand-off applies it too
-    let text = island::to_script_text(&ThreadPage {
-        post: fixtures::post().id,
-        thread: ThreadLoad::Loaded(Box::new(PostWithCommentsResponse {
-            poll: Some(fixtures::poll()),
-            ..fixtures::post_with_comments()
-        })),
-        site: None,
-    })
+    let text = island::to_script_text(
+        &ThreadPage {
+            post: fixtures::post().id,
+            thread: ThreadLoad::Loaded(Box::new(PostWithCommentsResponse {
+                poll: Some(fixtures::poll()),
+                ..fixtures::post_with_comments()
+            })),
+            site: None,
+        }
+        .public(),
+    )
     .unwrap();
     assert!(!text.contains("tie_break_seed"), "{text}");
 }
@@ -458,9 +484,9 @@ fn only_a_closed_anonymous_poll_is_public() {
             })),
             site: None,
         });
-        let rendered = page.clone().render().unwrap();
+        let rendered = page.clone().public().render().unwrap();
         let text = rendered.script;
-        let ThreadLoad::Loaded(read) = (match page.public() {
+        let ThreadLoad::Loaded(read) = (match page.public().into_inner() {
             Page::Thread(t) => t.thread,
             _ => unreachable!(),
         }) else {
@@ -500,7 +526,7 @@ fn only_a_closed_anonymous_poll_is_public() {
 fn a_page_on_a_site_hydrates_with_its_links_rel() {
     use crate::ui::markdown::{LINK_REL, SITE_LINK_REL};
     let page = Page::Thread(thread_on_site());
-    let rendered = page.clone().render().unwrap();
+    let rendered = page.clone().public().render().unwrap();
     let ours = format!("rel=\"{SITE_LINK_REL}\"");
     assert!(rendered.html.contains(&ours), "{}", rendered.html);
     assert!(!rendered.html.contains(LINK_REL), "{}", rendered.html);
@@ -515,4 +541,91 @@ fn a_page_on_a_site_hydrates_with_its_links_rel() {
     dom.provide_root_context(ClientSlots::new());
     dom.rebuild_in_place();
     assert_eq!(dioxus_ssr::pre_render(&dom), rendered.html);
+}
+
+/// A page's title, before " — Agora": what agora-server's forum pages put
+/// in `<title>` (the community's display name, "All Posts", the post's
+/// title, "A thread"), and for the states only a client draws, the
+/// community's name while it loads and "Not found"
+#[test]
+fn every_page_has_its_title() {
+    let community_input = GetFeedInput {
+        community: Some("meta-governance".parse().unwrap()),
+        ..GetFeedInput::default()
+    };
+    let mut trashed = big_thread(1);
+    trashed.post.title = "Mine, trashed".into();
+    trashed.post.deleted_at = Some(crate::fixtures::at());
+    trashed.post.removed_by = Some(crate::enums::RemovedBy::Author);
+    trashed.in_your_trash = Some(
+        serde_json::from_value(serde_json::json!({
+            "entry_id": uuid::Uuid::from_u128(1),
+            "id": trashed.post.id,
+            "kind": "post",
+            "post_id": trashed.post.id,
+            "created_at": "2026-11-04T08:00:00Z",
+            "deleted_at": "2026-11-04T09:00:00Z",
+            "deleted_by": "author",
+            "can_restore": true,
+            "can_delete_permanently": true,
+        }))
+        .unwrap(),
+    );
+    for (page, title) in [
+        (
+            FeedPage::new(FeedPage::input(), FeedLoad::Loaded(vec![])).into(),
+            "All Posts",
+        ),
+        (
+            FeedPage::new(FeedPage::input(), FeedLoad::Failed("x".into()))
+                .into(),
+            "All Posts",
+        ),
+        (
+            FeedPage::new(community_input.clone(), FeedLoad::Loaded(vec![]))
+                .with_community(community())
+                .into(),
+            "Meta <Governance>",
+        ),
+        (
+            FeedPage::pending(community_input.clone()).into(),
+            "meta-governance",
+        ),
+        (
+            FeedPage::new(community_input, FeedLoad::NotFound).into(),
+            "Not found",
+        ),
+        (Page::Thread(thread()), "A title"),
+        (
+            ThreadPage::new(thread().post, ThreadLoad::Pending).into(),
+            "A thread",
+        ),
+        (
+            ThreadPage::new(thread().post, ThreadLoad::Failed("x".into()))
+                .into(),
+            "A thread",
+        ),
+        (
+            ThreadPage::new(thread().post, ThreadLoad::NotFound).into(),
+            "Not found",
+        ),
+        (comment().into(), "Comment by quinn on “A title”"),
+        (
+            CommentPage::new(comment().comment, CommentLoad::Pending).into(),
+            "A comment",
+        ),
+        (
+            CommentPage::new(comment().comment, CommentLoad::NotFound).into(),
+            "Not found",
+        ),
+        // A page's title is the public one: never a trashed title
+        (
+            Page::Thread(ThreadPage::loaded(trashed)),
+            crate::enums::RemovedBy::Author.placeholder(),
+        ),
+    ] {
+        let page: Page = page;
+        assert_eq!(page.title(), title);
+        assert_eq!(page.document_title(), format!("{title} — Agora"));
+    }
 }

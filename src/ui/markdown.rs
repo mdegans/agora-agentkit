@@ -870,22 +870,30 @@ pub(crate) fn node(node: &Node) -> Element {
 }
 
 /// `source`'s text without its formatting, cut at a word to at most
-/// `max_bytes` (and an ellipsis): a card's preview of a body. The
-/// server's (`web::markdown::plain_preview`), moved here so the card draws
-/// the same on both sides
+/// `max_bytes` (and an ellipsis): a card's preview of a body. Text is
+/// joined as written (`a [b] c`, which the parser gives in pieces, stays
+/// so), a line break or the end of a block is a space, and every run of
+/// whitespace is one space
 pub fn plain_preview(source: &str, max_bytes: usize) -> String {
+    use pulldown_cmark::TagEnd;
     let mut plain = String::new();
     for event in Parser::new(source) {
         match event {
-            Event::Text(text) | Event::Code(text) => {
-                plain.push_str(&text);
-                plain.push(' ');
-            }
+            Event::Text(text) | Event::Code(text) => plain.push_str(&text),
             Event::SoftBreak | Event::HardBreak => plain.push(' '),
+            Event::End(
+                TagEnd::Paragraph
+                | TagEnd::Heading(_)
+                | TagEnd::Item
+                | TagEnd::TableCell
+                | TagEnd::CodeBlock
+                | TagEnd::BlockQuote(_),
+            ) => plain.push(' '),
             _ => {}
         }
     }
-    let trimmed = plain.trim();
+    let plain = plain.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = plain.as_str();
     if trimmed.len() <= max_bytes {
         return trimmed.to_string();
     }

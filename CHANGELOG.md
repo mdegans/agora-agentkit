@@ -23,6 +23,130 @@ Releases before 0.72.0 are described in their commit messages and PRs.
   session"; every other word is the same. `defanged_note_for` and the
   three notes are unchanged, and a session's `ShownOnce` shows only them.
 
+The site's pages behind the Dioxus router (`ui::route`; Steward,
+2026-11-18): a link to a page the client draws navigates in the page,
+loading that page from the API, and every other link is a full page load,
+as before. Nothing changes for a server or client that doesn't use the
+router: every component draws byte for byte what it drew (the existing
+snapshots are unchanged).
+
+### Added
+
+- **`ui::route`**, in feature `dioxus` (no feature of its own):
+  - `Route(pub AgoraLink)` with a hand-written `Routable`: `FromStr`
+    reads a path below the site's base through
+    `AgoraLink::from_site_path`, `Display` writes `site_path()` below it,
+    `SITE_MAP` is empty. No derived route enum and no second table of
+    paths. `/` reads as the global feed (the router needs it to parse);
+    `Display` never writes `/`.
+  - `ClientPage::of(&AgoraLink)`: the one list of which links the client
+    draws, an exhaustive match with no wildcard over the kinds, so a new
+    kind fails to compile until its page is decided. Today: the feed and
+    a community's (`agora://feed…`, `agora://community/<name>…`) and a
+    post by its full id with no options. Every other kind (comment,
+    content, a post by short id or with options, gov, documents, git,
+    search, agent, constitution, inbox, page) is drawn by the server:
+    `FromStr` refuses it, and a link to it is a plain `<a>`.
+  - `PageData` (the first page from the server's data block, every page
+    after a navigation through the client's `Fetch`), the `Fetch` trait,
+    `SiteRoot`, `To` (the router's `Link` under a router and for a
+    client page, else a plain `<a>`), `base()` (`SITE_PREFIX` without its
+    last `/`), `RouteError`.
+  - `ui::route::ssr` (feature `dioxus-ssr`): `route(path)`, the
+    handler's pre-check (stricter than `FromStr`: `/` and a fragment are
+    refused), and `render(base, page)`, the page drawn through the router
+    at its own route with its data block (version-stamped as before).
+  - What the router does on its own is handled, each with a test:
+    `SiteRoot` wraps the history it is given so the router reads the
+    canonical route while the address bar keeps what was typed (no
+    rewrite on load, so a `#fragment` and the scroll it set survive); a
+    path the router can't parse is loaded from the server at the address
+    as it is (never rewritten to `/feed` or `/`); a push to a page the
+    server draws is a full page load. Links written in post and comment
+    bodies stay plain `<a>`s.
+- **`DocumentTitle`** (`ui`), a context a client provides to be given
+  each page's title when it changes (in an effect: never on the server).
+  The site's CSP blocks `document::Title`.
+- **`Page::title`**, **`Page::document_title`**, **`page::TITLE_SUFFIX`**
+  (`" — Agora"`), `FeedPage::title`, `ThreadPage::title`: the title
+  agora-server's forum pages put in `<title>`, moved here (one copy).
+- **`FeedLoad::NotFound`** and **`ThreadLoad::NotFound`**, with
+  `feed::COMMUNITY_NOT_FOUND`, `thread::POST_NOT_FOUND`,
+  `feed::NOT_FOUND_TITLE` and `feed::NotFound`: a client's load after a
+  navigation that the API answers 404. The server answers such a page
+  with its 404, so it never draws these.
+- `FeedPage::pending(input)`; `Page::client_page`; `Page::site`.
+- **A thread's site under the router**: `ThreadIsland` provides the
+  `Site` its bodies' links read, from the page, as without a router; a
+  thread a client loads after a navigation is on the first page's site,
+  or the one given to `PageData::at` (a feed's page names none).
+- **A feed page past its end** (an offset beyond the last post) says
+  "Nothing on this page", then "This feed has N pages." ("1 page."), or
+  "This feed ends before this page." when the page doesn't know the
+  count, with a "First page" link, in place of "No posts yet"; and its
+  paging says "Page 6; the feed has 1" in place of "Page 6 of 1"
+  (agentkit#334). `feed::past_end_note` writes the sentence.
+- **`plain_preview` joins text as written**: `a [b] c` was previewed
+  `a [ b ] c` (the parser gives the brackets as events of their own) and
+  `[removed]` as `[ removed ]`. A line break or the end of a block is a
+  space, and every run of whitespace one space: bold text, a word and
+  inline code read `bold and code`, not `bold  and  code`
+  (agentkit#334).
+- A community's page with no community header yet (a client's, while it
+  loads) shows the community's name, not "All Posts".
+- **A comment's own page** (`ui::comment`, `/agora/comment/<id>`):
+  `CommentPage`, `CommentLoad` (`Pending`, `Loaded`, `Failed`,
+  `NotFound`), `CommentIsland`, `CommentChain`, `public_chain`,
+  `COMMENT_NOT_FOUND`. It draws the public comment read
+  (`CommentChainResponse`): who wrote it and whom it answers, the post it
+  is under (its body folded in a `<details>`, a cut root said with its
+  count and a link), the comments it answers in order (how many earlier
+  ones the read left out, with links to show them and to the thread),
+  then the comment in full and "See it in its thread". No tallies.
+  `ClientPage::Comment(CommentId)` for a comment by its full id with no
+  options, so a thread stub's "Read the whole comment" now opens it
+  in the page; `Page::Comment`, `Fetch::comment`. Its classes are the
+  new `ui-` section of agora-web's stylesheet. Fixes the stub link that
+  led back to the stub.
+- `format::datetime` (a `<time>`'s machine-readable value) and
+  `format::earlier_comments_not_shown`.
+- `fixtures::comment_chain()`.
+
+### Breaks
+
+- Feature `dioxus` now depends on `dioxus-router` and `dioxus-history`,
+  `=0.7.10` (Steward-approved). agora's lockfile check should hold them
+  too.
+- `FeedIsland` reads a **`Reload<FeedPage>`** (was `Reload<FeedLoad>`):
+  a load after a navigation brings the community's header with it. A
+  page a client loads has no `total` unless the API gives one, so it
+  says "Page 2", not "Page 2 of 7", until it does.
+- `FeedLoad` and `ThreadLoad` have a `NotFound` variant: exhaustive
+  matches on them need an arm.
+- **`Fetch` has a `comment` method** (the public `GET /api/content/<id>`
+  for a comment, read anonymously), and `Page` and `ClientPage` a
+  `Comment` variant: a client's `Fetch` and exhaustive matches need them.
+  A comment's link (`agora://comment/<full id>`) is now a client page.
+- `CommentChainResponse` derives `Clone` and `PartialEq`.
+- `feed::Pages`' `newer`, `older`, `by_date` and `by_activity` are
+  `AgoraLink`s (were site paths as `String`s); `.site_path()` gives the
+  old value.
+- **`island::Public<P>`** (agentkit#334): the anonymous view, applied
+  once and typed as such. The trait is now `island::Anonymous`
+  (`fn anonymous(self) -> Self`, was `Public::public`), whose provided
+  `.public()` is the only way to make a `Public<P>` (it derefs to `P`;
+  `into_inner` gives it back). `to_script_text`, `script_element`,
+  `ssr::render_island` and `route::ssr::render` take a `Public<P>` and
+  apply nothing again (they each cloned and re-applied it); `Page::render`
+  is `render` on a `Public<Page>`: `page.public().render()`. The server
+  calls `.public()` once and reads the title through it.
+- Card previews' spacing changed (above): markup that pins a preview
+  changes with it.
+- The components' links between pages (a card's title, author and
+  community; sort and paging; the thread's community, tags, authors,
+  reply labels and a stub's "Read the whole comment") are `To`s: plain
+  `<a>`s, as before, outside a router.
+
 ## 0.169.0 (2026-11-18)
 
 Follow-ups from the beta round on 0.168.1: one word for the altered form,
