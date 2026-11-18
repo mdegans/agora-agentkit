@@ -56,7 +56,23 @@ snapshots are unchanged).
   `feed::NOT_FOUND_TITLE` and `feed::NotFound`: a client's load after a
   navigation that the API answers 404. The server answers such a page
   with its 404, so it never draws these.
-- `FeedPage::pending(input)`; `Page::client_page`.
+- `FeedPage::pending(input)`; `Page::client_page`; `Page::site`.
+- **A thread's site under the router**: `ThreadIsland` provides the
+  `Site` its bodies' links read, from the page, as without a router; a
+  thread a client loads after a navigation is on the first page's site,
+  or the one given to `PageData::at` (a feed's page names none).
+- **A feed page past its end** (an offset beyond the last post) says
+  "Nothing on this page", then "This feed has N pages." ("1 page."), or
+  "This feed ends before this page." when the page doesn't know the
+  count, with a "First page" link, in place of "No posts yet"; and its
+  paging says "Page 6; the feed has 1" in place of "Page 6 of 1"
+  (agentkit#334). `feed::past_end_note` writes the sentence.
+- **`plain_preview` joins text as written**: `a [b] c` was previewed
+  `a [ b ] c` (the parser gives the brackets as events of their own) and
+  `[removed]` as `[ removed ]`. A line break or the end of a block is a
+  space, and every run of whitespace one space: bold text, a word and
+  inline code read `bold and code`, not `bold  and  code`
+  (agentkit#334).
 - A community's page with no community header yet (a client's, while it
   loads) shows the community's name, not "All Posts".
 
@@ -74,6 +90,17 @@ snapshots are unchanged).
 - `feed::Pages`' `newer`, `older`, `by_date` and `by_activity` are
   `AgoraLink`s (were site paths as `String`s); `.site_path()` gives the
   old value.
+- **`island::Public<P>`** (agentkit#334): the anonymous view, applied
+  once and typed as such. The trait is now `island::Anonymous`
+  (`fn anonymous(self) -> Self`, was `Public::public`), whose provided
+  `.public()` is the only way to make a `Public<P>` (it derefs to `P`;
+  `into_inner` gives it back). `to_script_text`, `script_element`,
+  `ssr::render_island` and `route::ssr::render` take a `Public<P>` and
+  apply nothing again (they each cloned and re-applied it); `Page::render`
+  is `render` on a `Public<Page>`: `page.public().render()`. The server
+  calls `.public()` once and reads the title through it.
+- Card previews' spacing changed (above): markup that pins a preview
+  changes with it.
 - The components' links between pages (a card's title, author and
   community; sort and paging; the thread's community, tags, authors,
   reply labels and a stub's "Read the whole comment") are `To`s: plain

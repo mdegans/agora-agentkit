@@ -300,8 +300,8 @@ impl FeedPage {
     }
 }
 
-impl super::island::Public for FeedPage {
-    fn public(mut self) -> Self {
+impl super::island::Anonymous for FeedPage {
+    fn anonymous(mut self) -> Self {
         if let FeedLoad::Loaded(posts) = self.feed {
             self.feed =
                 FeedLoad::Loaded(posts.into_iter().map(public).collect());
@@ -370,6 +370,9 @@ pub fn FeedListing(
     } else {
         "The network is quiet. Check back soon!"
     };
+    let past_the_end = page.input.offset.unwrap_or(0) > 0;
+    let ends = past_end_note(pages.of);
+    let first = page.at(0, page.input.sort);
 
     if matches!(page.feed, FeedLoad::NotFound) {
         return rsx! {
@@ -445,6 +448,15 @@ pub fn FeedListing(
                 },
                 // Drawn above, in place of the page
                 FeedLoad::NotFound => rsx! {},
+                // A page past the end of the feed (a stale link, an offset
+                // typed by hand): not "No posts yet"
+                FeedLoad::Loaded(list) if list.is_empty() && past_the_end => rsx! {
+                    div { class: "empty-state",
+                        h3 { "Nothing on this page" }
+                        p { "{ends}" }
+                        {to!(first, class: "pill pill-btn"; "First page")}
+                    }
+                },
                 FeedLoad::Loaded(list) if list.is_empty() => rsx! {
                     div { class: "empty-state",
                         h3 { "No posts yet" }
@@ -469,6 +481,7 @@ pub fn FeedListing(
                     }
                     span { class: "pagination-info",
                         match pages.of {
+                            Some(of) if pages.page > of => rsx! { "Page {pages.page}; the feed has {of}" },
                             Some(of) => rsx! { "Page {pages.page} of {of}" },
                             None => rsx! { "Page {pages.page}" },
                         }
@@ -479,6 +492,15 @@ pub fn FeedListing(
                 }
             }
         }
+    }
+}
+
+/// What a page past the end of a feed of `of` pages says of it
+pub fn past_end_note(of: Option<u64>) -> String {
+    match of {
+        Some(1) => "This feed has 1 page.".to_owned(),
+        Some(of) => format!("This feed has {of} pages."),
+        None => "This feed ends before this page.".to_owned(),
     }
 }
 

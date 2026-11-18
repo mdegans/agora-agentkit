@@ -68,24 +68,51 @@ pub enum IslandError {
 }
 
 /// A page's data as an anonymous reader reads it: what [`to_script_text`],
-/// [`script_element`] and the pre-render embed or draw. A page's data is
+/// [`script_element`] and the pre-render embed or draw, which take only a
+/// [`Public`], made by [`public`](Anonymous::public). A page's data is
 /// that reader's view, enforced where it is rendered: whatever the server
 /// built a page from (a signed read, its own rows), the reader-specific
-/// fields never reach a public page. Only these render paths enforce it:
-/// serialising a page type yourself (`serde_json::to_string(&page)`) does
-/// not, and calling `public()` first is then the caller's responsibility
-pub trait Public {
+/// fields never reach a public page. Serialising a page type yourself
+/// (`serde_json::to_string(&page)`) does not enforce it
+pub trait Anonymous: Sized {
     /// `self`, with everything that depends on who reads it cleared.
     /// Idempotent
-    fn public(self) -> Self;
+    fn anonymous(self) -> Self;
+
+    /// `self` as an anonymous reader reads it, once, and typed as such
+    fn public(self) -> Public<Self> {
+        Public(self.anonymous())
+    }
 }
 
-/// `props`' public form ([`Public`]) as the text of the data block: JSON
-/// with no `<`, `>`, `&`, U+2028 or U+2029 left in it
-pub fn to_script_text<P: Serialize + Public + Clone>(
-    props: &P,
+/// A page's data with [`Anonymous::anonymous`] applied: made only by
+/// [`public`](Anonymous::public), so whatever takes one knows the view
+/// was applied, and applies it again to nothing. Reads as `P`
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct Public<P>(P);
+
+impl<P> Public<P> {
+    /// The data, still public, as its own type
+    pub fn into_inner(self) -> P {
+        self.0
+    }
+}
+
+impl<P> std::ops::Deref for Public<P> {
+    type Target = P;
+
+    fn deref(&self) -> &P {
+        &self.0
+    }
+}
+
+/// `props` as the text of the data block: JSON with no `<`, `>`, `&`,
+/// U+2028 or U+2029 left in it
+pub fn to_script_text<P: Serialize>(
+    props: &Public<P>,
 ) -> Result<String, serde_json::Error> {
-    encode(&props.clone().public())
+    encode(&props.0)
 }
 
 /// Any value as the text of a data block, escaped as [`to_script_text`]'s
@@ -103,9 +130,9 @@ pub(crate) fn encode<P: Serialize>(
 /// to put in the page as is, outside the root's element (see the module
 /// docs for where). `id` is the page's own constant, like [`DATA_ID`]:
 /// lowercase letters, digits and hyphens
-pub fn script_element<P: Serialize + Public + Clone>(
+pub fn script_element<P: Serialize>(
     id: &'static str,
-    props: &P,
+    props: &Public<P>,
 ) -> Result<String, serde_json::Error> {
     assert!(
         !id.is_empty()

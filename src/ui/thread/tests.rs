@@ -1,3 +1,4 @@
+use crate::ui::island::Anonymous as _;
 use std::time::{Duration, Instant};
 
 use super::*;
@@ -405,7 +406,7 @@ async fn a_locked_thread_has_no_reply_slots() {
     // The notice is in the data, as the API serves it, and not drawn
     assert!(!html.contains("schedule for the 09-26"), "{html}");
     assert!(!html.contains("Locked"), "{html}");
-    let data = island::to_script_text(&locked).unwrap();
+    let data = island::to_script_text(&locked.clone().public()).unwrap();
     assert!(data.contains("schedule for the 09-26"), "{data}");
     assert_eq!(reply_slots(&locked), 0);
     // The post's and one per comment, a removed one's included
@@ -616,7 +617,8 @@ fn hostile_text_is_inert() {
     for hostile in HOSTILE {
         let page = with(hostile);
         let out =
-            render_island(island::DATA_ID, ThreadIsland, page.clone()).unwrap();
+            render_island(island::DATA_ID, ThreadIsland, page.clone().public())
+                .unwrap();
         assert_eq!(out.html, plain.replace(PLAIN, &escaped(hostile)));
         let inner = out
             .script
@@ -667,7 +669,8 @@ fn hostile_bodies_are_inert_everywhere() {
 fn the_island_round_trips_to_the_same_markup() {
     let page = page(&read());
     let out =
-        render_island(island::DATA_ID, ThreadIsland, page.clone()).unwrap();
+        render_island(island::DATA_ID, ThreadIsland, page.clone().public())
+            .unwrap();
     let inner = &out.script
         [r#"<script type="application/json" id="agora-app-data">"#.len()
             ..out.script.len() - "</script>".len()];

@@ -710,8 +710,8 @@ pub fn public_poll(
         .then_some(poll)
 }
 
-impl super::island::Public for ThreadPage {
-    fn public(mut self) -> Self {
+impl super::island::Anonymous for ThreadPage {
+    fn anonymous(mut self) -> Self {
         if let ThreadLoad::Loaded(read) = self.thread {
             self.thread = ThreadLoad::Loaded(Box::new(public_read(*read)));
         }

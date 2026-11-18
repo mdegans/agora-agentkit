@@ -1,5 +1,5 @@
 use super::*;
-use crate::ui::island::Public as _;
+use crate::ui::island::Anonymous as _;
 use crate::{
     responses::PostWithCommentsResponse,
     ui::{
@@ -71,7 +71,7 @@ fn the_entry_point_draws_the_pages_root() {
 #[test]
 fn a_page_round_trips_through_the_island() {
     for page in pages() {
-        let rendered = page.clone().render().unwrap();
+        let rendered = page.clone().public().render().unwrap();
         let text = rendered
             .script
             .strip_prefix(
@@ -311,7 +311,7 @@ fn reader_specific_fields_are_cleared_and_never_drawn() {
         .unwrap_or_else(|e| panic!("{e}")),
     );
     let page = ThreadPage::loaded(trashed);
-    let text = island::to_script_text(&page).unwrap();
+    let text = island::to_script_text(&page.clone().public()).unwrap();
     assert!(!text.contains("trashed words"), "{text}");
     assert!(!text.contains("in_your_trash"), "{text}");
 }
@@ -325,10 +325,10 @@ fn the_data_block_is_the_responses() {
     let posts: Vec<PostResponse> =
         (0..25).map(|i| post(i, "A title")).collect();
     let feed = FeedPage::new(FeedPage::input(), posts.iter().collect());
-    let feed_json = island::to_script_text(&feed).unwrap();
+    let feed_json = island::to_script_text(&feed.clone().public()).unwrap();
     let posts_json = serde_json::to_string(&posts).unwrap();
     let thread = ThreadPage::loaded(big_thread(200));
-    let thread_json = island::to_script_text(&thread).unwrap();
+    let thread_json = island::to_script_text(&thread.clone().public()).unwrap();
     let ThreadLoad::Loaded(read) = &thread.thread else {
         panic!()
     };
@@ -400,7 +400,7 @@ fn a_readers_data_never_reaches_a_rendered_page() {
         total: None,
     });
     for page in [thread, feed] {
-        let rendered = page.render().unwrap();
+        let rendered = page.public().render().unwrap();
         for secret in [
             "SECRET",
             "you_commented",
@@ -421,14 +421,17 @@ fn a_readers_data_never_reaches_a_rendered_page() {
         }
     }
     // And the low-level hand-off applies it too
-    let text = island::to_script_text(&ThreadPage {
-        post: fixtures::post().id,
-        thread: ThreadLoad::Loaded(Box::new(PostWithCommentsResponse {
-            poll: Some(fixtures::poll()),
-            ..fixtures::post_with_comments()
-        })),
-        site: None,
-    })
+    let text = island::to_script_text(
+        &ThreadPage {
+            post: fixtures::post().id,
+            thread: ThreadLoad::Loaded(Box::new(PostWithCommentsResponse {
+                poll: Some(fixtures::poll()),
+                ..fixtures::post_with_comments()
+            })),
+            site: None,
+        }
+        .public(),
+    )
     .unwrap();
     assert!(!text.contains("tie_break_seed"), "{text}");
 }
@@ -462,9 +465,9 @@ fn only_a_closed_anonymous_poll_is_public() {
             })),
             site: None,
         });
-        let rendered = page.clone().render().unwrap();
+        let rendered = page.clone().public().render().unwrap();
         let text = rendered.script;
-        let ThreadLoad::Loaded(read) = (match page.public() {
+        let ThreadLoad::Loaded(read) = (match page.public().into_inner() {
             Page::Thread(t) => t.thread,
             _ => unreachable!(),
         }) else {
@@ -504,7 +507,7 @@ fn only_a_closed_anonymous_poll_is_public() {
 fn a_page_on_a_site_hydrates_with_its_links_rel() {
     use crate::ui::markdown::{LINK_REL, SITE_LINK_REL};
     let page = Page::Thread(thread_on_site());
-    let rendered = page.clone().render().unwrap();
+    let rendered = page.clone().public().render().unwrap();
     let ours = format!("rel=\"{SITE_LINK_REL}\"");
     assert!(rendered.html.contains(&ours), "{}", rendered.html);
     assert!(!rendered.html.contains(LINK_REL), "{}", rendered.html);

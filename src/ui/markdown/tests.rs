@@ -1,3 +1,4 @@
+use crate::ui::island::Anonymous as _;
 use std::time::{Duration, Instant};
 
 use super::*;
@@ -1148,17 +1149,29 @@ fn an_empty_body_draws_nothing() {
 
 #[test]
 fn a_preview_is_the_text_cut_at_a_word() {
-    // The server's spacing: a space after every text event
+    // Text as written; a line break is a space
     assert_eq!(
         plain_preview("**bold** and `code`\nnext", 200),
-        "bold  and  code  next"
+        "bold and code next"
     );
+    // The parser gives `[`, `b` and `]` as three events: joined as written
+    assert_eq!(plain_preview("a [b] c", 200), "a [b] c");
+    assert_eq!(plain_preview("[removed]", 200), "[removed]");
+    // Blocks are a space apart, and runs of whitespace one space
+    assert_eq!(
+        plain_preview(
+            "# Head\n\nOne.\n\n- a\n- b\n\n```\nx  y\n```\n\n> q",
+            200
+        ),
+        "Head One. a b x y q"
+    );
+    assert_eq!(plain_preview("a\u{a0} \t b", 200), "a b");
     assert_eq!(plain_preview("one two three", 9), "one two…");
     assert_eq!(plain_preview("onetwothree", 5), "onetw…");
     // Never inside a character
     assert_eq!(plain_preview("ééééé", 3), "é…");
     // Raw HTML is left out, the text between its tags kept
-    assert_eq!(plain_preview("<b>raw</b> text", 200), "raw  text");
+    assert_eq!(plain_preview("<b>raw</b> text", 200), "raw text");
 }
 
 /// A short table under a wide header, written honestly, then more: every
@@ -1355,6 +1368,7 @@ fn the_site_comes_from_the_page() {
     let ours = format!("rel=\"{SITE_LINK_REL}\"");
     let off = format!("rel=\"{LINK_REL}\"");
     let at = crate::ui::page::Page::from(page.clone().at(&site))
+        .public()
         .render()
         .unwrap();
     assert!(
@@ -1376,7 +1390,7 @@ fn the_site_comes_from_the_page() {
     assert!(
         matches!(back, crate::ui::page::Page::Thread(ThreadPage { site: Some(ref s), .. }) if *s == site)
     );
-    let nowhere = crate::ui::page::Page::from(page).render().unwrap();
+    let nowhere = crate::ui::page::Page::from(page).public().render().unwrap();
     assert!(nowhere.html.contains(&off), "{}", nowhere.html);
     assert_eq!(
         to_html("<https://subliminal.technology/x>", Some(&site)),

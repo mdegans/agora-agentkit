@@ -4,6 +4,7 @@ use crate::fixtures;
 use crate::ids::PostId;
 use crate::names::CommunityName;
 use crate::responses::TestItem;
+use crate::ui::island::Anonymous as _;
 use crate::ui::{
     island,
     ssr::{pre_render, render_island},
@@ -81,7 +82,7 @@ fn a_card_draws_a_preview_not_the_body() {
     );
     let shown = preview(&sent).unwrap();
     assert!(shown.len() <= PREVIEW_BYTES + "…".len(), "{shown}");
-    assert!(shown.starts_with("Bold   raw   link  word"), "{shown}");
+    assert!(shown.starts_with("Bold raw link word"), "{shown}");
     let html = card(&sent);
     assert!(!html.contains("<b>") && !html.contains("<strong"), "{html}");
     assert!(!html.contains("https://a.example"), "{html}");
@@ -309,7 +310,8 @@ fn hostile_titles_and_errors_are_inert() {
     for hostile in HOSTILE.iter().copied().chain([long.as_str()]) {
         let page = page_of([post(hostile)].iter().collect());
         let out =
-            render_island(island::DATA_ID, FeedIsland, page.clone()).unwrap();
+            render_island(island::DATA_ID, FeedIsland, page.clone().public())
+                .unwrap();
         assert_eq!(out.html, plain_card.replace(PLAIN, &escaped(hostile)));
         assert_eq!(
             island_of(FeedLoad::Failed(hostile.into())),
@@ -336,7 +338,8 @@ fn hostile_titles_and_errors_are_inert() {
 #[test]
 fn the_island_round_trips_to_the_same_markup() {
     let page = page_of([post("A title"), post("Another")].iter().collect());
-    let out = render_island(island::DATA_ID, FeedIsland, page.clone()).unwrap();
+    let out = render_island(island::DATA_ID, FeedIsland, page.clone().public())
+        .unwrap();
     let inner = &out.script
         [r#"<script type="application/json" id="agora-app-data">"#.len()
             ..out.script.len() - "</script>".len()];
@@ -352,7 +355,7 @@ fn the_embedded_feed_is_the_apis_posts() {
     let mut sent = post("A title");
     sent.body = format!("{} THE END", "word ".repeat(100));
     let page = page_of([&sent].into_iter().collect());
-    let text = island::to_script_text(&page).unwrap();
+    let text = island::to_script_text(&page.clone().public()).unwrap();
     assert!(text.contains("THE END"), "{text}");
     assert!(text.contains(r#""state":"loaded""#), "{text}");
     let back: FeedPage = island::from_script_text(&text).unwrap();
@@ -824,7 +827,8 @@ fn hostile_community_headers_are_inert() {
     for hostile in HOSTILE {
         let page = page_with(hostile);
         let out =
-            render_island(island::DATA_ID, FeedIsland, page.clone()).unwrap();
+            render_island(island::DATA_ID, FeedIsland, page.clone().public())
+                .unwrap();
         assert_eq!(out.html, plain.replace(PLAIN, &escaped(hostile)));
         let inner = out
             .script
@@ -906,4 +910,59 @@ fn an_unnamed_sort_marks_neither() {
             island_of_page(FeedPage::new(input, FeedLoad::Loaded(vec![])));
         assert!(!html.contains("pill-btn active"), "{html}");
     }
+}
+
+/// A page past the end of its feed (a stale link, an offset typed by hand)
+/// says so, how long the feed is when the page knows, and links to the
+/// first page; its paging names the feed's length, not "Page 6 of 1"
+#[test]
+fn a_page_past_the_end_says_so() {
+    let input = GetFeedInput {
+        limit: Some(1),
+        offset: Some(5),
+        sort: Some(FeedSort::Active),
+        ..GetFeedInput::default()
+    };
+    let counted =
+        FeedPage::new(input.clone(), FeedLoad::Loaded(vec![])).with_total(1);
+    let html = island_of_page(counted);
+    println!("{html}");
+    assert!(html.contains("<h3>Nothing on this page</h3>"), "{html}");
+    assert!(html.contains("This feed has 1 page."), "{html}");
+    assert!(!html.contains("No posts yet"), "{html}");
+    assert!(
+        html.contains(r#"<a class="pill pill-btn" href="/agora/feed?limit=1&#38;sort=active" data-node-hydration="#)
+            && html.contains(">First page</a>"),
+        "{html}"
+    );
+    assert!(html.contains("Page 6; the feed has 1"), "{html}");
+    assert!(!html.contains(" of 1"), "{html}");
+
+    let many =
+        FeedPage::new(input.clone(), FeedLoad::Loaded(vec![])).with_total(3);
+    let html = island_of_page(many);
+    assert!(html.contains("This feed has 3 pages."), "{html}");
+    assert!(html.contains("Page 6; the feed has 3"), "{html}");
+
+    let unknown = FeedPage::new(input, FeedLoad::Loaded(vec![]));
+    let html = island_of_page(unknown);
+    assert!(html.contains("This feed ends before this page."), "{html}");
+    assert!(html.contains("Page 6<"), "{html}");
+
+    // The first page of an empty feed is still "No posts yet"
+    let html = island_of(FeedLoad::Loaded(vec![]));
+    assert!(
+        html.contains("No posts yet") && !html.contains("Nothing on this page"),
+        "{html}"
+    );
+    crate::ui::parse_check::assert_hydratable(&island_of_page(
+        FeedPage::new(
+            GetFeedInput {
+                offset: Some(50),
+                ..GetFeedInput::default()
+            },
+            FeedLoad::Loaded(vec![]),
+        )
+        .with_total(2),
+    ));
 }

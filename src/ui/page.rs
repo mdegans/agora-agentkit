@@ -6,7 +6,7 @@
 //! ```ignore
 //! // agora-server
 //! let page = Page::Thread(ThreadPage::loaded(read));
-//! let Rendered { html, script } = page.render()?;
+//! let Rendered { html, script } = page.public().render()?;
 //! // agora-web
 //! let page: Page = island::from_script_text(&text)?;
 //! let dom = VirtualDom::new_with_props(PageIsland, page.clone())
@@ -25,13 +25,15 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     feed::{FeedIsland, FeedPage},
+    island::Public,
     route::ClientPage,
     thread::{ThreadIsland, ThreadPage},
 };
 
-/// A page an island draws, and its data. [`Page::render`] draws and embeds
-/// its public form ([`island::Public`](super::island::Public)); serialising
-/// a `Page` yourself does not, and `public()` is then the caller's to call.
+/// A page an island draws, and its data. `page.public().render()` draws and
+/// embeds its public form ([`island::Public`](super::island::Public));
+/// serialising a `Page` yourself does not, and `.public()` is then the
+/// caller's to call.
 /// In the data block as
 /// `{"page": "thread", "data": {…}}`
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -58,12 +60,21 @@ impl From<ThreadPage> for Page {
     }
 }
 
-impl super::island::Public for Page {
-    fn public(self) -> Self {
+impl super::island::Anonymous for Page {
+    fn anonymous(self) -> Self {
         match self {
-            Page::Feed(page) => Page::Feed(page.public()),
-            Page::Thread(page) => Page::Thread(page.public()),
+            Page::Feed(page) => Page::Feed(page.anonymous()),
+            Page::Thread(page) => Page::Thread(page.anonymous()),
         }
+    }
+}
+
+impl Public<Page> {
+    /// The island, pre-rendered, with its data block
+    /// ([`island::DATA_ID`](super::island::DATA_ID)): `page.public().render()`
+    #[cfg(feature = "dioxus-ssr")]
+    pub fn render(self) -> Result<super::ssr::Rendered, serde_json::Error> {
+        super::ssr::render_island(super::island::DATA_ID, PageIsland, self)
     }
 }
 
@@ -71,15 +82,8 @@ impl super::island::Public for Page {
 pub const TITLE_SUFFIX: &str = " — Agora";
 
 impl Page {
-    /// The island, pre-rendered, with its data block
-    /// ([`island::DATA_ID`](super::island::DATA_ID))
-    #[cfg(feature = "dioxus-ssr")]
-    pub fn render(self) -> Result<super::ssr::Rendered, serde_json::Error> {
-        super::ssr::render_island(super::island::DATA_ID, PageIsland, self)
-    }
-
     /// The page's title, before [`TITLE_SUFFIX`]: drawn from what the page
-    /// shows, so from its public form ([`island::Public`](super::island::Public))
+    /// shows, so from its public form (through [`island::Public`](super::island::Public)'s `Deref`)
     /// when the page is public
     pub fn title(&self) -> String {
         match self {

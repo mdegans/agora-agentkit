@@ -7,6 +7,7 @@ use dioxus_history::MemoryHistory;
 use dioxus_router::navigator;
 
 use super::*;
+use crate::ui::island::Anonymous as _;
 use crate::{
     enums::FeedSort,
     fixtures,
@@ -283,7 +284,7 @@ fn without_markers(markup: &str) -> Vec<Tok> {
 #[test]
 fn the_router_draws_each_page_as_its_root_does() {
     for page in [feed_page(), thread_page()] {
-        let routed = ssr::render(base(), page.clone()).unwrap().html;
+        let routed = ssr::render(base(), page.clone().public()).unwrap().html;
         let alone = pre_render(PageIsland, page.clone());
         println!("ALONE:\n{alone}\nROUTED:\n{routed}\n");
         assert_eq!(without_markers(&routed), without_markers(&alone));
@@ -300,7 +301,7 @@ fn the_router_draws_each_page_as_its_root_does() {
             )
         );
     }
-    let routed = ssr::render(base(), feed_page()).unwrap().html;
+    let routed = ssr::render(base(), feed_page().public()).unwrap().html;
     // Sort, the card's title and community, the next page: the router's
     assert_eq!(routed.matches(",click:1\"").count(), 6, "{routed}");
     assert_eq!(routed.matches("aria-current").count(), 1);
@@ -316,14 +317,14 @@ fn the_router_draws_each_page_as_its_root_does() {
 /// back as the page: a client of another agentkit refuses it
 #[test]
 fn the_data_block_is_the_page_and_its_version() {
-    let rendered = ssr::render(base(), thread_page()).unwrap();
+    let rendered = ssr::render(base(), thread_page().public()).unwrap();
     let text = rendered
         .script
         .strip_prefix(r#"<script type="application/json" id="agora-app-data">"#)
         .and_then(|s| s.strip_suffix("</script>"))
         .unwrap();
     let back: Page = island::from_script_text(text).unwrap();
-    assert_eq!(back, island::Public::public(thread_page()));
+    assert_eq!(back, thread_page().public().into_inner());
     let other = text.replace(island::AGENTKIT_VERSION, "0.0.1");
     assert!(matches!(
         island::from_script_text::<Page>(&other),
@@ -337,7 +338,7 @@ fn another_base_is_refused() {
     for other in ["", "/", "/agora/", "/elsewhere"] {
         assert!(
             matches!(
-                ssr::render(other, feed_page()),
+                ssr::render(other, feed_page().public()),
                 Err(RouteError::Base { .. })
             ),
             "{other:?}"
@@ -364,7 +365,7 @@ fn every_routed_page_reparses_as_drawn() {
         ThreadPage::new(fixtures::post().id, ThreadLoad::Failed("<x>".into()))
             .into(),
     ] {
-        assert_hydratable(&ssr::render(base(), page).unwrap().html);
+        assert_hydratable(&ssr::render(base(), page.public()).unwrap().html);
     }
 }
 
@@ -685,7 +686,7 @@ async fn the_client_hydrates_the_servers_page_and_keeps_the_address() {
             ],
         ),
     ] {
-        let server = ssr::render(base(), page.clone()).unwrap().html;
+        let server = ssr::render(base(), page.clone().public()).unwrap().html;
         for address in addresses {
             let mut client = Client::new(address, page.clone());
             assert_eq!(client.html(), server, "{address}");
@@ -877,7 +878,7 @@ async fn a_thread_on_its_site_keeps_its_links_rel_under_the_router() {
     let mut read = fixtures::post_with_comments();
     read.post.body = format!("[The feed]({OWN_FEED})");
     let page: Page = ThreadPage::loaded(read).at(&site()).into();
-    let routed = ssr::render(base(), page.clone()).unwrap().html;
+    let routed = ssr::render(base(), page.clone().public()).unwrap().html;
     let ours = format!("rel=\"{SITE_LINK_REL}\"");
     assert!(routed.contains(&ours), "{routed}");
     assert!(!routed.contains(LINK_REL), "{routed}");
@@ -906,4 +907,34 @@ async fn a_thread_loaded_after_a_navigation_is_on_the_site() {
         assert!(html.contains("The body of A fetched post"), "{html}");
         assert!(html.contains(&format!("rel=\"{rel}\"")), "{given}: {html}");
     }
+}
+
+/// The router reads a path strictly, as the inverse of `site_path`
+/// (`from_site_path`), not as `AgoraLink::parse_at` reads a path an agent
+/// wrote (0.169.0): that takes old pages (`/agora/c/<name>`, which the
+/// server redirects), `/agora` itself, and any other path as an
+/// `agora://page/…`, and needs a site. Those stay the server's
+#[test]
+fn the_router_reads_paths_strictly() {
+    let at = |path: &str| AgoraLink::parse_at(path, Some(&site())).unwrap();
+    assert_eq!(
+        at("/agora/c/meta-governance"),
+        link_at("/community/meta-governance")
+    );
+    assert!("/c/meta-governance".parse::<Route>().is_err());
+    assert!(matches!(at("/agora/about"), AgoraLink::Page(_)));
+    assert!(matches!(
+        "/about".parse::<Route>(),
+        Err(RouteError::NotALink { .. })
+    ));
+    // A server page's own path still doesn't read back as its link
+    let page = at("/agora/about");
+    assert_eq!(page.site_path(), "/agora/about");
+    assert!(
+        AgoraLink::from_site_path(&page.site_path())
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(at("/agora"), Route::root().0);
+    assert!(matches!(ssr::route(""), Err(RouteError::NotAPath(_))));
 }

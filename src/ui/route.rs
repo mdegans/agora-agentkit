@@ -433,7 +433,7 @@ fn load_from_server(href: String) {
 }
 
 /// Whether a link to `link` is the router's: under a router, to a page the
-/// client draws. What [`To`] and [`to!`](crate::ui::route::to) decide by
+/// client draws. What [`To`] and `to!` decide by
 pub fn routed(link: &AgoraLink) -> bool {
     dioxus_router::hooks::try_router().is_some()
         && ClientPage::of(link).is_some()
@@ -653,8 +653,9 @@ impl History for SiteHistory {
 }
 
 /// The server's pre-render of the site (feature `dioxus-ssr`): which
-/// requests are the router's ([`route`], before anything is read or
-/// drawn), and the page drawn through the router ([`render`])
+/// requests are the router's ([`ssr::route`], before
+/// anything is read or drawn), and the page drawn through the router
+/// ([`ssr::render`])
 #[cfg(feature = "dioxus-ssr")]
 pub mod ssr {
     use std::rc::Rc;
@@ -665,7 +666,7 @@ pub mod ssr {
     use super::{ClientPage, PageData, Route, RouteError, SiteRoot};
     use crate::ui::{island, page::Page, ssr::Rendered};
 
-    /// The page a request's path (and query) below the [`base`] is, or why
+    /// The page a request's path (and query) below the [`base`](super::base) is, or why
     /// the router doesn't draw it: the handler's 404, or its own page for
     /// a link of a kind the server draws. Stricter than `FromStr`: `/` is
     /// refused ([`RouteError::Root`]), and so is a `#fragment` (a request
@@ -680,16 +681,19 @@ pub mod ssr {
     /// `page` drawn through the router at its own route, as markup for
     /// inside the [`island::ROOT_ID`] element, and its data block, in
     /// their public form ([`island::Public`]). `base` is where the site is
-    /// mounted, which must be [`base`]
-    pub fn render(base: &str, page: Page) -> Result<Rendered, RouteError> {
+    /// mounted, which must be [`base`](super::base)
+    pub fn render(
+        base: &str,
+        page: island::Public<Page>,
+    ) -> Result<Rendered, RouteError> {
         if base != super::base() {
             return Err(RouteError::Base {
                 given: base.to_string(),
                 expected: super::base(),
             });
         }
-        let page = island::Public::public(page);
         let script = island::script_element(island::DATA_ID, &page)?;
+        let page = page.into_inner();
         let route = Route(page.client_page().link());
         let mut history = MemoryHistory::with_initial_path(route);
         if !base.is_empty() {

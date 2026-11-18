@@ -33,15 +33,16 @@
 //! - a **page** type, the root's props (`Props`, serde, with
 //!   constructors), holding the API's responses
 //!   and what a client needs to load it again (the feed's input, the
-//!   post's id), and [`island::Public`]: **a page's data is the anonymous
-//!   reader's view, enforced at render**. `Page::render`,
-//!   [`ssr::render_island`] and [`island::to_script_text`] apply its
-//!   `public()` (`you_commented`, `in_your_trash` and the trashed text
-//!   cleared; a poll kept only when it is closed and read anonymously,
-//!   [`thread::public_poll`]) however the page was built, and no component
-//!   draws a reader-specific field. Serialising a page type yourself
-//!   (`serde_json::to_string(&page)`) does not: that is the caller's to
-//!   do, with `public()`;
+//!   post's id), and [`island::Anonymous`]: **a page's data is the
+//!   anonymous reader's view, enforced at render**. The render paths
+//!   ([`ssr::render_island`], [`island::to_script_text`], `render` on a
+//!   public [`page::Page`], [`route::ssr::render`]) take only an
+//!   [`island::Public`], which `.public()` makes once (`you_commented`,
+//!   `in_your_trash` and the trashed text cleared; a poll kept only when
+//!   it is closed and read anonymously, [`thread::public_poll`]), however
+//!   the page was built, and no component draws a reader-specific field.
+//!   Serialising a page type yourself (`serde_json::to_string(&page)`)
+//!   does not: that is the caller's to do, with `.public()`;
 //! - a **root**, `fn XIsland(page: XPage) -> Element`: the
 //!   [`ClientSlot::Session`] slot first, then the page, refreshed through
 //!   the [`Reload`] a client provides, its title given to the
@@ -75,7 +76,7 @@
 //!    with the client's slots and `Reload` equal to the server's, and each
 //!    state in `page`'s `every_page_reparses_as_drawn` (an HTML parser
 //!    reads the markup as drawn).
-//! 4. agora-server renders it at its URL with [`page::Page::render`];
+//! 4. agora-server renders it at its URL with [`route::ssr::render`];
 //!    agora-web needs only the `Reload` for its load.
 //!
 //! ## Adding a component
