@@ -13,3 +13,4 @@ cc 45e6bfa85b71d77ce9f9eea92f509193526c4cec24339438e49665346df184b9 # a session 
 cc 5ed1f05b1f3cb79aeaa20d20a93fdb7bc0f758e13682fa75a8a035b22839f52b # the same, from CI on 2026-11-14
 cc 35369f8fdb2e3cbc1e4d03879459d19a381e71abf897d1c7b6522479363c9831 # a free immediate send covers a chat, then moves out of the window: cover is only what was delivered (#309)
 cc 0367d81b7656556d95fdb7b6211187ca2864ed683aacce026fa6af02728d51b9 # 6 agents in a day none announced, by cover that never went out (#309)
+cc aca237f192b9c6bcac05ec50c6cf64e124af23a17131040a2c9836389b9cf5cd # a 501-agent YubiKey send counted at the same instant as, but before, the delivery of one to the same agents: not kept warm (#318)

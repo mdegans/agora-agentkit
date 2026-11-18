@@ -3538,10 +3538,11 @@ struct History {
     free_sends: BTreeSet<OperatorActionId>,
     /// When each factor last became suspended, seen by the harness
     suspended_at: BTreeMap<FactorId, DateTime<Utc>>,
-    /// When each send was last counted: admitted, or moved
-    counted_at: BTreeMap<OperatorActionId, DateTime<Utc>>,
-    /// When each delivered send was delivered
-    delivered_at: BTreeMap<OperatorActionId, DateTime<Utc>>,
+    /// The step each send was last counted at: admitted, or moved. Steps,
+    /// not times: two events can share an instant (#318)
+    counted_step: BTreeMap<OperatorActionId, u64>,
+    /// The step each delivered send was delivered at
+    delivered_step: BTreeMap<OperatorActionId, u64>,
     /// Events seen, in order
     step: u64,
     /// For each send, at each of its counts (admission or a move): the
@@ -3617,7 +3618,7 @@ impl History {
             | Event::SendLater { send, .. }
                 if a.post.sends.get(send) != a.pre.sends.get(send) =>
             {
-                self.counted_at.insert(*send, a.now);
+                self.counted_step.insert(*send, self.step);
             }
             Event::SendDeliver { send }
                 if a.post
@@ -3625,7 +3626,7 @@ impl History {
                     .get(send)
                     .is_some_and(|m| m.state == SendState::Delivered) =>
             {
-                self.delivered_at.insert(*send, a.now);
+                self.delivered_step.insert(*send, self.step);
             }
             _ => {}
         }
@@ -4645,21 +4646,24 @@ fn widest_day(
 /// D9's `|R_this|` term, restated: a send whose every recipient had already
 /// been delivered to, within 24 h of its `deliver_at`, when it was last
 /// counted, reaches no one new (Steward, 2026-11-14: only what went out
-/// counts). The time is the harness's, not the state's
+/// counts). Judged by the harness's order of events, not the state's flags,
+/// nor the clock: a delivery at the same instant as the count, but after it,
+/// had not gone out when the send was counted, and the state then saw it
+/// scheduled (#318)
 fn reached_already(
     s: &AccountState,
     h: &History,
     send: OperatorActionId,
 ) -> bool {
     let (Some(m), Some(counted)) =
-        (s.sends.get(&send), h.counted_at.get(&send))
+        (s.sends.get(&send), h.counted_step.get(&send))
     else {
         return false;
     };
     let reached: BTreeSet<&AgentId> = h
-        .delivered_at
+        .delivered_step
         .iter()
-        .filter(|(o, at)| **o != send && *at <= counted)
+        .filter(|(o, step)| **o != send && *step < counted)
         .filter_map(|(o, _)| s.sends.get(o))
         .filter(|o| (o.deliver_at - m.deliver_at).abs() <= Duration::hours(24))
         .flat_map(|o| o.recipients.iter())
