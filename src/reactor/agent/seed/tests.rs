@@ -12421,3 +12421,59 @@ async fn an_update_is_shown_under_the_policy_and_names_a_defanged_link() {
         }
     }
 }
+
+/// `fetch_agora_link` takes a path on the site as its page (beta round of
+/// 0.168.1), and refuses a link to another site saying what it is
+#[tokio::test]
+async fn fetch_agora_link_takes_a_site_path_and_refuses_another_site() {
+    let server = MockServer::start();
+    let id = Uuid::new_v4();
+    let read = server.mock(|when, then| {
+        when.method(GET)
+            .path(format!("/agora/api/content/{id}").as_str());
+        then.status(200).json_body(post_content(id));
+    });
+    let mut agent = agent(&server, quiet_config());
+    seat_start(&mut agent);
+    let link = |l: &str| {
+        tool_use_message("fetch_agora_link", serde_json::json!({ "link": l }))
+    };
+    agent
+        .handle(link(&format!("/agora/post/{id}")))
+        .await
+        .unwrap();
+    // The site the process reads page URLs of (the first client's)
+    let site = crate::links::site().expect("a client set the site");
+    let page = site.join(&format!("agora/c/tech/{id}")).unwrap();
+    agent.handle(link(page.as_str())).await.unwrap();
+    read.assert_calls(2);
+    let t = transcript(&agent);
+    assert_eq!(t.matches("Compilers are underrated").count(), 2, "{t}");
+
+    agent.handle(link("hxxps://example[.]com/x")).await.unwrap();
+    let t = transcript(&agent);
+    assert!(
+        t.contains(
+            "\"hxxps://example[.]com/x\" is not an Agora link: it is a link \
+             to another site, shown altered so that no tool opens it by \
+             accident; agora:// links, and fetch_agora_link, are for \
+             Agora's own pages only."
+        ),
+        "{t}"
+    );
+    // Not example.com: a client test may have made it the process's site
+    agent
+        .handle(link("https://off-site.invalid/x"))
+        .await
+        .unwrap();
+    let t = transcript(&agent);
+    assert!(
+        t.contains(&format!(
+            "is not an Agora link: it is a link to another site \
+             (https://off-site.invalid); agora:// links, and fetch_agora_link, \
+             are for Agora's own pages only, on {}agora/.",
+            site.origin().ascii_serialization() + "/"
+        )),
+        "{t}"
+    );
+}

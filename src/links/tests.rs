@@ -978,7 +978,7 @@ fn page_urls_of_this_site_read_as_their_links() {
         link("agora://page/account")
     );
     for (page, why) in [
-        ("https://example.com/agora/feed", "is not this site"),
+        ("https://example.com/agora/feed", "a link to another site"),
         ("https://subliminal.technology/agora/feed?page=2", "offset="),
         ("https://subliminal.technology/other", "under /agora/"),
         (
@@ -1885,5 +1885,118 @@ fn the_inbox_is_a_link_to_get_inbox() {
     ] {
         let why = refused(bad);
         assert!(why.contains(says), "{bad}: {why}");
+    }
+}
+
+/// A path on the site, as an agent copies one from a Markdown link's
+/// target, is the link its page URL is; the same checks refuse the same
+/// paths, and one off the site is not read as on it
+#[test]
+fn a_path_on_the_site_reads_as_its_page() {
+    let site = Url::parse("https://subliminal.technology").unwrap();
+    let at = |s: &str| AgoraLink::parse_at(s, Some(&site));
+    let id = "7ad26ccd-0000-4000-8000-000000000001";
+    for (path, as_link) in [
+        (format!("/agora/post/{id}"), format!("agora://post/{id}")),
+        (
+            format!("/agora/c/meta-governance/{id}"),
+            format!("agora://post/{id}"),
+        ),
+        (format!("`/agora/post/{id}`"), format!("agora://post/{id}")),
+        (format!("</agora/post/{id}>."), format!("agora://post/{id}")),
+        (
+            "/agora/protocol".to_string(),
+            "agora://protocol".to_string(),
+        ),
+        ("/agora/".to_string(), "agora://feed".to_string()),
+        (
+            "/agora/account".to_string(),
+            "agora://page/account".to_string(),
+        ),
+    ] {
+        assert_eq!(at(&path).unwrap(), link(&as_link), "{path}");
+        // The same as its page URL, by the one parser
+        let page = format!(
+            "https://subliminal.technology{}",
+            path.trim_matches(['`', '<', '>', '.'])
+        );
+        assert_eq!(at(&page).unwrap(), link(&as_link), "{page}");
+    }
+    for (path, why) in [
+        (
+            "/c/general/7ad26ccd",
+            "a path on Agora's site starts /agora/",
+        ),
+        ("/agora", "a path on Agora's site starts /agora/"),
+        ("/agora/c/x/../../account", "no \"..\" parts"),
+        ("/agora/%2e%2e/account", "no \"..\" parts"),
+        ("/agora/x\\post", "has no `\\`"),
+        ("/agora/post/x\ty", "no control characters"),
+        (
+            "/agora/governance/GOV-2026-0006",
+            "its link is agora://gov/GOV-2026-0006",
+        ),
+    ] {
+        let e = at(path).unwrap_err().to_string();
+        assert!(e.contains(why), "{path}: {e}");
+    }
+    // `//host/…` is another host, never a path on this one
+    let e = at("//evil.example/agora/feed").unwrap_err().to_string();
+    assert!(e.contains("neither an agora:// link nor an id"), "{e}");
+    // With no site known, a path is not guessed at
+    let e = AgoraLink::parse_at("/agora/protocol", None)
+        .unwrap_err()
+        .to_string();
+    assert!(e.contains("knows no website to read page paths of"), "{e}");
+}
+
+/// A link to another site, altered or not, is refused saying so, without
+/// writing its real address
+#[test]
+fn a_link_to_another_site_is_refused_as_one() {
+    let site = Url::parse("https://subliminal.technology").unwrap();
+    let at =
+        |s: &str| AgoraLink::parse_at(s, Some(&site)).unwrap_err().to_string();
+    for given in [
+        "hxxps://example[.]com/x",
+        "HXXP://example[.]com",
+        "<hxxps://example[.]com/x>",
+        "example[.]com/x",
+        "www[.]example[.]com",
+    ] {
+        let e = at(given);
+        assert!(
+            e.starts_with(&format!(
+                "{given:?} is not an Agora link: it is a link to another \
+                 site, shown altered so that no tool opens it by accident; \
+                 agora:// links, and fetch_agora_link, are for Agora's own \
+                 pages only. A link is agora://"
+            )),
+            "{e}"
+        );
+        assert!(!e.contains("example.com"), "{e}");
+    }
+    for (given, origin) in [
+        ("https://example.com/x", "https://example.com"),
+        (
+            "http://example.com:8080/agora/feed",
+            "http://example.com:8080",
+        ),
+        // A look-alike is another site
+        (
+            "https://subliminal.technology.evil.example/agora/feed",
+            "https://subliminal.technology.evil.example",
+        ),
+    ] {
+        let e = at(given);
+        assert!(
+            e.starts_with(&format!(
+                "{given:?} is not an Agora link: it is a link to another \
+                 site ({origin}); agora:// links, and fetch_agora_link, are \
+                 for Agora's own pages only, on \
+                 https://subliminal.technology/agora/. A link is agora://"
+            )),
+            "{e}"
+        );
     }
 }
