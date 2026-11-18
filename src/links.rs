@@ -1059,10 +1059,63 @@ impl IdAsKind {
     }
 }
 
-/// Why a link to another site is refused, after what it is
-const OFF_SITE: &str = "shown altered so that no tool opens it by \
-     accident; agora:// links, and fetch_agora_link, are for Agora's own \
-     pages only";
+/// Why `given`, a link in the altered form (`hxxps://…`, or a host
+/// `example[.]com` with no scheme), is refused: whose it is, read from it
+/// put back together (`hxxp` → `http`, `[.]` → `.`), which is never
+/// written. `None` when it is no URL even put back together, or a bare
+/// one whose host has no `[.]`
+fn altered_why(given: &str, site: Option<&Url>) -> Option<String> {
+    const FORM: &str = "in the altered form (hxxps://…, [.])";
+    let altered_scheme = given
+        .get(..4)
+        .is_some_and(|s| s.eq_ignore_ascii_case("hxxp"));
+    let mut restored = given.replace("[.]", ".");
+    if altered_scheme {
+        restored.replace_range(..4, "http");
+    } else {
+        let host = given.split(['/', '?', '#']).next().unwrap_or_default();
+        if !host.contains("[.]") || given.contains("://") {
+            return None;
+        }
+        restored.insert_str(0, "http://");
+    }
+    let url = Url::parse(&restored).ok().filter(|u| u.host().is_some())?;
+    let Some(site) = site else {
+        return Some(format!(
+            "it is a link {FORM}; fetch_agora_link opens Agora's own pages \
+             only"
+        ));
+    };
+    if repositories_site(site).is_some_and(|git| same_site(&url, &git)) {
+        return Some(format!(
+            "it is a link to Agora's repositories {FORM}; write it as its \
+             agora://git/… link"
+        ));
+    }
+    if !same_site(&url, site) {
+        return Some(format!(
+            "it is a link to another site {FORM}; agora:// links, and \
+             fetch_agora_link, are for Agora's own pages only"
+        ));
+    }
+    Some(if is_site_path(url.path()) {
+        format!(
+            "it is a link to this site {FORM}; write it as its agora:// \
+             link, or as the path /agora/…"
+        )
+    } else {
+        format!(
+            "it is a link to this site {FORM}; fetch_agora_link reads only \
+             its pages under /agora/"
+        )
+    })
+}
+
+/// Whether `path` (no query) is under Agora's pages: `/agora` or
+/// `/agora/…`, as a page URL is read
+fn is_site_path(path: &str) -> bool {
+    path == "/agora" || path.starts_with(SITE_PREFIX)
+}
 
 /// A page URL, `http(s)://…`, read as the link it shows
 fn read_page_url(given: &str, site: Option<&Url>) -> Result<AgoraLink, String> {
@@ -1087,12 +1140,12 @@ fn read_site_path(path: &str, site: Option<&Url>) -> Result<AgoraLink, String> {
     read_page_url(page.as_str(), Some(site))
 }
 
-/// A path on the site that may be read as its page URL: under
-/// [`SITE_PREFIX`], with no control character, `\`, or `.` or `..`
+/// A path on the site that may be read as its page URL: `/agora`, or
+/// under [`SITE_PREFIX`], with no control character, `\`, or `.` or `..`
 /// segment (checked before `join`, which would resolve them away)
 fn check_site_path(path: &str) -> Result<(), String> {
-    if !path.starts_with(SITE_PREFIX) {
-        return Err(format!("a path on Agora's site starts {SITE_PREFIX}"));
+    if !is_site_path(path.split(['?', '#']).next().unwrap_or_default()) {
+        return Err("a path on Agora's site is /agora or starts /agora/".into());
     }
     if let Some(c) = path.chars().find(|c| c.is_control()) {
         return Err(format!("a link has no control characters ({c:?})"));
@@ -1349,16 +1402,10 @@ impl AgoraLink {
             return parse_link(unwrapped).map_err(fail);
         }
         // Before the URL forms: `hxxps://…` has a scheme of its own
-        let host = unwrapped
-            .split_once("://")
-            .map_or(unwrapped, |(_, rest)| rest)
-            .split(['/', '?', '#'])
-            .next()
-            .unwrap_or_default();
-        if scheme(unwrapped, "hxxp") || host.contains("[.]") {
-            return Err(fail(format!(
-                "it is a link to another site, {OFF_SITE}"
-            )));
+        if scheme(unwrapped, "hxxp")
+            && let Some(why) = altered_why(unwrapped, site)
+        {
+            return Err(fail(why));
         }
         if scheme(unwrapped, "https://") || scheme(unwrapped, "http://") {
             return read_page_url(unwrapped, site).map_err(fail);
@@ -1373,6 +1420,8 @@ impl AgoraLink {
             Err(e) => {
                 let why = if DataCitation::is_citation_shaped(given) {
                     e.to_string()
+                } else if let Some(why) = altered_why(unwrapped, site) {
+                    why
                 } else if let Some((scheme, _)) = trimmed.split_once("://") {
                     format!("its scheme is {scheme:?}, not \"agora\"")
                 } else {
@@ -1437,7 +1486,7 @@ impl AgoraLink {
 
 impl AgoraLink {
     /// [`on_site`](Self::on_site) for a path on the site, as a Markdown
-    /// link's target writes one (`/agora/c/news/<id>`): under
+    /// link's target writes one (`/agora/c/news/<id>`): `/agora`, or under
     /// [`SITE_PREFIX`], with no control character, `\`, or `.` or `..`
     /// segment, and not ending in what a page URL read from prose loses
     /// (`.`, `,`, `;`, `:`, a quote), read as the same path on `site`

@@ -3262,3 +3262,30 @@ impl FriendshipBatch<'_> {
         out
     }
 }
+
+#[cfg(test)]
+mod relink_tests {
+    /// A document's `get_content("/agora/…")` is a path on the site since
+    /// 0.169: written as the link its page is, but for a post or comment,
+    /// which `get_content` reads by id and stays as written
+    #[test]
+    fn a_path_in_a_call_is_its_pages_link() {
+        // The first client's site wins; any site reads a path the same
+        crate::links::set_site(
+            &url::Url::parse("https://subliminal.technology").unwrap(),
+        );
+        let id = "7ad26ccd-0000-4000-8000-000000000001";
+        let post = format!("get_content(\"/agora/post/{id}\")");
+        assert_eq!(
+            super::relink(&format!(
+                "See get_content(\"/agora/protocol\") and {post}."
+            )),
+            format!("See agora://protocol and {post}.")
+        );
+        // A path the site has no page for is left as written
+        assert_eq!(
+            super::relink("get_content(\"/agora/../x\")"),
+            "get_content(\"/agora/../x\")"
+        );
+    }
+}

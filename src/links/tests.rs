@@ -1909,6 +1909,8 @@ fn a_path_on_the_site_reads_as_its_page() {
             "agora://protocol".to_string(),
         ),
         ("/agora/".to_string(), "agora://feed".to_string()),
+        // As https://<site>/agora reads: one rule for both
+        ("/agora".to_string(), "agora://feed".to_string()),
         (
             "/agora/account".to_string(),
             "agora://page/account".to_string(),
@@ -1916,18 +1918,18 @@ fn a_path_on_the_site_reads_as_its_page() {
     ] {
         assert_eq!(at(&path).unwrap(), link(&as_link), "{path}");
         // The same as its page URL, by the one parser
-        let page = format!(
-            "https://subliminal.technology{}",
-            path.trim_matches(['`', '<', '>', '.'])
-        );
-        assert_eq!(at(&page).unwrap(), link(&as_link), "{page}");
+        let page = site.join(path.trim_matches(['`', '<', '>', '.'])).unwrap();
+        assert_eq!(at(page.as_str()).unwrap(), link(&as_link), "{page}");
     }
     for (path, why) in [
         (
             "/c/general/7ad26ccd",
-            "a path on Agora's site starts /agora/",
+            "a path on Agora's site is /agora or starts /agora/",
         ),
-        ("/agora", "a path on Agora's site starts /agora/"),
+        (
+            "/agoras",
+            "a path on Agora's site is /agora or starts /agora/",
+        ),
         ("/agora/c/x/../../account", "no \"..\" parts"),
         ("/agora/%2e%2e/account", "no \"..\" parts"),
         ("/agora/x\\post", "has no `\\`"),
@@ -1951,31 +1953,70 @@ fn a_path_on_the_site_reads_as_its_page() {
 }
 
 /// A link to another site, altered or not, is refused saying so, without
-/// writing its real address
+/// writing its real address; an altered link to this site says how to
+/// write it; ids and citations with `[.]` in them are tried as ids first
 #[test]
 fn a_link_to_another_site_is_refused_as_one() {
     let site = Url::parse("https://subliminal.technology").unwrap();
     let at =
         |s: &str| AgoraLink::parse_at(s, Some(&site)).unwrap_err().to_string();
+    let starts = |given: &str, why: &str| {
+        let e = at(given);
+        assert!(
+            e.starts_with(&format!(
+                "{given:?} is not an Agora link: {why}. A link is agora://"
+            )),
+            "{e}"
+        );
+        e
+    };
+    let another = "it is a link to another site in the altered form \
+                   (hxxps://…, [.]); agora:// links, and fetch_agora_link, \
+                   are for Agora's own pages only";
     for given in [
         "hxxps://example[.]com/x",
         "HXXP://example[.]com",
         "<hxxps://example[.]com/x>",
         "example[.]com/x",
         "www[.]example[.]com",
+        // The site's name before an `@` is a user: the host is evil's
+        "hxxps://subliminal[.]technology@evil[.]example/agora/feed",
+        "hxxps://subliminal[.]technology[.]evil[.]example/agora/feed",
     ] {
-        let e = at(given);
-        assert!(
-            e.starts_with(&format!(
-                "{given:?} is not an Agora link: it is a link to another \
-                 site, shown altered so that no tool opens it by accident; \
-                 agora:// links, and fetch_agora_link, are for Agora's own \
-                 pages only. A link is agora://"
-            )),
-            "{e}"
-        );
+        let e = starts(given, another);
         assert!(!e.contains("example.com"), "{e}");
     }
+    let ours = "it is a link to this site in the altered form \
+                (hxxps://…, [.]); write it as its agora:// link, or as the \
+                path /agora/…";
+    for given in [
+        "hxxps://subliminal[.]technology/agora/feed?q=www[.]evil[.]example",
+        "hxxps://subliminal[.]technology/agora",
+        "hxxp://subliminal[.]technology/agora/post/7ad26ccd",
+    ] {
+        starts(given, ours);
+    }
+    starts(
+        "hxxps://subliminal[.]technology/other",
+        "it is a link to this site in the altered form (hxxps://…, [.]); \
+         fetch_agora_link reads only its pages under /agora/",
+    );
+    starts(
+        "hxxps://git[.]subliminal[.]technology/agora-agentkit",
+        "it is a link to Agora's repositories in the altered form \
+         (hxxps://…, [.]); write it as its agora://git/… link",
+    );
+    // With no site known, whose it is is not guessed at
+    let e = AgoraLink::parse_at("hxxps://example[.]com/x", None)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains(
+            "it is a link in the altered form (hxxps://…, [.]); \
+             fetch_agora_link opens Agora's own pages only."
+        ),
+        "{e}"
+    );
     for (given, origin) in [
         ("https://example.com/x", "https://example.com"),
         (
@@ -1988,15 +2029,34 @@ fn a_link_to_another_site_is_refused_as_one() {
             "https://subliminal.technology.evil.example",
         ),
     ] {
-        let e = at(given);
-        assert!(
-            e.starts_with(&format!(
-                "{given:?} is not an Agora link: it is a link to another \
-                 site ({origin}); agora:// links, and fetch_agora_link, are \
-                 for Agora's own pages only, on \
-                 https://subliminal.technology/agora/. A link is agora://"
-            )),
-            "{e}"
+        starts(
+            given,
+            &format!(
+                "it is a link to another site ({origin}); agora:// links, \
+                 and fetch_agora_link, are for Agora's own pages only, on \
+                 https://subliminal.technology/agora/"
+            ),
         );
     }
+    // `[.]` alone is no link: a citation is read as one, as before
+    let cited = "DATA-2026-0001:abcdef0:a[.]txt";
+    assert_eq!(
+        AgoraLink::parse_at(cited, Some(&site)),
+        cited
+            .parse::<ContentRef>()
+            .map(AgoraLink::from)
+            .map_err(|e| {
+                AgoraLinkError {
+                    given: cited.to_owned(),
+                    why: e.to_string(),
+                }
+            })
+    );
+    assert!(
+        matches!(
+            AgoraLink::parse_at(cited, Some(&site)),
+            Ok(AgoraLink::Read(_))
+        ),
+        "{cited}"
+    );
 }
