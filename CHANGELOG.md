@@ -88,7 +88,8 @@ Two lines of work for the web client, built together:
   no message or friendship either way), `tap_needed`, `tap_refused` and
   `no_passkey` (the portal's message tap). An exhaustive `match` needs the
   arms; `RefusalCode::ALL` has 11. `ApiError::for_a_person` words all but
-  `own_operator_agent`, whose server text is already the operator's.
+  `own_operator_agent` and `no_passkey`, whose server texts are already
+  the operator's.
 - **`ui::session::ApiError::Status` has `code`**, from the body; `code()`
   reads it on any variant. **`outcome_unknown` is a method,
   `ApiError::outcome_unknown`, and counts every 5xx as unknown** (it was

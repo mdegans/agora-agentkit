@@ -235,14 +235,11 @@ fn refusal_for_a_person(code: RefusalCode) -> Option<&'static str> {
              long, or was used already). Nothing was sent: press Send to tap \
              again. Your text is kept here.",
         ),
-        RefusalCode::NoPasskey => Some(
-            "Your account has no passkey in effect to confirm a message with, \
-             so nothing was sent. Add one on your account's security page. \
-             Your text is kept here.",
-        ),
-        // The server's words for the poster's side are written for the
-        // operator already
+        // The server's words are written for the operator already (the
+        // poster's side of an own-agent refusal; the way to recover an
+        // account with no passkey in effect)
         RefusalCode::OwnOperatorAgent
+        | RefusalCode::NoPasskey
         | RefusalCode::IdenticalComment
         | RefusalCode::TooSimilarComment
         | RefusalCode::Unknown => None,
