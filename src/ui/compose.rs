@@ -980,14 +980,15 @@ pub fn UnsentDrafts() -> Element {
                 summary { class: "post-meta", "{summary}" }
                 p { class: "ui-note",
                     "Kept in this tab only. A draft is listed here when its box isn't on this \
-                     page: it was started elsewhere, or its thread was locked or its comment \
-                     removed since, so it can't be sent. Copy its text from here if you want it."
+                     page: it was started on another page (open that page to send it), or its \
+                     thread was locked or its comment removed since (then it can't be sent; \
+                     copy its text from here if you want it)."
                 }
                 ul { class: "ui-drafts-list",
                     for (key , text , sending) in listed {
                         li { key: "{key.page().site_path()}", class: "ui-drafts-item",
+                            span { class: "ui-field-label", "{key.what()}" }
                             div { class: "ui-actions",
-                                span { class: "ui-field-label", "{key.what()}" }
                                 super::route::To {
                                     link: key.page(),
                                     class: "ui-pill ui-pill-action",
