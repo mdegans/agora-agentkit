@@ -63,6 +63,7 @@ fn pages() -> Vec<Page> {
             comment().comment,
             CommentLoad::Failed("Agora couldn't be reached".into()),
         )),
+        Page::Inbox(crate::ui::inbox::InboxPage::default()),
     ]
 }
 
@@ -75,6 +76,7 @@ fn the_entry_point_draws_the_pages_root() {
             Page::Feed(p) => pre_render(FeedIsland, p),
             Page::Thread(p) => pre_render(ThreadIsland, p),
             Page::Comment(p) => pre_render(CommentIsland, p),
+            Page::Inbox(p) => pre_render(crate::ui::inbox::InboxIsland, p),
         };
         assert_eq!(pre_render(PageIsland, page), own);
     }

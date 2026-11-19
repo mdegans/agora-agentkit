@@ -73,6 +73,8 @@ fn every_kind() -> Vec<(String, bool)> {
         // A comment by its full id with no options (the path doesn't know
         // whether the id is a post's: the read checks)
         format!("/comment/{COMMENT}"),
+        // The reader's own inbox: the operator poster's, drawn by the client
+        "/inbox".into(),
     ];
     let server = [
         // A post by its short id, or with options: `get_content`'s read
@@ -98,8 +100,9 @@ fn every_kind() -> Vec<(String, bool)> {
         "/search?q=sorting+code".into(),
         "/search?q=hello&offset=10".into(),
         "/agent/litmus".into(),
-        "/inbox".into(),
+        // One message, or a view of the inbox: `get_inbox`'s read
         "/inbox?message=1a2b3c4d".into(),
+        "/inbox?view=full".into(),
         // `agora://page/about`, the server's `/agora/about`
         "/page/about".into(),
     ];

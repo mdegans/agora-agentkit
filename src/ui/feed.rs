@@ -520,9 +520,21 @@ fn unique(posts: &[PostResponse]) -> impl Iterator<Item = &PostResponse> {
 /// [`DocumentTitle`](super::DocumentTitle)
 #[allow(non_snake_case)]
 pub fn FeedIsland(page: FeedPage) -> Element {
+    // Where the session slot's new-post form posts: this feed's community
+    use_context_provider(|| {
+        super::compose::NewPostHere(page.input.community.clone())
+    });
     let reload = try_use_context::<Reload<FeedPage>>();
     let can_reload = reload.is_some();
     let mut shown = use_signal(|| page);
+    // ...offered only once the feed has loaded: a community's page whose
+    // community doesn't exist (or whose load failed) offers no new post
+    let found = use_memo(move || {
+        let shown = shown.read();
+        shown.input.community.is_none()
+            || matches!(shown.feed, FeedLoad::Loaded(_))
+    });
+    use_context_provider(|| super::compose::CommunityFound(found));
     let mut refreshing = use_signal(|| false);
     let refresh = use_callback(move |()| {
         let Some(reload) = reload.clone() else {

@@ -10,7 +10,7 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::ids::{
-    AgentId, OAuthClientId, OperatorActionId, OperatorCredentialId,
+    AgentId, MessageId, OAuthClientId, OperatorActionId, OperatorCredentialId,
     OperatorEmailAddressId, OperatorEnrolmentId, OperatorId, OperatorPasskeyId,
     OperatorPendingChangeId, OperatorRecoveryCaseId,
 };
@@ -48,11 +48,14 @@ pub enum TapKind {
     MoveSend = 0x11,
     /// Opening a passkey add's grant
     PasskeyAdd = 0x12,
+    /// A private message from the operator's own operator poster, on the
+    /// portal (0.171)
+    PortalMessage = 0x13,
 }
 
 impl TapKind {
     /// Every kind still produced, by tag
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 17] = [
         Self::Send,
         Self::OAuthConsent,
         Self::EnrolmentApproval,
@@ -69,6 +72,7 @@ impl TapKind {
         Self::CounterClaim,
         Self::MoveSend,
         Self::PasskeyAdd,
+        Self::PortalMessage,
     ];
 
     pub const fn tag(self) -> u8 {
@@ -173,6 +177,16 @@ pub enum Approval {
     },
     /// 0x12: names no key, which doesn't exist yet
     PasskeyAdd { operator: OperatorId },
+    /// 0x13: one private message from the operator's own operator poster
+    /// (0.171): the send's action id and the id the message is stored
+    /// under, which the server draws when the tap starts. Its row names the
+    /// recipient and holds the sealed body, so the bytes carry neither: no
+    /// body hash (a short private body's could be confirmed by guessing),
+    /// and no other agent's id for a purge to leave behind (Art. II § 7)
+    PortalMessage {
+        action: OperatorActionId,
+        message: MessageId,
+    },
 }
 
 fn uuid_bytes(id: impl Into<uuid::Uuid>) -> [u8; 16] {
@@ -198,6 +212,7 @@ impl Approval {
             Self::CounterClaim { .. } => TapKind::CounterClaim,
             Self::MoveSend { .. } => TapKind::MoveSend,
             Self::PasskeyAdd { .. } => TapKind::PasskeyAdd,
+            Self::PortalMessage { .. } => TapKind::PortalMessage,
         }
     }
 
@@ -284,6 +299,10 @@ impl Approval {
                 out.extend(deliver_at.timestamp_micros().to_be_bytes());
             }
             Self::PasskeyAdd { operator } => out.extend(uuid_bytes(*operator)),
+            Self::PortalMessage { action, message } => {
+                out.extend(uuid_bytes(*action));
+                out.extend(uuid_bytes(*message));
+            }
         }
         out
     }
@@ -410,6 +429,10 @@ mod tests {
                 .unwrap(),
             },
             Approval::PasskeyAdd { operator: id(A) },
+            Approval::PortalMessage {
+                action: id(A),
+                message: id(B),
+            },
         ]
     }
 
@@ -420,12 +443,12 @@ mod tests {
             tags,
             [
                 1, 2, 3, 4, 6, 8, 9, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-                0x11, 0x12
+                0x11, 0x12, 0x13
             ]
         );
         assert_eq!(TapKind::from_tag(0x07), None);
         assert_eq!(TapKind::from_tag(0x00), None);
-        assert_eq!(TapKind::from_tag(0x13), None);
+        assert_eq!(TapKind::from_tag(0x14), None);
         // 0x05 still reads, so stored assertions do, and isn't produced
         let retired = TapKind::from_tag(0x05).unwrap();
         assert!(retired.is_retired() && !TapKind::ALL.contains(&retired));
@@ -464,6 +487,7 @@ mod tests {
                 1 + 16 + 16,
                 1 + 16 + 8,
                 1 + 16,
+                1 + 16 + 16,
             ]
         );
     }
@@ -547,7 +571,7 @@ mod tests {
     }
 
     /// Computed independently (Python `hashlib`) from the spec's table
-    const VECTORS: [&str; 16] = [
+    const VECTORS: [&str; 17] = [
         "e417deb6abe94bb74037918fb0f749e401b58c3b282b206c96963217826c3435",
         "a4304de3920dfbb53406abda4991fa100f08578a65fd37a361de8364bf438940",
         "b55e306e201216cb476830ef7bada806c0e1f97ae49cca4b50aeb8989d0bddde",
@@ -564,5 +588,6 @@ mod tests {
         "503e9692af58b3013f1401a73aa707ac7053cf915033358e03b4ac9b444dc700",
         "4a187c9157d8c8d42fb3c38380e2d96869c2697d16347ba716a8b96704114ed4",
         "1b8688cf24d1c7db7b53257c3d9b51ffbde4658f67f57486a148f1ebfad9ec8f",
+        "2dde0a214a02d679163541709f56c1abd88d2fbe0a1c2ec6b2f621580034eb3e",
     ];
 }

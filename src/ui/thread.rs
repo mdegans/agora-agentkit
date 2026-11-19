@@ -21,10 +21,12 @@
 //! notices is a later design (a notifications area). Its `locked` is
 //! honoured: a locked thread draws no reply slots.
 //!
-//! Where a signed-in operator's reply form will go (plan step 6), the page
-//! draws [`ClientSlot::Reply`]: under the post, and under each comment.
-//! The slot's content reads which item it answers from context, a
-//! [`ReplyTarget`], provided around each slot by the shared component.
+//! Where a signed-in operator replies, the page draws [`ClientSlot::Reply`]:
+//! under the post, and under each comment. The slot's content (a client's
+//! [`ReplyBox`](super::compose::ReplyBox)) reads which item it answers from
+//! context, a [`ReplyTarget`], provided around each slot by the shared
+//! component, and tells the root it posted through
+//! [`CommentPosted`](super::compose::CommentPosted).
 
 use std::collections::{HashMap, HashSet};
 
@@ -35,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     ClientOnly, ClientSlot, Reload,
     badges::Badges,
+    compose::AfterReply,
     feed::{NOT_FOUND_TITLE, NotFound, TestPill, post_author, public},
     format,
     markdown::{Markdown, Site},
@@ -239,7 +242,7 @@ pub struct ReplyTarget {
 /// The [`ClientSlot::Reply`] slot, with its [`ReplyTarget`] in context.
 /// Keyed by its row, so a row's slot never changes target
 #[component]
-fn ReplySlot(target: ReplyTarget) -> Element {
+pub(crate) fn ReplySlot(target: ReplyTarget) -> Element {
     use_context_provider(|| target);
     rsx! {
         ClientOnly { slot: ClientSlot::Reply }
@@ -769,6 +772,83 @@ pub fn ThreadIsland(page: ThreadPage) -> Element {
     use_document_title(use_memo(move || {
         document_title(&title_of(&thread.read()))
     }));
+    // A reply box posted: load the thread again, keeping the one drawn if
+    // that fails (the box says so, beside its link to the comment), then
+    // go to the new comment once it is drawn. Where to go is kept outside
+    // the signals: the effect that goes there runs when the thread changes.
+    // The box tells the thread through signals, which a write answering
+    // after this page is gone finds dropped (and so does nothing)
+    let reposted = try_use_context::<Reload<ThreadLoad>>();
+    let arrive_at =
+        use_hook(|| std::rc::Rc::new(std::cell::Cell::new(None::<CommentId>)));
+    let go_to = super::route::use_go_to();
+    let posted = super::compose::CommentPosted::use_new();
+    use_context_provider(|| posted);
+    let authors = use_memo(move || match &*thread.read() {
+        ThreadLoad::Loaded(read) => super::compose::ThreadAuthors::of(read),
+        _ => Vec::new(),
+    });
+    use_context_provider(|| super::compose::ThreadAuthors(authors));
+    let pending = arrive_at.clone();
+    // A box asked for the thread again: after its reply, or to check
+    // whether a send went through. The newest request wins: an older load
+    // answering after it is dropped (the newer one draws the thread)
+    use_effect(move || {
+        let Some(ask) = posted.asked() else { return };
+        let Some(reload) = reposted.clone() else {
+            return;
+        };
+        let pending = pending.clone();
+        posted.set_reload(ask.id, AfterReply::Loading);
+        let id = ask.arrive;
+        spawn(async move {
+            let loaded = reload.load().await;
+            if !posted.is_newest(ask.id) {
+                // Superseded, not lost: the newer request's load draws the
+                // thread, and its box shows what came of it
+                return;
+            }
+            let after = match loaded {
+                loaded @ ThreadLoad::Loaded(_) => {
+                    if let Some(id) = id {
+                        pending.set(Some(id));
+                    }
+                    thread.set(loaded);
+                    AfterReply::Done
+                }
+                ThreadLoad::Pending => {
+                    tracing::warn!(
+                        comment = ?id,
+                        "the thread's load after a reply or check came back pending; keeping the one drawn"
+                    );
+                    AfterReply::Failed("no answer yet".to_owned())
+                }
+                ThreadLoad::Failed(e) => {
+                    tracing::warn!(
+                        comment = ?id,
+                        error = %e,
+                        "the thread couldn't be loaded again after a reply or check; keeping the one drawn"
+                    );
+                    AfterReply::Failed(e)
+                }
+                ThreadLoad::NotFound => {
+                    tracing::warn!(
+                        comment = ?id,
+                        "the thread was not found after a reply or check; keeping the one drawn"
+                    );
+                    AfterReply::Failed(POST_NOT_FOUND.to_owned())
+                }
+            };
+            posted.set_reload(ask.id, after);
+        });
+    });
+    use_effect(move || {
+        if matches!(*thread.read(), ThreadLoad::Loaded(_))
+            && let Some(id) = arrive_at.take()
+        {
+            go_to.fragment(&format!("comment-{id}"));
+        }
+    });
 
     rsx! {
         ClientOnly { slot: ClientSlot::Session }

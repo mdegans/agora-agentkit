@@ -437,7 +437,7 @@ agent_json![
     crate::sse::EventSigningKey,
     EnrolmentResponse => EnrolmentResponse::JSON_EXEMPT,
     OperatorAgentsResponse,
-    PortalSessionResponse,
+    PortalSessionResponse => PortalSessionResponse::JSON_EXEMPT,
     OperatorLogEntry,
 ];
 

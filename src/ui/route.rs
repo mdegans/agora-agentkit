@@ -77,7 +77,7 @@ use super::{
 use crate::{
     ids::{CommentId, ContentRef, PostId},
     links::{AgoraLink, AgoraLinkError, ContentKind, SITE_PREFIX},
-    requests::{GetContentInput, GetFeedInput},
+    requests::{GetContentInput, GetFeedInput, GetInboxInput},
 };
 
 /// The path the site is mounted at, the router's base: [`SITE_PREFIX`]
@@ -131,6 +131,10 @@ pub enum ClientPage {
     /// A comment under its post and the comments it answers
     /// ([`super::comment`])
     Comment(CommentId),
+    /// The operator poster's inbox, `agora://inbox` with no options
+    /// ([`super::inbox`]): all of it the client's, so the server draws an
+    /// empty shell
+    Inbox,
 }
 
 impl ClientPage {
@@ -179,6 +183,12 @@ impl ClientPage {
             AgoraLink::Search(_) => None,
             AgoraLink::Profile(_) => None,
             AgoraLink::Constitution(_) => None,
+            // The reader's own inbox is its page; one message, or a view or
+            // offset, is `get_inbox`'s read, which the server draws (an
+            // agent's inbox has no page)
+            AgoraLink::Inbox(input) if *input == GetInboxInput::default() => {
+                Some(Self::Inbox)
+            }
             AgoraLink::Inbox(_) => None,
             // A page no kind names: the server's own (`/agora/about`)
             AgoraLink::Page(_) => None,
@@ -191,6 +201,7 @@ impl ClientPage {
             Self::Feed(input) => AgoraLink::Feed(input.clone()),
             Self::Thread(post) => AgoraLink::post(*post),
             Self::Comment(comment) => AgoraLink::comment(*comment),
+            Self::Inbox => super::inbox::link(),
         }
     }
 }
@@ -289,6 +300,9 @@ impl Routable for Route {
             },
             Some(ClientPage::Comment(comment)) => rsx! {
                 CommentRoute { key: "{key}", comment }
+            },
+            Some(ClientPage::Inbox) => rsx! {
+                InboxRoute { key: "{key}" }
             },
             None => rsx! {
                 ServerPage { key: "{key}", link: self.0.clone() }
@@ -450,6 +464,18 @@ fn CommentRoute(comment: CommentId) -> Element {
     CommentIsland(page)
 }
 
+/// The inbox's page: nothing to load before it is drawn (its content is
+/// the client's, read after mount)
+#[component]
+fn InboxRoute() -> Element {
+    let data = use_context::<PageData>();
+    let page = use_hook(|| match data.take(&ClientPage::Inbox) {
+        Some(Page::Inbox(page)) => page,
+        _ => super::inbox::InboxPage::default(),
+    });
+    super::inbox::InboxIsland(page)
+}
+
 /// A page the server draws, should the router ever hold one. It doesn't
 /// (`FromStr` refuses these, and [`To`] draws plain links to them); if it
 /// did, the page is loaded from the server, with its link shown until it is
@@ -596,6 +622,35 @@ impl fmt::Debug for Arrive {
 /// it is, `#fragment` included
 #[derive(Clone)]
 struct Address(Rc<dyn History>);
+
+/// Going to a `#fragment` of the page the address is at, from an event
+/// after the page is drawn (a reply box's new comment), as [`Arrive`] goes
+/// to the address's own: the renderer's history opens the address with
+/// that fragment, which in a browser scrolls to it and loads nothing. Does
+/// nothing where the renderer gave no history (the server) or the history
+/// can't (a memory history)
+#[derive(Clone)]
+pub(crate) struct GoTo(Option<Rc<dyn History>>);
+
+impl GoTo {
+    /// Go to `#fragment` here
+    pub(crate) fn fragment(&self, fragment: &str) {
+        let Some(history) = &self.0 else {
+            tracing::warn!(fragment, "no history to go to a fragment with");
+            return;
+        };
+        let path = full_path(history.as_ref());
+        let href = format!("{}#{fragment}", without_fragment(&path));
+        if !history.external(href.clone()) {
+            tracing::warn!(%href, "the history can't go to a fragment");
+        }
+    }
+}
+
+/// [`GoTo`] over the renderer's history. A hook
+pub(crate) fn use_go_to() -> GoTo {
+    use_hook(|| GoTo(try_consume_context::<Address>().map(|a| a.0)))
+}
 
 /// Provide [`Arrive`] for a page the client loads, when the address has a
 /// fragment. A hook

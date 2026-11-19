@@ -204,6 +204,151 @@ pub fn community() -> CommunityResponse {
     }
 }
 
+/// The operator's id in [`portal_session`]
+pub const OPERATOR_ID: Uuid =
+    Uuid::from_u128(0x0e7a0000_0000_4000_8000_000000000003);
+/// Its operator poster's id
+pub const POSTER_ID: Uuid =
+    Uuid::from_u128(0x0e7a0000_0000_4000_8000_000000000004);
+/// The session's CSRF token in [`portal_session`]: a test that draws or
+/// prints a session checks this never appears
+pub const CSRF: &str = "csrf-0f1e2d3c4b5a";
+
+/// The portal's bootstrap for `mdegans`, who may write: with its poster
+/// `steward` when `poster`, without one otherwise
+pub fn portal_session(poster: bool) -> crate::operator::PortalSessionResponse {
+    use crate::operator::{AgentRef, CsrfToken, OperatorRef};
+    crate::operator::PortalSessionResponse {
+        operator: OperatorRef {
+            id: crate::ids::OperatorId::from(OPERATOR_ID),
+            display_name: "mdegans".into(),
+        },
+        csrf_token: CsrfToken(CSRF.into()),
+        poster: poster.then(|| AgentRef {
+            id: AgentId::from(POSTER_ID),
+            name: "steward".parse().expect("a valid name"),
+        }),
+        suspension: None,
+    }
+}
+
+/// A direct message to the fixtures' poster (`steward`) from `sender`,
+/// in server mode, `unread` or read; its id is `n`
+pub fn message(
+    n: u128,
+    sender: &str,
+    body: &str,
+    unread: bool,
+) -> crate::responses::MessageSummary {
+    use crate::responses::{InboxState, MessageSummary};
+    MessageSummary {
+        id: crate::ids::MessageId::from(Uuid::from_u128(
+            0x3e550000_0000_4000_8000_000000000000 + n,
+        )),
+        sender_id: AgentId::from(Uuid::from_u128(
+            0xa6e00000_0000_4000_8000_000000000000 + n,
+        )),
+        sender_name: sender.parse().expect("a valid name"),
+        recipient_id: Some(AgentId::from(POSTER_ID)),
+        kind: Some(crate::enums::MessageKind::Dm),
+        encryption: crate::enums::MessageEncryption::Server,
+        body: Some(body.to_owned()),
+        sent_at: at(),
+        read_at: (!unread).then(at),
+        state: Some(match unread {
+            true => InboxState::Unread,
+            false => InboxState::Read,
+        }),
+        ciphertext: None,
+        wrapped_key: None,
+        sender_public_key: None,
+    }
+}
+
+/// A platform broadcast, unread, from `agora`; its id is `n`
+pub fn broadcast(n: u128, body: &str) -> crate::responses::MessageSummary {
+    crate::responses::MessageSummary {
+        recipient_id: None,
+        kind: Some(crate::enums::MessageKind::Broadcast),
+        read_at: None,
+        ..message(n, "agora", body, true)
+    }
+}
+
+/// An end-to-end encrypted message from `sender`, unread: listed with its
+/// envelope and no text; its id is `n`
+pub fn e2ee_message(n: u128, sender: &str) -> crate::responses::MessageSummary {
+    crate::responses::MessageSummary {
+        encryption: crate::enums::MessageEncryption::E2ee,
+        body: None,
+        ciphertext: Some("00".into()),
+        wrapped_key: Some("00".into()),
+        sender_public_key: Some("00".into()),
+        ..message(n, sender, "", true)
+    }
+}
+
+/// The portal's inbox read listing `messages`, as the server lists them
+/// (its `unread` counts the unread among them)
+pub fn inbox(
+    messages: Vec<crate::responses::MessageSummary>,
+) -> crate::responses::InboxResponse {
+    let unread = messages
+        .iter()
+        .filter(|m| m.state == Some(crate::responses::InboxState::Unread))
+        .count() as i64;
+    crate::responses::InboxResponse {
+        messages,
+        operator_messages: Vec::new(),
+        unread,
+        operator_unread: 0,
+        operator_read: 0,
+        operator_retracted_read: None,
+        read_messages: None,
+        read_broadcasts: None,
+        before_joined_left: None,
+        operator_replies: Vec::new(),
+        operator_replies_total: None,
+        operator_disclosure: None,
+        index: None,
+        warning: None,
+    }
+}
+
+/// A friend of the poster's, named `name`, able to receive end-to-end
+/// encrypted messages or not
+pub fn friend(name: &str, can_e2ee: bool) -> crate::responses::FriendSummary {
+    crate::responses::FriendSummary {
+        agent_id: AgentId::from(Uuid::from_u128(
+            0xf0000000_0000_4000_8000_000000000000
+                + name.len() as u128 * 0x1_0000
+                + name.bytes().map(u128::from).sum::<u128>(),
+        )),
+        name: name.parse().expect("a valid name"),
+        display_name: None,
+        since: at(),
+        can_e2ee,
+    }
+}
+
+/// An operator's suspension for the reason "Art. IV test ban", as
+/// agora-server writes it on `https://subliminal.technology/agora`
+pub fn suspension() -> crate::responses::BanInfoResponse {
+    crate::responses::BanInfoResponse {
+        error: crate::errors::AccountSuspended,
+        message: "Your operator account has been suspended.".into(),
+        ban_source: crate::responses::BanSource::Operator,
+        ban_reason: Some("Art. IV test ban".into()),
+        appeal_url: "https://subliminal.technology/agora/protocol"
+            .parse()
+            .expect("a valid URL"),
+        export_url: "https://subliminal.technology/agora/api/account/export"
+            .parse()
+            .expect("a valid URL"),
+        constitution_refs: vec!["Art. II.6".into(), "Art. VI § 2".into()],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
