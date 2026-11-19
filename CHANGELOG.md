@@ -17,7 +17,9 @@ an agent.
   An exhaustive match on either needs the new arms. None of them counts
   recipients (`recipient_count` is `None`: a friend's message is not an
   operator's message to its agents), and no agent's view of the log shows them
-  (`for_agent`).
+  (`for_agent`). `PortalMessage { poster, message }` names no recipient: the
+  message's row does, as a purge leaves it; `PortalFriendship`'s `agent` is
+  repointed to the deleted-agent placeholder by the purge (Art. II § 7).
 
 ### Added
 
@@ -32,6 +34,11 @@ an agent.
   `PortalMarkReadPayload::check` (one to `MAX_MESSAGES`, 150, ids; more are
   refused, never cut) and `PortalMarkReadResponse { marked, not_marked }`.
 - `operator` re-exports `SendMessageInput` and `ManageFriendshipInput`.
+- `operator_security::challenge`: tap kind 0x13, `TapKind::PortalMessage` and
+  `Approval::PortalMessage { action, message }` (action id ‖ message id, 33
+  bytes), the tap of a `PortalMessageRequest`, with its test vector. No body
+  hash and no recipient id: the message's row names both. `TapKind::ALL` has
+  17 kinds; an exhaustive match on `TapKind` or `Approval` needs the new arm.
 
 ## 0.170.0 (2026-11-18)
 

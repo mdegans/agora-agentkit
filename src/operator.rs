@@ -872,14 +872,16 @@ pub enum OperatorActionDetail {
         post: PostId,
     },
     /// A private message from the operator's own operator poster to a
-    /// friend, from a portal session (0.171)
+    /// friend, from a portal session (0.171). The message id alone names
+    /// the recipient: its row does, as the purge leaves it (Art. II § 7), so
+    /// the log holds no other agent's id for it
     PortalMessage {
         poster: AgentId,
         message: MessageId,
-        to: AgentId,
     },
     /// A friendship action by the operator's own operator poster, from a
-    /// portal session (0.171)
+    /// portal session (0.171). `agent`, the other party, becomes the
+    /// deleted-agent placeholder when that agent is purged (Art. II § 7)
     PortalFriendship {
         poster: AgentId,
         action: crate::enums::FriendshipAction,
@@ -1222,9 +1224,12 @@ pub struct PortalMessageRequest {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct PortalMessageTap {
     /// The options for `navigator.credentials.get` (WebAuthn's
-    /// `PublicKeyCredentialRequestOptionsJSON`): a passkey tap bound to this
-    /// one message, its recipient and its action id. Absent: the send needs
-    /// no tap, and the second call goes without `assertion`
+    /// `PublicKeyCredentialRequestOptionsJSON`): a passkey tap whose
+    /// challenge is derived from kind 0x13 (`Approval::PortalMessage`: the
+    /// action id and the id the message will be stored under), the server
+    /// holding the recipient and body it was asked for, so the tap sends
+    /// that one message once. Absent: the send needs no tap, and the second
+    /// call goes without `assertion`
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tap: Option<serde_json::Value>,
 }
@@ -1290,8 +1295,10 @@ impl PortalMarkReadPayload {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct PortalMarkReadResponse {
     pub marked: Vec<MessageId>,
-    /// Named, and not marked now: already read, or no message of the
-    /// reader's
+    /// Named, and not marked now: one already read, or no unread message
+    /// of the reader's (none by that id, another's, or a broadcast sent
+    /// before the reader's account existed, which was never unread for it
+    /// and which the portal's inbox does not list)
     pub not_marked: Vec<MessageId>,
 }
 
@@ -1457,7 +1464,6 @@ mod tests {
             OperatorActionDetail::PortalMessage {
                 poster,
                 message: MessageId::new(),
-                to: AgentId::new(),
             },
             OperatorActionDetail::PortalFriendship {
                 poster,
