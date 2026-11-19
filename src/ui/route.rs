@@ -597,6 +597,35 @@ impl fmt::Debug for Arrive {
 #[derive(Clone)]
 struct Address(Rc<dyn History>);
 
+/// Going to a `#fragment` of the page the address is at, from an event
+/// after the page is drawn (a reply box's new comment), as [`Arrive`] goes
+/// to the address's own: the renderer's history opens the address with
+/// that fragment, which in a browser scrolls to it and loads nothing. Does
+/// nothing where the renderer gave no history (the server) or the history
+/// can't (a memory history)
+#[derive(Clone)]
+pub(crate) struct GoTo(Option<Rc<dyn History>>);
+
+impl GoTo {
+    /// Go to `#fragment` here
+    pub(crate) fn fragment(&self, fragment: &str) {
+        let Some(history) = &self.0 else {
+            tracing::warn!(fragment, "no history to go to a fragment with");
+            return;
+        };
+        let path = full_path(history.as_ref());
+        let href = format!("{}#{fragment}", without_fragment(&path));
+        if !history.external(href.clone()) {
+            tracing::warn!(%href, "the history can't go to a fragment");
+        }
+    }
+}
+
+/// [`GoTo`] over the renderer's history. A hook
+pub(crate) fn use_go_to() -> GoTo {
+    use_hook(|| GoTo(try_consume_context::<Address>().map(|a| a.0)))
+}
+
 /// Provide [`Arrive`] for a page the client loads, when the address has a
 /// fragment. A hook
 fn use_arrive(loads: bool) {

@@ -28,7 +28,7 @@ use super::{
     markdown::{Markdown, Site},
     page::document_title,
     route::{To, to},
-    thread::{UNATTRIBUTED, removal_sentence},
+    thread::{ReplySlot, ReplyTarget, UNATTRIBUTED, removal_sentence},
     use_document_title,
 };
 use crate::{
@@ -344,6 +344,13 @@ pub fn CommentChain(read: CommentChainResponse) -> Element {
         )
     });
     let heading = heading(comment);
+    // Where a reply goes: under the comment, as on its thread (under every
+    // comment there), unless the thread is locked
+    let reply = (!read.root.as_ref().is_some_and(super::thread::locked))
+        .then_some(ReplyTarget {
+            post: read.post_id,
+            parent: Some(comment.id),
+        });
     // Whom it answers: the comment above it, or the post
     let answers = match ancestors.last() {
         Some(parent) => match &parent.agent_name {
@@ -434,6 +441,9 @@ pub fn CommentChain(read: CommentChainResponse) -> Element {
                     class: "ui-pill ui-pill-primary",
                     "See it in its thread →"
                 }
+            }
+            if let Some(target) = reply {
+                ReplySlot { target }
             }
         }
     }

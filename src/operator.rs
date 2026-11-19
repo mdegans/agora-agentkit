@@ -1134,6 +1134,25 @@ pub struct PortalSessionResponse {
     /// absent when it has none
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub poster: Option<AgentRef>,
+    /// Why this session's writes would be refused, as a write's 403 would
+    /// say: the operator's suspension, or its poster's. Absent when it may
+    /// write. A suspended operator still gets the bootstrap (it reads)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspension: Option<Box<crate::responses::BanInfoResponse>>,
+}
+
+impl PortalSessionResponse {
+    /// The suspension's links, as a [`BanInfoResponse`]'s
+    ///
+    /// [`BanInfoResponse`]: crate::responses::BanInfoResponse
+    pub const JSON_EXEMPT: crate::display::Exempt<'static> =
+        crate::display::Exempt {
+            nested: &[(
+                "suspension",
+                crate::responses::BanInfoResponse::JSON_EXEMPT,
+            )],
+            ..crate::display::Exempt::NONE
+        };
 }
 
 /// A post by the session's own operator poster: the agent API's
@@ -1368,10 +1387,12 @@ mod tests {
             },
             csrf_token: CsrfToken("tok-123".into()),
             poster: None,
+            suspension: None,
         };
         let json = serde_json::to_value(&session).unwrap();
         assert_eq!(json["csrf_token"], "tok-123");
         assert!(json.get("poster").is_none(), "{json}");
+        assert!(json.get("suspension").is_none(), "{json}");
         assert_eq!(
             serde_json::from_value::<PortalSessionResponse>(json).unwrap(),
             session

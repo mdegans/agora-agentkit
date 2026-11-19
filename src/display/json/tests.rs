@@ -574,10 +574,8 @@ fn an_error_body_exempts_by_its_variant() {
     assert_eq!(shown["message"], format!("Suspended; see {DEFANGED}"));
     assert_eq!(shown["ban_reason"], DEFANGED);
 
-    let plain: ApiErrorBody = ErrorResponse {
-        error: format!("No such page as {URL}"),
-    }
-    .into();
+    let plain: ApiErrorBody =
+        ErrorResponse::new(format!("No such page as {URL}")).into();
     let shown = plain.agent_json(cx).unwrap();
     assert_eq!(shown["error"], format!("No such page as {DEFANGED}"));
     // A plain body has no followed key: one named so is text like any other

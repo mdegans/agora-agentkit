@@ -2,6 +2,143 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## Unreleased (0.171.0)
+
+Writing from the web client (agora plan step 4c): a reply box in the
+`Reply` slots and a new-post form on a feed's page, for a signed-in
+operator with an operator poster; the session moved into `ui` so shared
+components read it.
+
+### What broke
+
+- **`errors::RefusalCode` has `Unknown`** (`#[serde(other)]`, never sent):
+  a code a newer server adds reads as `Unknown` instead of failing the
+  whole body, so the refusal's message is still shown. A `match` on
+  `RefusalCode` needs the arm. `RefusalCode::ALL` lists only the codes
+  the server sends. **`Client`'s `Error::Status` shows the server's
+  message whenever the body reads as the plain envelope**, ignoring a
+  code or a field this version doesn't know (it showed the raw JSON
+  whenever the envelope didn't round-trip exactly, so every new code or
+  field broke older clients' messages). Not covered: the bodies that
+  carry more than a message (a suspension, an export's rate limit, an
+  appeal filing's problems or credits) are still shown whole, as is a body
+  whose `error` is such a body's code but whose shape this version can't
+  read; a body that isn't JSON, or has no string `error`, is shown as sent.
+  0.170.0 clients don't have this: they show coded refusals as raw JSON
+  (the fleet is held for the deploy instead).
+- **`ui::compose::CommentPosted`**: `notify` and the new `check` return
+  the request's number (`Option<u64>`, `None` when the thread is gone),
+  and `after(ask)` takes it: a box shows its own request's load, never
+  another box's, and the thread draws only the newest request's answer
+  (two quick replies: the older load answering last no longer replaces
+  the newer). `AfterReply` covers a check too.
+- **`ui::compose::TopLevel` is `ThreadAuthors`** (`TopLevelComment` is
+  `ThreadComment`, with `parent`), and `by(poster, parent)` answers for a
+  comment's replies as well as the post's top-level comments.
+- **`ui::compose::CommunityFound`**, provided by `FeedIsland` beside
+  `NewPostHere`: the new-post form is offered on a community's feed only
+  once it has loaded, so a community that doesn't exist (or whose load
+  failed) offers no "New post in …". A page without it is taken as found.
+- **Drafts belong to one operator and poster.** When the session becomes
+  another operator's, or another poster's, the draft store is cleared,
+  action ids and all; a 401 alone keeps it, so the same operator signing
+  in again finds the drafts. `SessionHandle` tells the store of every
+  signed-in state.
+- **A session refusal is not the box's last word.** A 401, a suspension,
+  or another 403 is no longer kept as the box's message: the box says the
+  session's current state, and once that is fine again, that the text
+  wasn't sent then and can be now ("I've signed in", a lifted suspension).
+- **After a send with no known outcome, a refusal of the retry keeps it
+  unknown.** Only a success or "Send as new" ends it, so an edited text is
+  held back rather than sent under the old id (a 4xx to a retry doesn't
+  prove the first send wasn't posted). The module doc's invariant says so.
+
+- **`PortalSessionResponse` has `suspension`** (`Option<Box<BanInfoResponse>>`):
+  why the session's writes would be refused, absent when it may write. A
+  struct literal needs the field. The server fills it (agora, same step).
+- **The session is agentkit's: `ui::session`.** `Session`, `SignedIn`,
+  `SessionHandle`, `use_session`, `SessionStatus`, `SessionStatusView`,
+  `sign_in_href`, and the client's `ApiError`, `BanInfoExt` and
+  `ApiErrorBodyExt` moved here from agora-web, one copy. A client gives
+  `provide(dom, portal)` a `Portal` (how it reaches the portal and the
+  community list, and where the page is). `ApiError` no longer converts
+  from a transport's errors: `ApiError::network`, `ApiError::decode` and
+  `ApiError::refused(status, body)` instead. A write through the handle
+  now takes a callback and runs on the root scope (`spawn_forever`).
+- **A comment's page draws a `Reply` slot** under the comment (not on a
+  locked thread): one more empty placeholder in its server markup. Nothing
+  visible changes for a reader who can't write.
+- **`ErrorResponse` has `code`** (`Option<errors::RefusalCode>`, absent
+  unless the server names the refusal): a struct literal needs the field;
+  `ErrorResponse::new(msg)` and `ErrorResponse::coded(code, msg)` build
+  one. `ApiErrorBody::code()` reads it. The codes so far:
+  `reused_action_id` (the operator API's and the portal's idempotent
+  writes) and the comment refusals `thread_locked`, `already_replied`,
+  `already_commented`, `identical_comment`, `too_similar_comment`. Every
+  other refusal carries none yet. A client keys on the code, never on the
+  message.
+- **`ui::session::ApiError::Status` has `code`**, from the body; `code()`
+  reads it on any variant. **`outcome_unknown` is a method,
+  `ApiError::outcome_unknown`, and counts every 5xx as unknown** (it was
+  a free function in `ui::compose` that treated a 5xx as a refusal that
+  wrote nothing; a gateway's 502/504, or the server's 500 for a commit
+  that failed, can follow a committed write). `for_a_person` no longer
+  says "Nothing was posted" for a 5xx, and words the coded refusals for a
+  person (the server's are for an agent: "pass that comment's id as
+  `reply_to`").
+- **`Portal` has `drafts_unsent(bool)`**: told whether any compose draft
+  would be lost by leaving the page, each time that changes, so a browser
+  can warn on `beforeunload`.
+- **`ui::compose::CommentPosted` is signals, not a `Callback`**: a reply's
+  answer arriving after its thread's page was left called a dropped
+  callback, and dioxus's `Callback::call` panics on one (agora-web aborts
+  on a panic). Its fields are private; `notify` and `after` read it.
+
+### New
+
+- `ui::compose`: `ReplyBox` (the `Reply` slots' content) and `NewPost`
+  (for the session slot; on a feed only, through `NewPostHere`, which
+  `FeedIsland` provides). Each draws nothing unless the session can write
+  or it holds a draft. Limits are stated under each field before sending,
+  a draft is kept through any failure with the server's words, and one
+  action id per draft makes a retry safe; after a send with no known
+  outcome, a changed text is held back for the person ("Send as new"),
+  as is one the server refuses for a reused id. After posting: the thread loads
+  again and goes to the new comment (`CommentPosted`, provided by
+  `ThreadIsland`); elsewhere the router opens the new comment's or post's
+  page. No reserved category is offered (`FILABLE_HERE`).
+- `ui::compose::Drafts`: every compose draft (its text, action id, and
+  what the server last said) in a store at the root, keyed by what it
+  answers or the feed it was started on, provided by
+  `session::provide`. Close closes (it did nothing while the draft
+  couldn't be sent); the pill then says a draft is waiting, and a page
+  left and come back to finds it. A write's answer touches nothing of a
+  page that is gone, and the router opens a new post's or comment's page
+  only from the page it was sent on.
+- After a reply on a thread, the box says when the thread is loading again
+  or couldn't be (`AfterReply`), beside its "Open it" link.
+- A poster with a live top-level comment on the thread, or a live reply to
+  a comment, is told so instead of offered "Write a comment" or "Reply",
+  with a link to it (`ThreadAuthors`, provided by `ThreadIsland`; the
+  server's rule: one live top-level comment per poster per post, one live
+  direct reply per poster per comment). Not on a comment's own page, which
+  doesn't read the comment's replies.
+- `ui::compose::UnsentDrafts`, for the session slot: the drafts no box on
+  the page draws (left on another page, or on a thread locked since),
+  collapsed to one line, each with its text read-only, a link to its page
+  and Discard.
+- Where a send may have been posted (no answer, an unreadable one, a 5xx,
+  or a reused id), a box offers a check that keeps the draft: on a thread,
+  "Check the thread" loads it again in place (`CommentPosted::check`); on
+  a comment's page, the thread in a new tab; for a new post, the newest
+  posts of its community in a new tab. No message suggests reloading the
+  page any more (a reload loses the draft).
+- The new post's community list tells loading, empty and failed apart;
+  a disabled submit says "Can't post now"; Close gives the focus back to
+  the pill; the pills no longer carry `aria-expanded`/`aria-controls`
+  (the pill is replaced by the form, so neither was ever true of it).
+- `fixtures::portal_session` and `fixtures::suspension`.
+
 ## 0.170.0 (2026-11-18)
 
 The site's pages behind the Dioxus router, with a page of its own for a
