@@ -1445,6 +1445,15 @@ pub enum OperatorActionKind {
     /// A comment by the operator's own operator poster, from a portal
     /// session (0.160)
     PortalComment,
+    /// A private message by the operator's own operator poster, from a
+    /// portal session (0.171)
+    PortalMessage,
+    /// A friendship action by the operator's own operator poster, from a
+    /// portal session (0.171)
+    PortalFriendship,
+    /// Messages in the operator poster's inbox marked read, from a portal
+    /// session (0.171)
+    PortalMarkRead,
     /// A kind this build does not know, from a newer server. Never stored
     /// or sent by the server; exists so an older client still reads the
     /// log (0.160)
@@ -2127,7 +2136,8 @@ closed_variants!(OperatorActionKind [
     ConfigChangeEffective, ConfigChangeRequested, ConfigChangeCancelled,
     LogVisibility, GroupChange, CredentialSuspend, CredentialContest,
     OauthConsent, Freeze, Unfreeze, CredentialReinstate, SessionRevoke,
-    AgentDelete, AgentRegister, AgentProfileUpdate, PortalPost, PortalComment
+    AgentDelete, AgentRegister, AgentProfileUpdate, PortalPost, PortalComment,
+    PortalMessage, PortalFriendship, PortalMarkRead
 ] never_written [Unknown]);
 closed_variants!(OperatorCredentialKind [SoftwareKey, HardwareKey]);
 closed_variants!(PinPolicy [Never, Once, Always]);
@@ -2562,11 +2572,26 @@ mod tests {
             "via the operator portal"
         );
         assert_eq!(
-            OperatorActionKind::ALL[OperatorActionKind::ALL.len() - 2..],
+            OperatorActionKind::ALL[OperatorActionKind::ALL.len() - 5..],
             [
                 OperatorActionKind::PortalPost,
-                OperatorActionKind::PortalComment
+                OperatorActionKind::PortalComment,
+                OperatorActionKind::PortalMessage,
+                OperatorActionKind::PortalFriendship,
+                OperatorActionKind::PortalMarkRead,
             ]
+        );
+        assert_eq!(
+            OperatorActionKind::PortalMessage.to_string(),
+            "portal_message"
+        );
+        assert_eq!(
+            OperatorActionKind::PortalFriendship.to_string(),
+            "portal_friendship"
+        );
+        assert_eq!(
+            OperatorActionKind::PortalMarkRead.to_string(),
+            "portal_mark_read"
         );
         assert_eq!(OperatorActionKind::PortalPost.to_string(), "portal_post");
         assert_eq!(
