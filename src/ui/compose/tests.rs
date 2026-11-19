@@ -875,6 +875,7 @@ async fn comment_posted_after_the_thread_is_gone() {
         .expect("a reply slot under the thread");
     assert!(
         dom.in_scope(ScopeId::ROOT, || posted.notify(fixtures::comment().id))
+            .is_some()
     );
     dom.in_scope(ScopeId::ROOT, || {
         let mut shown = SHOWN.with(|s| s.get()).unwrap();
@@ -883,9 +884,9 @@ async fn comment_posted_after_the_thread_is_gone() {
     settle(&mut dom).await;
     let id = fixtures::comment().id;
     let told = dom.in_scope(ScopeId::ROOT, || posted.notify(id));
-    assert!(!told, "nothing to tell: the thread is gone");
+    assert_eq!(told, None, "nothing to tell: the thread is gone");
     assert_eq!(
-        dom.in_scope(ScopeId::ROOT, || posted.after()),
+        dom.in_scope(ScopeId::ROOT, || posted.after(1)),
         AfterReply::Idle
     );
 }
@@ -999,7 +1000,7 @@ async fn a_poster_with_a_top_level_comment_is_told() {
 }
 
 #[test]
-fn top_level_comments_count_stubs_and_skip_deleted_ones() {
+fn thread_authors_count_stubs_and_skip_deleted_ones() {
     let poster = fixtures::portal_session(true).poster.unwrap();
     let mut read = fixtures::post_with_comments();
     read.comments.push(crate::responses::CommentResponse {
@@ -1008,16 +1009,21 @@ fn top_level_comments_count_stubs_and_skip_deleted_ones() {
         ..fixtures::comment()
     });
     assert!(
-        TopLevel::of(&read).is_empty(),
+        ThreadAuthors::of(&read)
+            .iter()
+            .all(|c| c.agent_id != Some(poster.id)),
         "a deleted one doesn't count"
     );
     read.comment_stubs.push(crate::responses::CommentStub {
         agent_name: Some(poster.name.clone()),
         ..fixtures::comment_stub()
     });
-    let top = TopLevel::of(&read);
+    let top: Vec<_> = ThreadAuthors::of(&read)
+        .into_iter()
+        .filter(|c| c.agent_name.as_ref() == Some(&poster.name))
+        .collect();
     assert_eq!(top.len(), 1);
-    assert_eq!(top[0].agent_name.as_ref(), Some(&poster.name));
+    assert_eq!(top[0].parent, fixtures::comment_stub().parent_comment_id);
 }
 
 /// The new-post form: the same id after an unknown outcome; a post
@@ -1080,4 +1086,596 @@ async fn an_empty_community_list_is_not_a_loading_one() {
     let html = drawn(Some(portal), NewPostHere(None), open_post).await;
     assert!(html.contains("There are no communities to list"), "{html}");
     assert!(!html.contains("Loading the list"), "{html}");
+}
+
+// ---------------------------------------------------------------------
+// The final review's fixes (2026-11-19)
+// ---------------------------------------------------------------------
+
+thread_local! {
+    /// The thread's loads, answered in the order they were asked for: each
+    /// waits for its sender (a test answers them in any order)
+    static LOADS: RefCell<VecDeque<oneshot::Receiver<ThreadLoad>>> =
+        const { RefCell::new(VecDeque::new()) };
+    /// How many times the thread was loaded
+    static LOADED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+use std::{cell::RefCell, collections::VecDeque};
+
+use futures::{FutureExt, channel::oneshot};
+
+use crate::ui::{Reload, thread::ThreadLoad};
+
+/// A load of the thread the test answers: its sender
+fn next_load() -> oneshot::Sender<ThreadLoad> {
+    let (tx, rx) = oneshot::channel();
+    LOADS.with(|l| l.borrow_mut().push_back(rx));
+    tx
+}
+
+/// The client's `Reload<ThreadLoad>`, over [`LOADS`]
+fn thread_reload() -> Reload<ThreadLoad> {
+    LOADS.with(|l| l.borrow_mut().clear());
+    LOADED.with(|l| l.set(0));
+    Reload::new(|| {
+        LOADED.with(|l| l.set(l.get() + 1));
+        let next = LOADS.with(|l| l.borrow_mut().pop_front());
+        async move {
+            match next {
+                Some(rx) => rx
+                    .await
+                    .unwrap_or_else(|_| ThreadLoad::Failed("dropped".into())),
+                None => ThreadLoad::Failed("no load scripted".into()),
+            }
+        }
+        .boxed_local()
+    })
+}
+
+impl Harness {
+    /// [`Harness::new`], the thread loadable again through [`LOADS`]
+    async fn reloadable(portal: &FakePortal, page: fn() -> Element) -> Self {
+        let mut dom = VirtualDom::new_with_props(Toggle, PageProps { page });
+        dom.provide_root_context(slots());
+        dom.provide_root_context(thread_reload());
+        session::provide(&dom, portal.clone());
+        dom.rebuild_in_place();
+        let mut harness = Self { dom };
+        harness.settle().await;
+        harness
+    }
+}
+
+fn reply_on_comment_page() -> Element {
+    use_context_provider(on_comment);
+    rsx! { ReplyBox {} }
+}
+
+/// Item 2: no message suggests a reload (it would lose the draft the
+/// message says is kept). On a thread, "Check the thread" loads it again
+/// in place: the box and its text stay, and the box says what came of it.
+/// On a comment's page the thread opens in a new tab; for a new post, the
+/// newest posts do
+#[tokio::test]
+async fn a_check_never_loses_the_draft() {
+    // The words, for every failure that may have been posted, and the
+    // reused id's
+    for e in [
+        ApiError::Network("offline".into()),
+        ApiError::Decode("eof".into()),
+        status(502, None),
+        status(409, Some(RefusalCode::ReusedActionId)),
+    ] {
+        let words = e.for_a_person();
+        assert!(!words.to_lowercase().contains("reload"), "{words}");
+    }
+
+    let portal = FakePortal::signed_in(true);
+    portal
+        .0
+        .borrow_mut()
+        .comment_answers
+        .push_back(Err(status(502, None)));
+    let mut h = Harness::reloadable(&portal, thread_page).await;
+    typed(&mut h, "hello").await;
+    send(&h);
+    let html = h.settle().await;
+    assert!(html.contains(">Check the thread</button>"), "{html}");
+    assert!(!html.to_lowercase().contains("reload"), "{html}");
+    // Changed since: held back, with the same way to check
+    h.act(|| controls::reply(on_post()).input("hello, edited".into()));
+    send(&h);
+    let html = h.settle().await;
+    assert!(html.contains("Check first"), "{html}");
+    assert!(html.contains(">Check the thread</button>"), "{html}");
+    assert!(!html.to_lowercase().contains("reload"), "{html}");
+
+    let load = next_load();
+    h.act(|| controls::reply(on_post()).check());
+    let html = h.settle().await;
+    assert_eq!(LOADED.with(|l| l.get()), 1);
+    assert!(html.contains("Checking the thread…"), "{html}");
+    load.send(ThreadLoad::Loaded(Box::new(fixtures::post_with_comments())))
+        .unwrap();
+    let html = h.settle().await;
+    assert!(html.contains("if your text is in it"), "{html}");
+    assert!(html.contains(r#"value="hello, edited""#), "the draft stays");
+    assert_eq!(ids(&portal).len(), 1, "a check sends nothing");
+
+    // A failed check says so, and offers the thread in a new tab
+    let load = next_load();
+    h.act(|| controls::reply(on_post()).check());
+    h.settle().await;
+    load.send(ThreadLoad::Failed("offline".into())).unwrap();
+    let html = h.settle().await;
+    assert!(
+        html.contains("The thread couldn&#39;t be loaded again (offline)")
+            || html.contains("The thread couldn't be loaded again (offline)"),
+        "{html}"
+    );
+    assert!(html.contains(r#"target="_blank""#), "{html}");
+
+    // A comment's page: the thread, in a new tab
+    let portal = FakePortal::signed_in(true);
+    portal
+        .0
+        .borrow_mut()
+        .comment_answers
+        .push_back(Err(ApiError::Network("offline".into())));
+    let mut h = Harness::new(&portal, reply_on_comment_page).await;
+    h.act(|| controls::reply(on_comment()).open());
+    h.settle().await;
+    h.act(|| controls::reply(on_comment()).input("a reply".into()));
+    h.act(|| controls::reply(on_comment()).send());
+    let html = h.settle().await;
+    let thread = AgoraLink::post(fixtures::post().id).site_path();
+    assert!(html.contains(">Open the thread in a new tab</a>"), "{html}");
+    assert!(html.contains(&format!(r#"href="{thread}""#)), "{html}");
+    assert!(!html.contains("Check the thread"), "{html}");
+
+    // A new post: the community's newest posts, in a new tab
+    let portal = FakePortal::signed_in(true);
+    portal
+        .0
+        .borrow_mut()
+        .post_answers
+        .push_back(Err(status(503, None)));
+    let mut h = Harness::new(&portal, post_alone).await;
+    let here = Some("meta-governance".parse::<CommunityName>().unwrap());
+    h.act(|| controls::post(here.clone()).open());
+    h.settle().await;
+    h.act(|| {
+        let c = controls::post(here.clone());
+        c.edit(|d| d.title = "On agency".into());
+        c.edit(|d| d.body = "Some words".into());
+    });
+    h.act(|| controls::post(here.clone()).send());
+    let html = h.settle().await;
+    let feed = AgoraLink::Feed(GetFeedInput {
+        community: here.clone(),
+        ..GetFeedInput::default()
+    })
+    .site_path();
+    assert!(
+        html.contains(">Open the newest posts in a new tab</a>"),
+        "{html}"
+    );
+    assert!(html.contains(&format!(r#"href="{feed}""#)), "{html}");
+    assert!(!html.to_lowercase().contains("reload"), "{html}");
+}
+
+/// Item 3: a 401's and a suspension's words aren't kept as the box's last
+/// word once the session is fine again: signed in again ("I've signed
+/// in"), or the suspension lifted, the box says it wasn't sent then and can
+/// be now, and sends
+#[tokio::test]
+async fn a_session_refusal_goes_when_the_session_is_back() {
+    for (refusal, then) in [
+        (ApiError::SignedOut("expired".into()), "you weren"),
+        (
+            ApiError::from(fixtures::suspension()),
+            "posting was suspended",
+        ),
+    ] {
+        let portal = FakePortal::signed_in(true);
+        portal
+            .0
+            .borrow_mut()
+            .comment_answers
+            .push_back(Err(refusal.clone()));
+        let mut h = Harness::new(&portal, reply_alone).await;
+        typed(&mut h, "kept").await;
+        send(&h);
+        let html = h.settle().await;
+        // Said once, by the session's state
+        let now = match &refusal {
+            ApiError::SignedOut(_) => "no longer signed in",
+            _ => "suspended",
+        };
+        assert_eq!(html.matches(now).count(), 1, "{refusal}: {html}");
+        assert!(!html.contains(then), "{refusal}: {html}");
+
+        // Signed in again in another tab, or the suspension lifted
+        h.act(|| controls::reply(on_post()).handle.refresh());
+        let html = h.settle().await;
+        assert!(!html.contains("no longer signed in"), "{refusal}: {html}");
+        assert!(!html.contains("is suspended"), "{refusal}: {html}");
+        assert!(html.contains(then), "{refusal}: {html}");
+        assert!(html.contains("You can send it now."), "{refusal}: {html}");
+        assert!(html.contains(">Post comment</button>"), "{refusal}: {html}");
+        assert!(html.contains(r#"value="kept""#), "{refusal}: {html}");
+        send(&h);
+        let html = h.settle().await;
+        assert!(
+            html.contains("Your comment is posted."),
+            "{refusal}: {html}"
+        );
+        assert_eq!(ids(&portal).len(), 2);
+    }
+}
+
+/// Item 4: a write that never answers ends in the client's timeout, which
+/// reaches the box as a network failure (agora-web's `api::send`): until
+/// then "Posting…", disabled; after it, the unknown-outcome words, the
+/// text kept, the button back, and a retry under the same id
+#[tokio::test]
+async fn a_write_that_times_out_is_an_unknown_outcome() {
+    let portal = FakePortal::signed_in(true);
+    // What agora-web's timeout makes of reqwest's error
+    let timed_out = ApiError::Network("no answer within 30 seconds".into());
+    portal
+        .0
+        .borrow_mut()
+        .comment_answers
+        .push_back(Err(timed_out.clone()));
+    let gate = portal.hold();
+    let mut h = Harness::new(&portal, reply_alone).await;
+    typed(&mut h, "hello").await;
+    send(&h);
+    let html = h.settle().await;
+    assert!(html.contains("Posting…"), "{html}");
+    assert!(html.contains("disabled"), "{html}");
+    gate.send(()).unwrap();
+    let html = h.settle().await;
+    assert!(html.contains("no answer within 30 seconds"), "{html}");
+    assert!(html.contains("may or may not have been posted"), "{html}");
+    assert!(html.contains(">Post comment</button>"), "{html}");
+    assert!(html.contains(r#"value="hello""#), "{html}");
+    assert!(timed_out.outcome_unknown());
+    send(&h);
+    h.settle().await;
+    let sent = ids(&portal);
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0], sent[1], "the retry is safe: the same id");
+}
+
+/// Item 5: drafts belong to the operator and poster they were written
+/// for. Another operator's session (after a 401), or another poster,
+/// finds none, and sends under a new id; the same operator signing in
+/// again keeps them
+#[tokio::test]
+async fn another_operators_session_clears_the_drafts() {
+    use crate::operator::{AgentRef, OperatorRef};
+    let another_operator = PortalSessionResponse {
+        operator: OperatorRef {
+            id: OperatorId::new(),
+            display_name: "someone".into(),
+        },
+        ..fixtures::portal_session(true)
+    };
+    let another_poster = PortalSessionResponse {
+        poster: Some(AgentRef {
+            id: AgentId::new(),
+            name: "another-poster".parse().unwrap(),
+        }),
+        ..fixtures::portal_session(true)
+    };
+    for (who, next) in [
+        ("the same operator", fixtures::portal_session(true)),
+        ("another operator", another_operator),
+        ("another poster", another_poster),
+    ] {
+        let portal = FakePortal::signed_in(true);
+        portal
+            .0
+            .borrow_mut()
+            .comment_answers
+            .push_back(Err(ApiError::SignedOut("expired".into())));
+        let mut h = Harness::new(&portal, reply_alone).await;
+        typed(&mut h, "the first operator's words").await;
+        send(&h);
+        let html = h.settle().await;
+        assert!(html.contains("no longer signed in"), "{who}: {html}");
+        portal.0.borrow_mut().session = Some(Ok(next));
+        h.act(|| controls::reply(on_post()).handle.refresh());
+        let html = h.settle().await;
+        let kept = html.contains("the first operator&#39;s words")
+            || html.contains("the first operator's words");
+        assert_eq!(kept, who == "the same operator", "{who}: {html}");
+        let drafts = h.act(|| controls::reply(on_post()).drafts);
+        assert_eq!(h.act(|| drafts.unsent()), kept, "{who}");
+        h.act(|| controls::reply(on_post()).input("new words".into()));
+        send(&h);
+        h.settle().await;
+        let sent = ids(&portal);
+        assert_eq!(sent.len(), 2, "{who}");
+        assert_eq!(
+            sent[0] == sent[1],
+            kept,
+            "{who}: the id goes with the draft"
+        );
+    }
+}
+
+/// Item 6: after a send with no known outcome, a refusal of the unchanged
+/// retry doesn't forget it: an edited text is still held back, not sent
+/// under the old id
+#[tokio::test]
+async fn a_refused_retry_keeps_the_unknown_send() {
+    let portal = FakePortal::signed_in(true);
+    {
+        let mut fake = portal.0.borrow_mut();
+        fake.comment_answers.push_back(Err(status(502, None)));
+        fake.comment_answers.push_back(Err(status(400, None)));
+    }
+    let mut h = Harness::new(&portal, reply_alone).await;
+    typed(&mut h, "hello").await;
+    send(&h);
+    h.settle().await;
+    send(&h);
+    h.settle().await;
+    assert_eq!(ids(&portal).len(), 2);
+    h.act(|| controls::reply(on_post()).input("hello, edited".into()));
+    send(&h);
+    let html = h.settle().await;
+    assert_eq!(ids(&portal).len(), 2, "held back, not sent");
+    assert!(html.contains(">Send as new</button>"), "{html}");
+}
+
+thread_local! {
+    static PAGE_SHOWN: std::cell::Cell<Option<Signal<bool>>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// The session slot's list of drafts above a page that can be taken away
+#[allow(non_snake_case)]
+fn WithList(props: PageProps) -> Element {
+    let shown = use_signal(|| true);
+    use_hook(|| PAGE_SHOWN.with(|s| s.set(Some(shown))));
+    rsx! {
+        UnsentDrafts {}
+        if shown() {
+            Page { page: props.page }
+        }
+    }
+}
+
+/// Item 7: a draft whose box isn't on the page (left for another page, or
+/// on a thread locked since) is listed, with its text and a way to its
+/// page, and can be discarded; one whose box is drawn isn't listed
+#[tokio::test]
+async fn a_draft_without_its_box_is_listed_and_can_be_discarded() {
+    let portal = FakePortal::signed_in(true);
+    let mut dom =
+        VirtualDom::new_with_props(WithList, PageProps { page: reply_alone });
+    dom.provide_root_context(slots());
+    session::provide(&dom, portal.clone());
+    dom.rebuild_in_place();
+    let mut h = Harness { dom };
+    let html = typed(&mut h, "a thought").await;
+    assert!(!html.contains("unsent draft"), "drawn here: {html}");
+    h.act(|| {
+        let mut shown = PAGE_SHOWN.with(|s| s.get()).unwrap();
+        shown.set(false);
+    });
+    let html = h.settle().await;
+    assert!(
+        html.contains("1 unsent draft isn&#39;t shown on this page")
+            || html.contains("1 unsent draft isn't shown on this page"),
+        "{html}"
+    );
+    assert!(html.contains("A comment on a post"), "{html}");
+    assert!(html.contains(r#"value="a thought""#), "{html}");
+    assert!(html.contains("readonly"), "{html}");
+    let thread = AgoraLink::post(fixtures::post().id).site_path();
+    assert!(html.contains(&format!(r#"href="{thread}""#)), "{html}");
+    assert!(html.contains(">Discard</button>"), "{html}");
+    // Discarded: gone from the list, and nothing is unsent
+    h.act(|| {
+        let drafts = controls::reply(on_post()).drafts;
+        drafts.discard(&DraftKey::Reply(on_post()));
+    });
+    let html = h.settle().await;
+    assert!(!html.contains("unsent draft"), "{html}");
+    assert_eq!(portal.0.borrow().unsent, vec![true, false]);
+
+    // A thread locked since draws no box: its draft is listed
+    thread_local! {
+        static LOCKED: std::cell::Cell<Option<Signal<bool>>> =
+            const { std::cell::Cell::new(None) };
+    }
+    #[allow(non_snake_case)]
+    fn Lockable() -> Element {
+        let locked = use_signal(|| false);
+        use_hook(|| LOCKED.with(|l| l.set(Some(locked))));
+        rsx! {
+            UnsentDrafts {}
+            if locked() {
+                Locked {}
+            } else {
+                Unlocked {}
+            }
+        }
+    }
+    #[allow(non_snake_case)]
+    fn Unlocked() -> Element {
+        ThreadIsland(ThreadPage::loaded(with_comment()))
+    }
+    #[allow(non_snake_case)]
+    fn Locked() -> Element {
+        let mut read = with_comment();
+        read.post.notice = Some(locked_notice());
+        ThreadIsland(ThreadPage::loaded(read))
+    }
+    let portal = FakePortal::signed_in(true);
+    let mut dom = VirtualDom::new(Lockable);
+    dom.provide_root_context(slots());
+    session::provide(&dom, portal.clone());
+    dom.rebuild_in_place();
+    let mut h = Harness { dom };
+    let html = typed(&mut h, "before the lock").await;
+    assert!(!html.contains("unsent draft"), "{html}");
+    h.act(|| {
+        let mut locked = LOCKED.with(|l| l.get()).unwrap();
+        locked.set(true);
+    });
+    let html = h.settle().await;
+    assert!(!html.contains("Write a comment"), "locked: {html}");
+    assert!(html.contains("1 unsent draft"), "{html}");
+    assert!(html.contains(r#"value="before the lock""#), "{html}");
+}
+
+/// A thread with one comment, someone else's
+fn with_comment() -> crate::responses::PostWithCommentsResponse {
+    let mut read = fixtures::post_with_comments();
+    read.comments.push(fixtures::comment());
+    read
+}
+
+fn thread_with_comment() -> Element {
+    ThreadIsland(ThreadPage::loaded(with_comment()))
+}
+
+/// Item 8: a community's feed offers a new post only once the community
+/// has loaded; not one that doesn't exist, nor one whose load failed. The
+/// global feed offers it whatever its load
+#[tokio::test]
+async fn no_new_post_for_a_community_that_is_not_there() {
+    let here: Option<CommunityName> = Some("ferns".parse().unwrap());
+    let page = |community: Option<CommunityName>, feed: FeedLoad| {
+        FeedPage::new(
+            GetFeedInput {
+                community,
+                ..GetFeedInput::default()
+            },
+            feed,
+        )
+    };
+    for (feed, offered) in [
+        (FeedLoad::NotFound, false),
+        (FeedLoad::Failed("offline".into()), false),
+        (FeedLoad::Loaded(vec![fixtures::post()]), true),
+    ] {
+        let what = format!("{feed:?}");
+        let (_, after) = mount(
+            FeedIsland,
+            page(here.clone(), feed),
+            FakePortal::signed_in(true),
+        )
+        .await;
+        assert_eq!(after.contains("New post"), offered, "{what}: {after}");
+    }
+    let (_, after) = mount(
+        FeedIsland,
+        page(None, FeedLoad::Failed("offline".into())),
+        FakePortal::signed_in(true),
+    )
+    .await;
+    assert!(after.contains(">New post</button>"), "{after}");
+}
+
+/// Item 9: two quick replies on a thread: each box shows its own request's
+/// load, and the older load answering last doesn't replace the thread the
+/// newer one drew. A pill replaced by the "you have a comment" note gives
+/// up its claim on the focus
+#[tokio::test]
+async fn each_box_shows_its_own_reload_and_the_newest_wins() {
+    let under = ReplyTarget {
+        post: fixtures::post().id,
+        parent: Some(fixtures::comment().id),
+    };
+    let portal = FakePortal::signed_in(true);
+    let mut h = Harness::reloadable(&portal, thread_with_comment).await;
+    let first = next_load();
+    let second = next_load();
+    typed(&mut h, "first").await;
+    send(&h);
+    h.settle().await;
+    h.act(|| controls::reply(under).open());
+    h.settle().await;
+    h.act(|| controls::reply(under).input("second".into()));
+    h.act(|| controls::reply(under).send());
+    h.settle().await;
+    assert_eq!(LOADED.with(|l| l.get()), 2);
+    // The newer load fails; the older answers after it with a thread
+    second.send(ThreadLoad::Failed("offline".into())).unwrap();
+    let html = h.settle().await;
+    assert_eq!(
+        html.matches("couldn&#39;t be loaded again").count()
+            + html.matches("couldn't be loaded again").count(),
+        1,
+        "only the second box's: {html}"
+    );
+    let mut stale = with_comment();
+    stale.post.title = "An older answer".into();
+    first.send(ThreadLoad::Loaded(Box::new(stale))).unwrap();
+    let html = h.settle().await;
+    assert!(!html.contains("An older answer"), "the newest wins: {html}");
+
+    // The note replacing the pill clears its focus claim
+    let portal = FakePortal::signed_in(true);
+    let mut h = Harness::reloadable(&portal, thread_page).await;
+    let load = next_load();
+    typed(&mut h, "mine").await;
+    send(&h);
+    h.settle().await;
+    let mut read = fixtures::post_with_comments();
+    let poster = fixtures::portal_session(true).poster.unwrap();
+    read.comments.push(crate::responses::CommentResponse {
+        id: crate::ui::test_portal::created_comment(),
+        agent_id: poster.id,
+        agent_name: Some(poster.name),
+        ..fixtures::comment()
+    });
+    load.send(ThreadLoad::Loaded(Box::new(read))).unwrap();
+    let html = h.settle().await;
+    assert!(html.contains("You have a comment on this post"), "{html}");
+    let refocus = h.act(|| *controls::reply(on_post()).refocus.peek());
+    assert!(!refocus, "nothing left to take the focus back");
+}
+
+/// Item 10: one reply per poster per comment, as one top-level comment
+/// per post: under a comment the poster already answered, a note and a
+/// link instead of "Reply"; every other comment still offers it
+#[tokio::test]
+async fn a_poster_who_replied_to_a_comment_is_told() {
+    fn page() -> Element {
+        let mut read = with_comment();
+        let poster = fixtures::portal_session(true).poster.unwrap();
+        let parent = read.comments[0].id;
+        read.comments.push(crate::responses::CommentResponse {
+            id: CommentId::new(),
+            parent_comment_id: Some(parent),
+            agent_id: poster.id,
+            agent_name: Some(poster.name),
+            ..fixtures::comment()
+        });
+        ThreadIsland(ThreadPage::loaded(read))
+    }
+    let portal = FakePortal::signed_in(true);
+    let mut h = Harness::new(&portal, page).await;
+    let html = h.settle().await;
+    assert_eq!(
+        html.matches("You replied to this comment").count(),
+        1,
+        "{html}"
+    );
+    let comments = with_comment().comments.len() + 1;
+    assert_eq!(
+        html.matches(">Reply</button>").count(),
+        comments - 1,
+        "{html}"
+    );
+    assert!(html.contains(">Write a comment</button>"), "{html}");
 }

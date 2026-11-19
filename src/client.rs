@@ -115,19 +115,23 @@ pub enum Error {
 }
 
 /// The text of a non-success body: the message of Agora's plain
-/// `{"error": "..."}` envelope, or the body as sent. A body with more
-/// fields than the message (a suspension's dates, an appeal's credits, a
-/// field a newer server added) is shown whole, so nothing in it is lost:
-/// the envelope must serialize back to exactly what was parsed.
+/// `{"error": "..."}` envelope, or the body as sent.
+///
+/// The plain envelope is read leniently: a code this version doesn't know
+/// ([`RefusalCode::Unknown`](crate::errors::RefusalCode::Unknown)) or a
+/// field a newer server added is ignored, and the message alone is shown
+/// (0.171.0; before, any field or code this version didn't know showed the
+/// raw JSON). The bodies that carry more than a message (a suspension's
+/// links, an export's retry time, an appeal filing's problems or credits)
+/// are shown whole, so nothing in them is lost; so is one whose `error` is
+/// such a body's code but which this version can't read as that body (a
+/// newer server's changed shape), rather than the bare code.
 fn status_body(body: &str) -> std::borrow::Cow<'_, str> {
-    let Ok(sent) = serde_json::from_str::<serde_json::Value>(body) else {
-        return body.into();
-    };
-    match serde_json::from_value::<crate::responses::ErrorResponse>(
-        sent.clone(),
-    ) {
-        Ok(plain)
-            if serde_json::to_value(&plain).ok().as_ref() == Some(&sent) =>
+    use crate::errors::{AccountSuspended, ApiErrorBody, RateLimited};
+    match serde_json::from_str::<ApiErrorBody>(body) {
+        Ok(ApiErrorBody::Plain(plain))
+            if plain.error != AccountSuspended::CODE
+                && plain.error != RateLimited::CODE =>
         {
             plain.error.into()
         }
@@ -1986,11 +1990,34 @@ mod tests {
                 .to_string(),
             "HTTP 404 Not Found: no governance entry with id GOV-2026-0099",
         );
-        // Anything more than the message is shown as sent.
-        let extended = r#"{"error":"suspended","until":"2026-11-01"}"#;
+        // A field or a code this version doesn't know (a newer server's)
+        // is ignored: the message alone, never the raw JSON
+        for newer in [
+            r#"{"error":"Refused for a newer reason.","code":"a_code_from_later"}"#,
+            r#"{"error":"Refused for a newer reason.","until":"2026-11-01"}"#,
+            r#"{"error":"Refused for a newer reason.","code":"a_code_from_later","until":"2026-11-01","detail":{"n":1}}"#,
+            r#"{"error":"Refused for a newer reason.","code":"already_replied"}"#,
+        ] {
+            assert_eq!(
+                status(newer).to_string(),
+                "HTTP 404 Not Found: Refused for a newer reason.",
+                "{newer}"
+            );
+        }
+        // A body that carries more than a message is shown whole: a
+        // suspension's links matter to the reader
+        let ban =
+            serde_json::to_string(&crate::fixtures::suspension()).unwrap();
         assert_eq!(
-            status(extended).to_string(),
-            format!("HTTP 404 Not Found: {extended}"),
+            status(&ban).to_string(),
+            format!("HTTP 404 Not Found: {ban}")
+        );
+        // So is one whose `error` is a richer body's code but which this
+        // version can't read as that body: not the bare code
+        let changed = r#"{"error":"account_suspended","message":"Suspended.","new_shape":true}"#;
+        assert_eq!(
+            status(changed).to_string(),
+            format!("HTTP 404 Not Found: {changed}")
         );
         assert_eq!(
             status("<html>bad gateway</html>").to_string(),

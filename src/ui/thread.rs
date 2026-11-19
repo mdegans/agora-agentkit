@@ -784,50 +784,62 @@ pub fn ThreadIsland(page: ThreadPage) -> Element {
     let go_to = super::route::use_go_to();
     let posted = super::compose::CommentPosted::use_new();
     use_context_provider(|| posted);
-    let top_level = use_memo(move || match &*thread.read() {
-        ThreadLoad::Loaded(read) => super::compose::TopLevel::of(read),
+    let authors = use_memo(move || match &*thread.read() {
+        ThreadLoad::Loaded(read) => super::compose::ThreadAuthors::of(read),
         _ => Vec::new(),
     });
-    use_context_provider(|| super::compose::TopLevel(top_level));
+    use_context_provider(|| super::compose::ThreadAuthors(authors));
     let pending = arrive_at.clone();
+    // A box asked for the thread again: after its reply, or to check
+    // whether a send went through. The newest request wins: an older load
+    // answering after it is dropped (the newer one draws the thread)
     use_effect(move || {
-        let Some(id) = posted.posted() else { return };
+        let Some(ask) = posted.asked() else { return };
         let Some(reload) = reposted.clone() else {
             return;
         };
         let pending = pending.clone();
-        posted.set_reload(AfterReply::Loading);
+        posted.set_reload(ask.id, AfterReply::Loading);
+        let id = ask.arrive;
         spawn(async move {
-            let after = match reload.load().await {
+            let loaded = reload.load().await;
+            if !posted.is_newest(ask.id) {
+                // Superseded, not lost: the newer request's load draws the
+                // thread, and its box shows what came of it
+                return;
+            }
+            let after = match loaded {
                 loaded @ ThreadLoad::Loaded(_) => {
-                    pending.set(Some(id));
+                    if let Some(id) = id {
+                        pending.set(Some(id));
+                    }
                     thread.set(loaded);
                     AfterReply::Done
                 }
                 ThreadLoad::Pending => {
                     tracing::warn!(
-                        comment = %id,
-                        "the thread's load after a reply came back pending; keeping the one drawn"
+                        comment = ?id,
+                        "the thread's load after a reply or check came back pending; keeping the one drawn"
                     );
                     AfterReply::Failed("no answer yet".to_owned())
                 }
                 ThreadLoad::Failed(e) => {
                     tracing::warn!(
-                        comment = %id,
+                        comment = ?id,
                         error = %e,
-                        "the thread couldn't be loaded again after a reply; keeping the one drawn"
+                        "the thread couldn't be loaded again after a reply or check; keeping the one drawn"
                     );
                     AfterReply::Failed(e)
                 }
                 ThreadLoad::NotFound => {
                     tracing::warn!(
-                        comment = %id,
-                        "the thread was not found after a reply; keeping the one drawn"
+                        comment = ?id,
+                        "the thread was not found after a reply or check; keeping the one drawn"
                     );
                     AfterReply::Failed(POST_NOT_FOUND.to_owned())
                 }
             };
-            posted.set_reload(after);
+            posted.set_reload(ask.id, after);
         });
     });
     use_effect(move || {

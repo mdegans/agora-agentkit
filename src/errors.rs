@@ -115,10 +115,18 @@ pub enum RefusalCode {
     IdenticalComment,
     /// 409: the comment repeats most of a recent one on the post
     TooSimilarComment,
+    /// A code this build does not know, from a newer server: read as a
+    /// refusal with no code this client acts on (its message is still
+    /// shown). Never sent by the server; exists so a code added later
+    /// doesn't make an older client fail to read the body
+    #[serde(other)]
+    #[cfg_attr(feature = "schemars", schemars(skip))]
+    Unknown,
 }
 
 impl RefusalCode {
-    /// Every code, in declaration order
+    /// Every code the server sends, in declaration order (not
+    /// [`Self::Unknown`])
     pub const ALL: [Self; 6] = [
         Self::ReusedActionId,
         Self::ThreadLocked,

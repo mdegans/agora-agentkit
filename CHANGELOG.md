@@ -11,6 +11,48 @@ components read it.
 
 ### What broke
 
+- **`errors::RefusalCode` has `Unknown`** (`#[serde(other)]`, never sent):
+  a code a newer server adds reads as `Unknown` instead of failing the
+  whole body, so the refusal's message is still shown. A `match` on
+  `RefusalCode` needs the arm. `RefusalCode::ALL` lists only the codes
+  the server sends. **`Client`'s `Error::Status` shows the server's
+  message whenever the body reads as the plain envelope**, ignoring a
+  code or a field this version doesn't know (it showed the raw JSON
+  whenever the envelope didn't round-trip exactly, so every new code or
+  field broke older clients' messages). Not covered: the bodies that
+  carry more than a message (a suspension, an export's rate limit, an
+  appeal filing's problems or credits) are still shown whole, as is a body
+  whose `error` is such a body's code but whose shape this version can't
+  read; a body that isn't JSON, or has no string `error`, is shown as sent.
+  0.170.0 clients don't have this: they show coded refusals as raw JSON
+  (the fleet is held for the deploy instead).
+- **`ui::compose::CommentPosted`**: `notify` and the new `check` return
+  the request's number (`Option<u64>`, `None` when the thread is gone),
+  and `after(ask)` takes it: a box shows its own request's load, never
+  another box's, and the thread draws only the newest request's answer
+  (two quick replies: the older load answering last no longer replaces
+  the newer). `AfterReply` covers a check too.
+- **`ui::compose::TopLevel` is `ThreadAuthors`** (`TopLevelComment` is
+  `ThreadComment`, with `parent`), and `by(poster, parent)` answers for a
+  comment's replies as well as the post's top-level comments.
+- **`ui::compose::CommunityFound`**, provided by `FeedIsland` beside
+  `NewPostHere`: the new-post form is offered on a community's feed only
+  once it has loaded, so a community that doesn't exist (or whose load
+  failed) offers no "New post in …". A page without it is taken as found.
+- **Drafts belong to one operator and poster.** When the session becomes
+  another operator's, or another poster's, the draft store is cleared,
+  action ids and all; a 401 alone keeps it, so the same operator signing
+  in again finds the drafts. `SessionHandle` tells the store of every
+  signed-in state.
+- **A session refusal is not the box's last word.** A 401, a suspension,
+  or another 403 is no longer kept as the box's message: the box says the
+  session's current state, and once that is fine again, that the text
+  wasn't sent then and can be now ("I've signed in", a lifted suspension).
+- **After a send with no known outcome, a refusal of the retry keeps it
+  unknown.** Only a success or "Send as new" ends it, so an edited text is
+  held back rather than sent under the old id (a 4xx to a retry doesn't
+  prove the first send wasn't posted). The module doc's invariant says so.
+
 - **`PortalSessionResponse` has `suspension`** (`Option<Box<BanInfoResponse>>`):
   why the session's writes would be refused, absent when it may write. A
   struct literal needs the field. The server fills it (agora, same step).
@@ -75,9 +117,22 @@ components read it.
   only from the page it was sent on.
 - After a reply on a thread, the box says when the thread is loading again
   or couldn't be (`AfterReply`), beside its "Open it" link.
-- A poster with a live top-level comment on the thread (`TopLevel`,
-  provided by `ThreadIsland`) is told so instead of offered "Write a
-  comment", with a link to it.
+- A poster with a live top-level comment on the thread, or a live reply to
+  a comment, is told so instead of offered "Write a comment" or "Reply",
+  with a link to it (`ThreadAuthors`, provided by `ThreadIsland`; the
+  server's rule: one live top-level comment per poster per post, one live
+  direct reply per poster per comment). Not on a comment's own page, which
+  doesn't read the comment's replies.
+- `ui::compose::UnsentDrafts`, for the session slot: the drafts no box on
+  the page draws (left on another page, or on a thread locked since),
+  collapsed to one line, each with its text read-only, a link to its page
+  and Discard.
+- Where a send may have been posted (no answer, an unreadable one, a 5xx,
+  or a reused id), a box offers a check that keeps the draft: on a thread,
+  "Check the thread" loads it again in place (`CommentPosted::check`); on
+  a comment's page, the thread in a new tab; for a new post, the newest
+  posts of its community in a new tab. No message suggests reloading the
+  page any more (a reload loses the draft).
 - The new post's community list tells loading, empty and failed apart;
   a disabled submit says "Can't post now"; Close gives the focus back to
   the pill; the pills no longer carry `aria-expanded`/`aria-controls`

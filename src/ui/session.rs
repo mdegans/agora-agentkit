@@ -188,9 +188,9 @@ impl ApiError {
                 format!("Agora refused it: {message}")
             }
             Self::Decode(detail) => format!(
-                "Agora's answer couldn't be read ({detail}). It may have been \
-                 posted: check the page before sending it again (sent again \
-                 unchanged, it can't post twice)."
+                "Agora's answer couldn't be read ({detail}), so it may or may \
+                 not have been posted. Your text is kept here; sending it again \
+                 unchanged can't post it twice."
             ),
         }
     }
@@ -217,11 +217,13 @@ fn refusal_for_a_person(code: RefusalCode) -> Option<&'static str> {
         ),
         RefusalCode::ReusedActionId => Some(
             "This draft was sent before and has changed since, so it can't \
-             go under that send again. Reload the page to see whether the \
-             first went through, or send this as new (if it did, both will \
-             show). Your text is kept here.",
+             go under that send again. Check whether the first went through, \
+             or send this as new (if it did, both will show). Your text is \
+             kept here.",
         ),
-        RefusalCode::IdenticalComment | RefusalCode::TooSimilarComment => None,
+        RefusalCode::IdenticalComment
+        | RefusalCode::TooSimilarComment
+        | RefusalCode::Unknown => None,
     }
 }
 
@@ -494,6 +496,10 @@ pub struct SessionHandle {
     /// it, so it can't cancel a refresh in flight.
     generation: Signal<u64>,
     portal: CopyValue<Rc<dyn Portal>>,
+    /// The compose drafts, told of every signed-in session the state
+    /// becomes, so another operator's (or poster's) session never finds
+    /// the last one's text ([`Drafts::signed_in`](super::compose::Drafts))
+    drafts: super::compose::Drafts,
 }
 
 impl fmt::Debug for SessionHandle {
@@ -503,13 +509,17 @@ impl fmt::Debug for SessionHandle {
 }
 
 impl SessionHandle {
-    /// A handle, its state loading, owned by the root scope. Call it in
-    /// the root's scope
-    fn new_root(portal: Rc<dyn Portal>) -> Self {
+    /// A handle, its state loading, owned by the root scope, with the
+    /// drafts it tells of a change of session. Call it in the root's scope
+    fn new_root(
+        portal: Rc<dyn Portal>,
+        drafts: super::compose::Drafts,
+    ) -> Self {
         Self {
             state: Signal::new_in_scope(Session::Loading, ScopeId::ROOT),
             generation: Signal::new_in_scope(0, ScopeId::ROOT),
             portal: CopyValue::new_in_scope(portal, ScopeId::ROOT),
+            drafts,
         }
     }
 
@@ -557,8 +567,13 @@ impl SessionHandle {
         self.replace(next);
     }
 
-    /// Sets the state, if it changed (so readers don't redraw for nothing)
+    /// Sets the state, if it changed (so readers don't redraw for
+    /// nothing). A signed-in state is first shown to the drafts, which
+    /// are cleared if it is another operator's or poster's
     fn replace(self, next: Session) {
+        if let Session::SignedIn(signed_in) = &next {
+            self.drafts.signed_in(signed_in);
+        }
         if next != *self.state.peek() {
             let mut state = self.state;
             state.set(next);
@@ -620,8 +635,9 @@ impl SessionHandle {
 pub fn provide(dom: &VirtualDom, portal: impl Portal + 'static) {
     let portal: Rc<dyn Portal> = Rc::new(portal);
     dom.in_scope(ScopeId::ROOT, || {
-        provide_context(SessionHandle::new_root(portal.clone()));
-        provide_context(super::compose::Drafts::new_root(portal));
+        let drafts = super::compose::Drafts::new_root(portal.clone());
+        provide_context(SessionHandle::new_root(portal, drafts));
+        provide_context(drafts);
     });
 }
 

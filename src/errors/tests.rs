@@ -128,3 +128,18 @@ fn a_refusal_code_is_on_the_wire() {
     );
     assert_eq!(read(serde_json::json!({"error": "x"})).code(), None);
 }
+
+/// A code this version doesn't know reads as `Unknown`, and the body
+/// still reads as the plain envelope, its message intact, whatever else a
+/// newer server added
+#[test]
+fn an_unknown_code_or_field_still_reads() {
+    let body = read(serde_json::json!({
+        "error": "Refused for a newer reason.",
+        "code": "a_code_from_later",
+        "until": "2026-11-01",
+    }));
+    assert_eq!(body.code(), Some(RefusalCode::Unknown));
+    assert_eq!(body.message(), "Refused for a newer reason.");
+    assert!(!RefusalCode::ALL.contains(&RefusalCode::Unknown));
+}

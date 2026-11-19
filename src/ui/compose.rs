@@ -33,14 +33,36 @@
 //! **A retry can't post twice.** Each draft has one action id
 //! ([`OperatorActionId`]), kept until the server says it posted: the
 //! portal answers a repeat of the same id and body with its first answer
-//! and writes nothing again. A refused write (a 4xx) wrote nothing, so the
-//! same id may carry an edited text afterwards. After a send whose outcome
-//! is unknown ([`ApiError::outcome_unknown`]: no answer, one that couldn't
-//! be read, or any 5xx), only the same text is sent again under that id; a
-//! changed one is held back with a "Send as new" choice
-//! ([`must_resend_as_sent`]), since the server would refuse it under the
-//! old id and might post it twice under a new one. The server's refusal of
-//! a reused id ([`RefusalCode::ReusedActionId`]) offers the same choice.
+//! and writes nothing again. While no send under the id has had an unknown
+//! outcome, a refusal (a 4xx) wrote nothing and the id is still unused, so
+//! an edited text may go under it. Once a send's outcome is unknown
+//! ([`ApiError::outcome_unknown`]: no answer, one that couldn't be read, or
+//! any 5xx), only that text is sent under the id until a send succeeds or
+//! the person chooses "Send as new", whatever later sends are answered: a
+//! 4xx to a retry doesn't prove the first wasn't posted (the server checks
+//! some things before it looks the id up). A changed text is held back with
+//! the "Send as new" choice ([`must_resend_as_sent`]), since the server
+//! would refuse it under the old id and might post it twice under a new
+//! one. The server's refusal of a reused id
+//! ([`RefusalCode::ReusedActionId`]) offers the same choice. Wherever a
+//! send may have been posted, the box offers a way to check without
+//! leaving the page: on a thread, "Check the thread" loads it again in
+//! place (the box and its draft stay); on a comment's page or a feed, a
+//! link opens the thread or the newest posts in a new tab. Never a reload,
+//! which would lose the draft.
+//!
+//! **Drafts belong to one operator and poster.** When the session becomes
+//! another operator's, or another poster's, every draft is cleared, with
+//! its action id ([`Drafts`]); a 401 alone keeps them, so signing in again
+//! as the same operator finds them. Refusals that were about the session
+//! (signed out, suspended, a stale sign-in) are not kept as the box's
+//! last word once the session is fine again: the box says the current
+//! state, and that the text wasn't sent then.
+//!
+//! **A draft whose box isn't on its page is still reachable.**
+//! [`UnsentDrafts`], in the session slot, lists the drafts no box on this
+//! page draws (left on another page, or on a thread since locked), each
+//! with its text (read-only, to copy), a link to its page and Discard.
 //!
 //! **A write outlives its page, and touches nothing of it after.** A write
 //! runs on the root scope, so leaving the page doesn't abort a write the
@@ -59,7 +81,11 @@
 //!
 //! [`limits`]: crate::limits
 
-use std::{collections::HashMap, rc::Rc};
+use std::{
+    collections::HashMap,
+    rc::Rc,
+    sync::atomic::{AtomicU64, Ordering},
+};
 
 use dioxus::prelude::*;
 use dioxus_router::{NavigationTarget, RouterContext, try_router};
@@ -75,12 +101,15 @@ use super::{
 use crate::{
     enums::ProposalCategory,
     errors::RefusalCode,
-    ids::{AgentId, CommentId, ContentId, ContentTarget, OperatorActionId},
+    ids::{
+        AgentId, CommentId, ContentId, ContentTarget, OperatorActionId,
+        OperatorId,
+    },
     limits,
     links::AgoraLink,
     names::{AgentName, CommunityName},
     operator::{AgentRef, PortalCommentRequest, PortalPostRequest},
-    requests::{CreateCommentInput, CreatePostPayload},
+    requests::{CreateCommentInput, CreatePostPayload, GetFeedInput},
 };
 
 /// Where a new post goes, provided as context by a feed's root, so the
@@ -89,10 +118,25 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewPostHere(pub Option<CommunityName>);
 
-/// How a thread hears that one of its reply boxes has posted, and what it
-/// did about it: it loads the thread again and goes to the comment.
-/// Provided by the thread's root ([`ThreadIsland`]); a page without it (a
-/// comment's own page) opens the comment's page instead.
+/// Whether the feed's community exists, provided by a feed's root beside
+/// [`NewPostHere`]: the form is offered only once its feed has loaded (a
+/// community's page whose community doesn't exist, or whose load failed,
+/// offers no "New post in …"). The global feed's is always `true`. A page
+/// that provides none (a test's) is taken as found
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CommunityFound(pub Memo<bool>);
+
+/// How a thread hears that one of its reply boxes has posted, or wants it
+/// checked, and what it did about it: it loads the thread again in place
+/// (the boxes and their drafts stay), and after a post goes to the new
+/// comment. Provided by the thread's root ([`ThreadIsland`]); a page
+/// without it (a comment's own page) opens the comment's page instead, and
+/// offers the thread in a new tab to check.
+///
+/// Each request has a number, unique for the page's life; the thread
+/// draws the answer to the newest only (two quick replies: the older load
+/// answering last doesn't replace the newer), and a box shows the status of
+/// its own request ([`Self::after`]), never another box's.
 ///
 /// Signals, not a callback: the box's write answers on the root scope,
 /// possibly after the thread's page is gone, and a dropped signal refuses
@@ -101,22 +145,37 @@ pub struct NewPostHere(pub Option<CommunityName>);
 /// [`ThreadIsland`]: super::thread::ThreadIsland
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CommentPosted {
-    posted: Signal<Option<CommentId>>,
-    reload: Signal<AfterReply>,
+    asked: Signal<Option<Ask>>,
+    reload: Signal<Option<(u64, AfterReply)>>,
 }
 
-/// What the thread did after a reply was posted on it
+/// A request to load the thread again: its number, and the comment to go
+/// to once it is drawn (`None` for a check)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Ask {
+    pub(crate) id: u64,
+    pub(crate) arrive: Option<CommentId>,
+}
+
+/// A number no other request on this page has had
+fn next_ask() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// What the thread did after a box asked it to load again
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum AfterReply {
-    /// Nothing posted yet, or the client can't load the thread again
+    /// Nothing asked yet, the client can't load the thread again, or a
+    /// newer request has replaced this one
     #[default]
     Idle,
     /// Loading the thread again
     Loading,
-    /// The thread is drawn again, with the comment in it
+    /// The thread is drawn again, as the server has it now
     Done,
     /// The thread couldn't be loaded again: why, in words for a person
-    /// (the drawn thread stays, without the new comment)
+    /// (the drawn thread stays as it was)
     Failed(String),
 }
 
@@ -124,88 +183,117 @@ impl CommentPosted {
     /// The thread root's: owned by the calling component. A hook
     pub(crate) fn use_new() -> Self {
         Self {
-            posted: use_signal(|| None),
-            reload: use_signal(AfterReply::default),
+            asked: use_signal(|| None),
+            reload: use_signal(|| None),
         }
     }
 
-    /// The comment a box posted last, subscribing the caller
-    pub(crate) fn posted(&self) -> Option<CommentId> {
-        *self.posted.read()
+    /// The newest request, subscribing the caller
+    pub(crate) fn asked(&self) -> Option<Ask> {
+        *self.asked.read()
     }
 
-    /// Records what the thread did after the reply
-    pub(crate) fn set_reload(&self, after: AfterReply) {
-        put(self.reload, after);
+    /// Whether `ask` is still the newest request
+    pub(crate) fn is_newest(&self, ask: u64) -> bool {
+        self.asked.peek().is_some_and(|a| a.id == ask)
     }
 
-    /// Tells the thread `id` was posted, if the thread is still there;
-    /// `false` when it is gone
-    pub fn notify(&self, id: CommentId) -> bool {
-        put(self.posted, Some(id))
+    /// Records what the thread did for request `ask`
+    pub(crate) fn set_reload(&self, ask: u64, after: AfterReply) {
+        put(self.reload, Some((ask, after)));
     }
 
-    /// What the thread did after the reply; [`AfterReply::Idle`] if it is
-    /// gone
-    pub fn after(&self) -> AfterReply {
+    /// Tells the thread `id` was posted, if the thread is still there: the
+    /// request's number, `None` when the thread is gone
+    pub fn notify(&self, id: CommentId) -> Option<u64> {
+        self.ask(Some(id))
+    }
+
+    /// Asks the thread to load again in place, to see whether a send went
+    /// through: the request's number, `None` when the thread is gone
+    pub fn check(&self) -> Option<u64> {
+        self.ask(None)
+    }
+
+    fn ask(&self, arrive: Option<CommentId>) -> Option<u64> {
+        let id = next_ask();
+        put(self.asked, Some(Ask { id, arrive })).then_some(id)
+    }
+
+    /// What the thread did for request `ask`: [`AfterReply::Idle`] once a
+    /// newer request has replaced it, or if the thread is gone
+    pub fn after(&self, ask: u64) -> AfterReply {
         self.reload
             .try_read()
-            .map(|after| after.clone())
+            .ok()
+            .and_then(|r| {
+                r.as_ref()
+                    .filter(|(id, _)| *id == ask)
+                    .map(|(_, after)| after.clone())
+            })
             .unwrap_or_default()
     }
 }
 
-/// The thread's top-level comments by author, provided by its root, so a
-/// "Write a comment" box knows whether the viewer's poster already has one
-/// (the server allows one each, and refuses a second). Built from the
-/// thread as drawn: its comments and its stubs, which together list every
-/// live comment
+/// Who wrote each live comment of the thread, provided by its root, so a
+/// box knows whether the viewer's poster has already answered what it
+/// answers: the server allows one live top-level comment per poster per
+/// post, and one live direct reply per poster per comment
+/// (`existing_reply_to_parent`: removed comments don't count), and refuses
+/// another. Built from the thread as drawn: its comments and its stubs,
+/// which together list every live comment
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct TopLevel(pub(crate) Memo<Vec<TopLevelComment>>);
+pub struct ThreadAuthors(pub(crate) Memo<Vec<ThreadComment>>);
 
-/// One live top-level comment: its id and who wrote it (a stub has only
-/// the author's name)
+/// One live comment: its id, what it answers, and who wrote it (a stub has
+/// only the author's name)
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TopLevelComment {
+pub struct ThreadComment {
     pub id: CommentId,
+    /// `None` for a top-level comment
+    pub parent: Option<CommentId>,
     pub agent_id: Option<AgentId>,
     pub agent_name: Option<AgentName>,
 }
 
-impl TopLevel {
-    /// The live top-level comments of `read`, a thread
+impl ThreadAuthors {
+    /// The live comments of `read`, a thread
     pub fn of(
         read: &crate::responses::PostWithCommentsResponse,
-    ) -> Vec<TopLevelComment> {
-        let full = read
-            .comments
-            .iter()
-            .filter(|c| c.parent_comment_id.is_none() && c.deleted_at.is_none())
-            .map(|c| TopLevelComment {
-                id: c.id,
-                agent_id: Some(c.agent_id),
-                agent_name: c.agent_name.clone(),
-            });
-        let stubs = read
-            .comment_stubs
-            .iter()
-            .filter(|s| s.parent_comment_id.is_none())
-            .map(|s| TopLevelComment {
-                id: s.id,
-                agent_id: None,
-                agent_name: s.agent_name.clone(),
-            });
+    ) -> Vec<ThreadComment> {
+        let full =
+            read.comments
+                .iter()
+                .filter(|c| c.deleted_at.is_none())
+                .map(|c| ThreadComment {
+                    id: c.id,
+                    parent: c.parent_comment_id,
+                    agent_id: Some(c.agent_id),
+                    agent_name: c.agent_name.clone(),
+                });
+        let stubs = read.comment_stubs.iter().map(|s| ThreadComment {
+            id: s.id,
+            parent: s.parent_comment_id,
+            agent_id: None,
+            agent_name: s.agent_name.clone(),
+        });
         full.chain(stubs).collect()
     }
 
-    /// `poster`'s top-level comment, if the thread has one
-    pub fn by(&self, poster: &AgentRef) -> Option<CommentId> {
+    /// `poster`'s answer to `parent` (`None`: its top-level comment), if
+    /// the thread has one
+    pub fn by(
+        &self,
+        poster: &AgentRef,
+        parent: Option<CommentId>,
+    ) -> Option<CommentId> {
         self.0
             .read()
             .iter()
             .find(|c| {
-                c.agent_id == Some(poster.id)
-                    || c.agent_name.as_ref() == Some(&poster.name)
+                c.parent == parent
+                    && (c.agent_id == Some(poster.id)
+                        || c.agent_name.as_ref() == Some(&poster.name))
             })
             .map(|c| c.id)
     }
@@ -418,6 +506,11 @@ fn open(router: Option<RouterContext>, link: AgoraLink) {
 enum Said {
     /// Refused or failed: the words for a person
     Failed(String),
+    /// Refused for the session's state at the time (signed out, suspended,
+    /// a sign-in the server didn't accept): not sent then. Shown only once
+    /// the session no longer says so itself ([`blocked`]), so it never
+    /// repeats a state that has changed since
+    NotSentThen(NotSent),
     /// Not sent: the last send's outcome is unknown, so it may have been
     /// posted, and the text has changed since ([`must_resend_as_sent`])
     Unsure,
@@ -425,19 +518,60 @@ enum Said {
     /// ([`RefusalCode::ReusedActionId`]); the words for a person, with the
     /// "Send as new" choice
     Reused(String),
-    /// Posted: where it is, and the server's advice if it gave any
+    /// Posted: where it is, the server's advice if it gave any, and the
+    /// thread's load after it (its [`CommentPosted`] request), if any
     Posted {
         link: Box<AgoraLink>,
         hint: Option<String>,
+        reload: Option<u64>,
     },
+}
+
+/// Why a send was refused for the session's state at the time
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NotSent {
+    SignedOut,
+    Suspended,
+    /// A 403 that isn't a suspension: the request's Origin or CSRF token
+    /// (say after signing in again in another tab)
+    SignInRefused,
+}
+
+impl NotSent {
+    fn words(self) -> &'static str {
+        match self {
+            Self::SignedOut => {
+                "It wasn't sent, as you weren't signed in then. You can send \
+                 it now."
+            }
+            Self::Suspended => {
+                "It wasn't sent, as posting was suspended then. You can send \
+                 it now."
+            }
+            Self::SignInRefused => {
+                "It wasn't sent: Agora didn't accept this page's sign-in. Try \
+                 sending it again; if it is refused again, sign in again in \
+                 another tab."
+            }
+        }
+    }
 }
 
 impl Said {
     /// What a failed write's error means for the box
     fn failed(e: &ApiError) -> Self {
-        match e.code() {
-            Some(RefusalCode::ReusedActionId) => Self::Reused(e.for_a_person()),
-            _ => Self::Failed(e.for_a_person()),
+        match e {
+            ApiError::SignedOut(_) => Self::NotSentThen(NotSent::SignedOut),
+            _ if e.suspension().is_some() => {
+                Self::NotSentThen(NotSent::Suspended)
+            }
+            ApiError::Forbidden(_) => Self::NotSentThen(NotSent::SignInRefused),
+            _ => match e.code() {
+                Some(RefusalCode::ReusedActionId) => {
+                    Self::Reused(e.for_a_person())
+                }
+                _ => Self::Failed(e.for_a_person()),
+            },
         }
     }
 }
@@ -475,6 +609,8 @@ struct Draft<T> {
     /// A send is in flight
     sending: bool,
     said: Option<Said>,
+    /// The box's last "Check the thread" ([`CommentPosted::check`])
+    checking: Option<u64>,
 }
 
 impl<T> Draft<T> {
@@ -485,6 +621,20 @@ impl<T> Draft<T> {
             unsure: None,
             sending: false,
             said: None,
+            checking: None,
+        }
+    }
+
+    /// A send's answer: in flight no more, and what is still unsure. A
+    /// success settles it; an unknown outcome makes `sent` the text the id
+    /// is held to; a refusal keeps whatever was unsure before (a 4xx to a
+    /// retry doesn't prove the first send wasn't posted)
+    fn answered<A>(&mut self, sent: String, answer: &Result<A, ApiError>) {
+        self.sending = false;
+        match answer {
+            Ok(_) => self.unsure = None,
+            Err(e) if e.outcome_unknown() => self.unsure = Some(sent),
+            Err(_) => {}
         }
     }
 }
@@ -497,6 +647,51 @@ impl<T: DraftText> Draft<T> {
     }
 }
 
+/// Which draft: a reply's target, or the feed a new post was started on
+/// (`None` for the global feed)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DraftKey {
+    Reply(ReplyTarget),
+    Post(Option<CommunityName>),
+}
+
+impl DraftKey {
+    /// The page its box is drawn on: a reply to a comment on the comment's
+    /// page (a thread may show that comment as a stub), a top-level comment
+    /// on its thread, a new post on its feed
+    fn page(&self) -> AgoraLink {
+        match self {
+            Self::Reply(ReplyTarget {
+                parent: Some(id), ..
+            }) => AgoraLink::comment(*id),
+            Self::Reply(ReplyTarget { post, parent: None }) => {
+                AgoraLink::post(*post)
+            }
+            Self::Post(community) => AgoraLink::Feed(GetFeedInput {
+                community: community.clone(),
+                ..GetFeedInput::default()
+            }),
+        }
+    }
+
+    /// What it is, for the list of drafts
+    fn what(&self) -> String {
+        match self {
+            Self::Reply(ReplyTarget {
+                parent: Some(_), ..
+            }) => "A reply to a comment".to_owned(),
+            Self::Reply(ReplyTarget { parent: None, .. }) => {
+                "A comment on a post".to_owned()
+            }
+            Self::Post(Some(c)) => format!("A new post in {}", c.canonical()),
+            Self::Post(None) => "A new post".to_owned(),
+        }
+    }
+}
+
+/// Whose drafts the store holds: the operator and its poster
+type Owner = (OperatorId, Option<AgentId>);
+
 /// Every draft on the site, kept at the root, so a box that closes or a
 /// page that is left doesn't lose one: reply drafts by what they answer,
 /// new posts by the feed they were started on (`None` for the global
@@ -506,7 +701,11 @@ impl<T: DraftText> Draft<T> {
 /// subscribes to its draft alone, and a write answering after its page
 /// was left still has a draft to write to). They are created when a box
 /// is first opened and kept for the page's life: one small entry for each
-/// box opened.
+/// box opened, until the session becomes another operator's or poster's,
+/// which clears them all ([`Self::signed_in`]).
+///
+/// The store also knows which drafts a box on this page draws (each box
+/// says so while it is mounted), so [`UnsentDrafts`] can list the others.
 #[derive(Clone, Copy)]
 pub struct Drafts {
     replies: CopyValue<HashMap<ReplyTarget, Signal<Draft<String>>>>,
@@ -514,6 +713,13 @@ pub struct Drafts {
     /// What the portal was last told ([`Portal::drafts_unsent`])
     told: CopyValue<Option<bool>>,
     portal: CopyValue<Rc<dyn Portal>>,
+    /// The session the drafts were written in
+    owner: CopyValue<Option<Owner>>,
+    /// The unsent drafts, as last counted ([`Self::report`]): what
+    /// [`UnsentDrafts`] redraws on
+    unsent: Signal<Vec<DraftKey>>,
+    /// How many boxes on this page draw each draft
+    drawn: Signal<HashMap<DraftKey, u32>>,
 }
 
 impl PartialEq for Drafts {
@@ -536,6 +742,27 @@ impl Drafts {
             posts: CopyValue::new_in_scope(HashMap::new(), ScopeId::ROOT),
             told: CopyValue::new_in_scope(None, ScopeId::ROOT),
             portal: CopyValue::new_in_scope(portal, ScopeId::ROOT),
+            owner: CopyValue::new_in_scope(None, ScopeId::ROOT),
+            unsent: Signal::new_in_scope(Vec::new(), ScopeId::ROOT),
+            drawn: Signal::new_in_scope(HashMap::new(), ScopeId::ROOT),
+        }
+    }
+
+    /// The session is now `signed_in`'s: if the drafts were written in
+    /// another operator's session, or for another poster, they are all
+    /// cleared, action ids and all, so one operator's text can never be
+    /// sent as another's. A 401 doesn't come here (no one is signed in),
+    /// so the same operator signing in again keeps them
+    pub(crate) fn signed_in(&self, signed_in: &SignedIn) {
+        let now = (signed_in.operator().id, signed_in.poster().map(|p| p.id));
+        let mut owner = self.owner;
+        let before = owner.replace(Some(now));
+        if before.is_some_and(|before| before != now) {
+            let mut replies = self.replies;
+            let mut posts = self.posts;
+            replies.write().clear();
+            posts.write().clear();
+            self.report();
         }
     }
 
@@ -581,25 +808,216 @@ impl Drafts {
         draft
     }
 
-    /// Whether any draft would be lost by leaving the page
-    pub fn unsent(&self) -> bool {
+    /// The drafts leaving the page would lose, in a stable order
+    fn unsent_keys(&self) -> Vec<DraftKey> {
         let replies = self.replies.peek();
         let posts = self.posts.peek();
-        replies
-            .values()
-            .any(|d| d.try_peek().is_ok_and(|d| d.unsent()))
-            || posts
-                .values()
-                .any(|d| d.try_peek().is_ok_and(|d| d.unsent()))
+        let mut keys: Vec<DraftKey> = replies
+            .iter()
+            .filter(|(_, d)| d.try_peek().is_ok_and(|d| d.unsent()))
+            .map(|(target, _)| DraftKey::Reply(*target))
+            .chain(
+                posts
+                    .iter()
+                    .filter(|(_, d)| d.try_peek().is_ok_and(|d| d.unsent()))
+                    .map(|(here, _)| DraftKey::Post(here.clone())),
+            )
+            .collect();
+        keys.sort_by_cached_key(|k| k.page().site_path());
+        keys
     }
 
-    /// Tells the client whether any draft is unsent, when that changed
+    /// Whether any draft would be lost by leaving the page
+    pub fn unsent(&self) -> bool {
+        !self.unsent_keys().is_empty()
+    }
+
+    /// Recounts the unsent drafts, and tells the client whether there are
+    /// any, when that changed
     fn report(&self) {
-        let unsent = self.unsent();
+        let keys = self.unsent_keys();
+        let any = !keys.is_empty();
+        if *self.unsent.peek() != keys {
+            put(self.unsent, keys);
+        }
         let mut told = self.told;
-        if *told.peek() != Some(unsent) {
-            told.set(Some(unsent));
-            self.portal.peek().drafts_unsent(unsent);
+        if *told.peek() != Some(any) {
+            told.set(Some(any));
+            self.portal.peek().drafts_unsent(any);
+        }
+    }
+
+    /// A box drawing `key`'s draft was mounted (`true`) or dropped
+    fn drawn_here(&self, key: DraftKey, mounted: bool) {
+        change(self.drawn, |drawn| {
+            let count = drawn.entry(key.clone()).or_default();
+            match mounted {
+                true => *count += 1,
+                false => *count = count.saturating_sub(1),
+            }
+            if *count == 0 {
+                drawn.remove(&key);
+            }
+        });
+    }
+
+    /// Throws `key`'s draft away (a send in flight is kept: its answer is
+    /// on its way)
+    fn discard(&self, key: &DraftKey) {
+        match key {
+            DraftKey::Reply(target) => {
+                if let Some(draft) = self.reply(*target) {
+                    change(draft, |d| {
+                        if !d.sending {
+                            *d = Draft::new(String::new());
+                        }
+                    });
+                }
+            }
+            DraftKey::Post(here) => {
+                if let Some(draft) = self.post(here) {
+                    change(draft, |d| {
+                        if !d.sending {
+                            *d = Draft::new(PostDraft {
+                                community: std::mem::take(
+                                    &mut d.text.community,
+                                ),
+                                ..PostDraft::default()
+                            });
+                        }
+                    });
+                }
+            }
+        }
+        self.report();
+    }
+
+    /// `key`'s draft as the list shows it: its text, and whether a send is
+    /// in flight. Subscribes the caller to the draft
+    fn shown(&self, key: &DraftKey) -> Option<(String, bool)> {
+        match key {
+            DraftKey::Reply(target) => self.reply(*target).and_then(|d| {
+                d.try_read().ok().map(|d| (d.text.clone(), d.sending))
+            }),
+            DraftKey::Post(here) => self.post(here).and_then(|d| {
+                d.try_read().ok().map(|d| {
+                    let text =
+                        match (d.text.title.is_empty(), d.text.body.is_empty())
+                        {
+                            (false, false) => {
+                                format!("{}\n\n{}", d.text.title, d.text.body)
+                            }
+                            (false, true) => d.text.title.clone(),
+                            _ => d.text.body.clone(),
+                        };
+                    (text, d.sending)
+                })
+            }),
+        }
+    }
+}
+
+/// Tells the store that this component draws `key`'s draft, from its
+/// first render until it is dropped (or `key` becomes `None`). A hook
+fn use_drawn_here(drafts: Option<Drafts>, key: Option<DraftKey>) {
+    let mut said = use_signal(|| None::<DraftKey>);
+    let now = key.clone();
+    use_effect(use_reactive!(|now| {
+        let Some(drafts) = drafts else { return };
+        let before = said.peek().clone();
+        if before == now {
+            return;
+        }
+        if let Some(before) = before {
+            drafts.drawn_here(before, false);
+        }
+        if let Some(now) = now.clone() {
+            drafts.drawn_here(now, true);
+        }
+        said.set(now);
+    }));
+    use_drop(move || {
+        if let (Some(drafts), Ok(slot)) = (drafts, said.try_peek())
+            && let Some(key) = slot.clone()
+        {
+            drafts.drawn_here(key, false);
+        }
+    });
+}
+
+/// The drafts no box on this page draws, for the session slot: a quiet,
+/// collapsed line ("1 unsent draft isn't shown on this page"), opening to
+/// each one's kind, its text (read-only, to copy), a link to its page and
+/// Discard. Draws nothing when every unsent draft is drawn here, or where
+/// no client provided the store (the server)
+#[component]
+pub fn UnsentDrafts() -> Element {
+    let Some(drafts) = try_use_context::<Drafts>() else {
+        return rsx! {};
+    };
+    let drawn = drafts.drawn.read();
+    let listed: Vec<(DraftKey, String, bool)> = drafts
+        .unsent
+        .read()
+        .iter()
+        .filter(|key| !drawn.contains_key(*key))
+        .filter_map(|key| {
+            drafts
+                .shown(key)
+                .map(|(text, sending)| (key.clone(), text, sending))
+        })
+        .collect();
+    if listed.is_empty() {
+        return rsx! {};
+    }
+    let summary = match listed.len() {
+        1 => "1 unsent draft isn't shown on this page".to_owned(),
+        n => format!("{n} unsent drafts aren't shown on this page"),
+    };
+    rsx! {
+        div { class: "ui-compose ui-drafts",
+            details {
+                summary { class: "post-meta", "{summary}" }
+                p { class: "ui-note",
+                    "Kept in this tab only. A draft is listed here when its box isn't on this \
+                     page: it was started elsewhere, or its thread was locked or its comment \
+                     removed since, so it can't be sent. Copy its text from here if you want it."
+                }
+                ul { class: "ui-drafts-list",
+                    for (key , text , sending) in listed {
+                        li { key: "{key.page().site_path()}", class: "ui-drafts-item",
+                            div { class: "ui-actions",
+                                span { class: "ui-field-label", "{key.what()}" }
+                                super::route::To {
+                                    link: key.page(),
+                                    class: "ui-pill ui-pill-action",
+                                    "Open its page"
+                                }
+                                if sending {
+                                    span { class: "ui-note", role: "status", "Sending…" }
+                                } else {
+                                    button {
+                                        class: "ui-pill ui-pill-muted",
+                                        r#type: "button",
+                                        onclick: {
+                                            let key = key.clone();
+                                            move |_| drafts.discard(&key)
+                                        },
+                                        "Discard"
+                                    }
+                                }
+                            }
+                            textarea {
+                                class: "ui-input ui-textarea",
+                                readonly: true,
+                                rows: "3",
+                                aria_label: "{key.what()}: its text",
+                                value: "{text}",
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -650,7 +1068,15 @@ impl ReplyControls {
             d.action = OperatorActionId::new();
             d.unsure = None;
             d.said = None;
+            d.checking = None;
         });
+    }
+
+    /// "Check the thread": the thread loads again in place, the box and
+    /// its draft staying
+    fn check(self) {
+        let ask = self.posted_here.and_then(|thread| thread.check());
+        change(self.draft(), |d| d.checking = ask);
     }
 
     /// The form was submitted: send the draft, unless a send is in flight,
@@ -707,22 +1133,25 @@ impl ReplyControls {
         answer: Result<crate::responses::WriteAck<CommentId>, ApiError>,
     ) {
         let drawn = alive(self.open);
+        // On a thread, it loads again and goes to the comment
+        let reload = match (&answer, self.posted_here) {
+            (Ok(ack), Some(thread)) => thread.notify(ack.id),
+            _ => None,
+        };
         change(draft, |d| {
-            d.sending = false;
-            d.unsure = match &answer {
-                Err(e) if e.outcome_unknown() => Some(sent),
-                _ => None,
-            };
+            d.answered(sent, &answer);
             d.said = Some(match &answer {
                 Ok(ack) => Said::Posted {
                     link: Box::new(AgoraLink::comment(ack.id)),
                     hint: None,
+                    reload,
                 },
                 Err(e) => Said::failed(e),
             });
             if answer.is_ok() {
                 d.text.clear();
                 d.action = OperatorActionId::new();
+                d.checking = None;
             }
         });
         self.drafts.report();
@@ -731,9 +1160,7 @@ impl ReplyControls {
             put(self.refocus, true);
         }
         match self.posted_here {
-            Some(thread) => {
-                thread.notify(ack.id);
-            }
+            Some(_) => {}
             // Only from the page the reply was sent on: someone who went
             // elsewhere stays there (the box says "Posted" when they're back)
             None if drawn => open(self.router, AgoraLink::comment(ack.id)),
@@ -763,10 +1190,13 @@ fn Reply(start_open: bool) -> Element {
     let drafts = try_use_context::<Drafts>();
     let target = use_context::<ReplyTarget>();
     let posted_here = try_use_context::<CommentPosted>();
-    let top_level = try_use_context::<TopLevel>();
+    let authors = try_use_context::<ThreadAuthors>();
     let router = try_router();
     let open_box = use_signal(|| start_open);
     let refocus = use_signal(|| false);
+    // Mounted, this box draws its draft (whatever the session): the list
+    // of drafts not shown on this page leaves it out
+    use_drawn_here(drafts, Some(DraftKey::Reply(target)));
 
     let (Some(handle), Some(drafts)) = (session, drafts) else {
         return rsx! {};
@@ -791,6 +1221,25 @@ fn Reply(start_open: bool) -> Element {
     let draft = draft.map(|d| d.read().clone());
     let has_draft = draft.as_ref().is_some_and(|d| d.text.typed());
     let sending = draft.as_ref().is_some_and(|d| d.sending);
+    // One live top-level comment per poster per post, and one live reply
+    // per poster per comment: a poster who has one is told so, not offered
+    // a box the server would refuse. Only where the thread is drawn (a
+    // comment's page doesn't read the comment's replies)
+    let yours = match (authors, writer(&state)) {
+        (Some(authors), Some(w)) => {
+            w.poster().and_then(|p| authors.by(p, target.parent))
+        }
+        _ => None,
+    };
+    // The note that then replaces the pill takes no focus: the pill's
+    // claim on it (after a post, or Close) is given up, or a pill drawn
+    // again later would take it unasked
+    let note = !open_box() && yours.is_some() && !has_draft && !sending;
+    use_effect(use_reactive!(|note| {
+        if note {
+            put(refocus, false);
+        }
+    }));
     if !can_write && !has_draft && !sending {
         return rsx! {};
     }
@@ -802,16 +1251,16 @@ fn Reply(start_open: bool) -> Element {
         Some(id) => format!("ui-reply-{id}"),
         None => format!("ui-comment-{}", target.post),
     };
-    // One top-level comment per poster per post: a poster who has one is
-    // told so, not offered a box the server would refuse
-    let yours = match (target.parent, top_level, writer(&state)) {
-        (None, Some(top), Some(w)) => w.poster().and_then(|p| top.by(p)),
-        _ => None,
-    };
     let said = draft.as_ref().and_then(|d| d.said.clone());
+    let unsure = draft.as_ref().is_some_and(|d| d.unsure.is_some());
+    let checking = draft.as_ref().and_then(|d| d.checking);
 
     if open_box() {
         let text = draft.map(|d| d.text).unwrap_or_default();
+        let check =
+            check_reply(posted_here, checking, target.post, move || {
+                controls.check()
+            });
         return rsx! {
             div { class: "ui-compose ui-compose-reply",
                 form {
@@ -830,6 +1279,9 @@ fn Reply(start_open: bool) -> Element {
                         handle,
                         state: state.clone(),
                         said,
+                        unsure,
+                        check,
+                        posted_here,
                         on_new: move |_| controls.send_as_new(),
                     }
                     div { class: "ui-actions",
@@ -846,18 +1298,26 @@ fn Reply(start_open: bool) -> Element {
         };
     }
     let posted = match said {
-        Some(Said::Posted { link, .. }) => Some(*link),
+        Some(Said::Posted { link, reload, .. }) => Some((*link, reload)),
         _ => None,
     };
-    let after = posted_here.map(|p| p.after()).unwrap_or_default();
+    let yours_words = match target.parent {
+        None => {
+            "You have a comment on this post, and each poster gets one. To say \
+             more, reply to a comment. "
+        }
+        Some(_) => {
+            "You replied to this comment, and each poster gets one reply per \
+             comment. To say more, reply to a newer comment. "
+        }
+    };
     rsx! {
         div { class: "ui-compose ui-compose-reply",
             div { class: "ui-actions",
                 match (yours, has_draft || sending) {
                     (Some(id), false) => rsx! {
                         p { class: "ui-note ui-compose-done", role: "note",
-                            "You have a comment on this post, and each poster gets one. To say \
-                             more, reply to a comment. "
+                            "{yours_words}"
                             super::route::To {
                                 link: AgoraLink::comment(id),
                                 class: "ui-pill ui-pill-action",
@@ -876,8 +1336,15 @@ fn Reply(start_open: bool) -> Element {
                                 (false, false) => rsx! { "{opener}" },
                             }
                         }
-                        if let (Some(link), None) = (posted, yours) {
-                            PostedNote { link, what: "Your comment is posted.", after }
+                        if let (Some((link, reload)), None) = (posted, yours) {
+                            PostedNote {
+                                link,
+                                what: "Your comment is posted.",
+                                after: reload
+                                    .zip(posted_here)
+                                    .map(|(ask, thread)| thread.after(ask))
+                                    .unwrap_or_default(),
+                            }
                         }
                     },
                 }
@@ -969,13 +1436,105 @@ fn CommentField(
     }
 }
 
+/// The way a reply box offers to check whether a send went through. On a
+/// thread: "Check the thread", which loads it again in place, and what
+/// that did. Elsewhere (a comment's page reads the comment, not its
+/// replies): the thread in a new tab, so this page and its draft stay
+fn check_reply(
+    thread: Option<CommentPosted>,
+    checking: Option<u64>,
+    post: crate::ids::PostId,
+    on_check: impl FnMut() + 'static,
+) -> Element {
+    let new_tab = AgoraLink::post(post).site_path();
+    let Some(thread) = thread else {
+        return rsx! {
+            p { class: "ui-note",
+                "To check, look in another tab: "
+                a {
+                    class: "ui-pill ui-pill-action",
+                    href: "{new_tab}",
+                    target: "_blank",
+                    rel: "noopener",
+                    "Open the thread in a new tab"
+                }
+            }
+        };
+    };
+    let after = checking.map(|ask| thread.after(ask)).unwrap_or_default();
+    let loading = after == AfterReply::Loading;
+    let mut on_check = on_check;
+    rsx! {
+        p { class: "ui-note", role: "status",
+            match &after {
+                AfterReply::Idle => rsx! {},
+                AfterReply::Loading => rsx! { "Checking the thread… " },
+                AfterReply::Done => rsx! {
+                    "The thread is now shown as Agora has it: if your text is in it, it \
+                     went through. "
+                },
+                AfterReply::Failed(why) => rsx! {
+                    "The thread couldn't be loaded again ({why}). "
+                    a {
+                        class: "ui-pill ui-pill-action",
+                        href: "{new_tab}",
+                        target: "_blank",
+                        rel: "noopener",
+                        "Open it in a new tab"
+                    }
+                    " "
+                },
+            }
+            button {
+                class: "ui-pill ui-pill-action",
+                r#type: "button",
+                disabled: loading,
+                onclick: move |_| on_check(),
+                "Check the thread"
+            }
+        }
+    }
+}
+
+/// The way the new-post form offers to check whether a send went through:
+/// the newest posts of the community it was sent to, in a new tab (a
+/// feed's page, newest first by default). Not in place: the page being
+/// shown may be another sort or page of the feed, and loading it again
+/// would show nothing either way
+fn check_post(sent_to: Option<CommunityName>) -> Element {
+    let feed = AgoraLink::Feed(GetFeedInput {
+        community: sent_to,
+        ..GetFeedInput::default()
+    })
+    .site_path();
+    rsx! {
+        p { class: "ui-note",
+            "To check, look in another tab: "
+            a {
+                class: "ui-pill ui-pill-action",
+                href: "{feed}",
+                target: "_blank",
+                rel: "noopener",
+                "Open the newest posts in a new tab"
+            }
+        }
+    }
+}
+
 /// Under a form: the session's problem when it can't send, and what the
-/// server last said
+/// server last said; where a send may have been posted, the way to check
 #[component]
 fn Feedback(
     handle: SessionHandle,
     state: Session,
     said: Option<Said>,
+    /// A send under the draft's action id had no known outcome
+    unsure: bool,
+    /// How to check whether it went through ([`check_reply`],
+    /// [`check_post`])
+    check: Element,
+    /// The thread's, for a reply posted on one
+    posted_here: Option<CommentPosted>,
     /// "Send as new": a new action id for the draft
     on_new: EventHandler,
 ) -> Element {
@@ -991,6 +1550,9 @@ fn Feedback(
             "Send as new"
         }
     };
+    // Whether the person may need to check: the last send may have been
+    // posted, or the server says the id was used before
+    let offer_check = unsure || matches!(said, Some(Said::Reused(_)));
     rsx! {
         if let Some(why) = blocked {
             p { class: "ui-compose-alert", role: "alert",
@@ -1014,12 +1576,15 @@ fn Feedback(
         }
         match said {
             // Why it can't be sent now says it already, once
-            Some(Said::Failed(_) | Said::Unsure | Said::Reused(_)) if blocked_shown => rsx! {},
+            Some(Said::Failed(_) | Said::Unsure | Said::Reused(_) | Said::NotSentThen(_)) if blocked_shown => rsx! {},
+            Some(Said::NotSentThen(why)) => rsx! {
+                p { class: "ui-compose-alert", role: "alert", "{why.words()}" }
+            },
             Some(Said::Unsure) => rsx! {
                 p { class: "ui-compose-alert", role: "alert",
                     "Your last send may have been posted (Agora didn't say), and the \
-                     text has changed since. Reload the page to check first, or send \
-                     this as new (if the first did go through, both will show). "
+                     text has changed since. Check first, or send this as new (if the \
+                     first did go through, both will show). "
                     {send_as_new}
                 }
             },
@@ -1029,19 +1594,30 @@ fn Feedback(
             Some(Said::Failed(words)) => rsx! {
                 p { class: "ui-compose-alert", role: "alert", "{words}" }
             },
-            Some(Said::Posted { link, hint }) => rsx! {
-                PostedNote { link: *link, what: "Posted.", after: AfterReply::Idle }
+            Some(Said::Posted { link, hint, reload }) => rsx! {
+                PostedNote {
+                    link: *link,
+                    what: "Posted.",
+                    after: reload
+                        .zip(posted_here)
+                        .map(|(ask, thread)| thread.after(ask))
+                        .unwrap_or_default(),
+                }
                 if let Some(hint) = hint {
                     p { class: "ui-note", role: "note", "{hint}" }
                 }
             },
             None => rsx! {},
         }
+        if offer_check && !blocked_shown {
+            {check}
+        }
     }
 }
 
 /// "Posted", with the way to it, and on a thread what the thread did
-/// about it: loading it again, or why it couldn't
+/// about it (this box's request only): loading it again, or why it
+/// couldn't
 #[component]
 fn PostedNote(
     link: AgoraLink,
@@ -1116,6 +1692,7 @@ impl PostControls {
             d.action = OperatorActionId::new();
             d.unsure = None;
             d.said = None;
+            d.checking = None;
         });
     }
 
@@ -1170,15 +1747,12 @@ impl PostControls {
             (AgoraLink::post(created.ack.id), created.hint.clone())
         });
         change(draft, |d| {
-            d.sending = false;
-            d.unsure = match &answer {
-                Err(e) if e.outcome_unknown() => Some(sent),
-                _ => None,
-            };
+            d.answered(sent, &answer);
             d.said = Some(match (&answer, &posted) {
                 (Ok(_), Some((link, hint))) => Said::Posted {
                     link: Box::new(link.clone()),
                     hint: hint.clone(),
+                    reload: None,
                 },
                 (Err(e), _) => Said::failed(e),
                 (Ok(_), None) => unreachable!("posted is the answer's"),
@@ -1222,6 +1796,13 @@ fn NewPostForm(start_open: bool) -> Element {
     let session = try_use_session();
     let drafts = try_use_context::<Drafts>();
     let here = try_use_context::<NewPostHere>();
+    // Not offered on a community's feed until it has loaded: not for a
+    // community that doesn't exist
+    let found = try_use_context::<CommunityFound>().is_none_or(|f| (f.0)());
+    let here = here.filter(|_| found);
+    // Drawn here (and so left out of the list of drafts not shown on this
+    // page) only on a feed whose community exists
+    use_drawn_here(drafts, here.clone().map(|h| DraftKey::Post(h.0)));
     let router = try_router();
     let open_form = use_signal(|| start_open);
     let refocus = use_signal(|| false);
@@ -1283,9 +1864,18 @@ fn NewPostForm(start_open: bool) -> Element {
         .and_then(SignedIn::poster)
         .map(|p| p.name.to_string());
     let said = draft.as_ref().and_then(|d| d.said.clone());
+    let unsure = draft.as_ref().is_some_and(|d| d.unsure.is_some());
 
     if open_form() {
         let text = draft.map(|d| d.text).unwrap_or_default();
+        // Where it was sent: the community typed, else the feed's
+        let sent_to = text
+            .community
+            .trim()
+            .parse::<CommunityName>()
+            .ok()
+            .or_else(|| fixed.clone());
+        let check = check_post(sent_to);
         return rsx! {
             div { class: "ui-compose ui-compose-post",
                 form {
@@ -1316,6 +1906,9 @@ fn NewPostForm(start_open: bool) -> Element {
                         handle,
                         state: state.clone(),
                         said,
+                        unsure,
+                        check,
+                        posted_here: None,
                         on_new: move |_| controls.send_as_new(),
                     }
                     div { class: "ui-actions",
