@@ -93,8 +93,8 @@ use dioxus_router::{NavigationTarget, RouterContext, try_router};
 use super::{
     route::Route,
     session::{
-        ApiError, BanInfoExt, Portal, Session, SessionHandle, SignedIn,
-        sign_in_href, try_use_session,
+        ApiError, ApiErrorBodyExt, BanInfoExt, Portal, Session, SessionHandle,
+        SignedIn, sign_in_href, try_use_session,
     },
     thread::ReplyTarget,
 };
@@ -531,6 +531,11 @@ enum Said {
     /// A private message went: to whom, and what the server said besides
     /// (its `notice` and `warning`, shown as they came)
     Sent { to: String, also: Vec<String> },
+    /// A private message's pending tap was withdrawn: a tap was asked for
+    /// another message, and the server keeps one passkey request per
+    /// operator ([`Drafts::withdraw_taps`]). Nothing was sent; the draft
+    /// is back to Send
+    Withdrawn,
     /// Posted: where it is, the server's advice if it gave any, and the
     /// thread's load after it (its [`CommentPosted`] request), if any
     Posted {
@@ -881,6 +886,28 @@ impl Drafts {
         let mut messages = self.messages;
         messages.write().insert(to, draft);
         draft
+    }
+
+    /// Withdraws every pending tap but `keep`'s: the server keeps one
+    /// passkey request per operator, so a tap asked for one message makes
+    /// any other's useless (it would only be refused). Each draft is kept,
+    /// back to its Send, saying why ([`Said::Withdrawn`])
+    fn withdraw_taps(&self, keep: MessageTo) {
+        let others: Vec<Signal<Draft<MessageDraft>>> = self
+            .messages
+            .peek()
+            .iter()
+            .filter(|(to, _)| **to != keep)
+            .map(|(_, d)| *d)
+            .collect();
+        for draft in others {
+            if draft.try_peek().is_ok_and(|d| d.tap.is_some()) {
+                change(draft, |d| {
+                    d.tap = None;
+                    d.said = Some(Said::Withdrawn);
+                });
+            }
+        }
     }
 
     /// The drafts leaving the page would lose, in a stable order
@@ -1649,6 +1676,9 @@ fn Feedback(
     posted_here: Option<CommentPosted>,
     /// "Send as new": a new action id for the draft
     on_new: EventHandler,
+    /// A private message's box: its sends are "sent", not "posted"
+    #[props(default)]
+    message: bool,
 ) -> Element {
     let blocked = blocked(&state);
     let blocked_shown = blocked.is_some();
@@ -1692,6 +1722,15 @@ fn Feedback(
             Some(Said::NotSentThen(why)) => rsx! {
                 p { class: "ui-compose-alert", role: "alert", "{why.words()}" }
             },
+            Some(Said::Unsure) if message => rsx! {
+                p { class: "ui-compose-alert", role: "alert",
+                    "Your last send may have gone through (Agora didn't say), and the \
+                     message has changed since. Put it back as it was to send it again \
+                     safely, or send this as new (if the first did go, both will \
+                     arrive). "
+                    {send_as_new}
+                }
+            },
             Some(Said::Unsure) => rsx! {
                 p { class: "ui-compose-alert", role: "alert",
                     "Your last send may have been posted (Agora didn't say), and the \
@@ -1699,6 +1738,9 @@ fn Feedback(
                      first did go through, both will show). "
                     {send_as_new}
                 }
+            },
+            Some(Said::Withdrawn) => rsx! {
+                p { class: "ui-note", role: "status", "{WITHDRAWN}" }
             },
             Some(Said::Reused(words)) => rsx! {
                 p { class: "ui-compose-alert", role: "alert", "{words} " {send_as_new} }
@@ -2298,6 +2340,141 @@ pub fn not_e2ee_note(recipient: Option<&Recipient>) -> String {
     )
 }
 
+/// Whom a new message can go to, as far as the page has read the friends
+/// list: still loading, couldn't be read (why, for a person), or read
+#[derive(Debug, Clone, PartialEq)]
+pub enum FriendsList {
+    Loading,
+    Failed(String),
+    Loaded(Vec<Recipient>),
+}
+
+/// An empty list, read: what a reply's box is given when its recipient
+/// isn't a friend
+impl Default for FriendsList {
+    fn default() -> Self {
+        Self::Loaded(Vec::new())
+    }
+}
+
+impl FriendsList {
+    /// The friends read, none while loading or failed
+    pub fn read(&self) -> &[Recipient] {
+        match self {
+            Self::Loaded(friends) => friends,
+            Self::Loading | Self::Failed(_) => &[],
+        }
+    }
+}
+
+/// What a box whose pending tap was withdrawn says ([`Said::Withdrawn`])
+const WITHDRAWN: &str = "The passkey request for this message was withdrawn: \
+     you asked for a tap on another message, and Agora keeps one passkey \
+     request at a time. Nothing was sent. Your text is kept here; press Send \
+     to ask again.";
+
+/// Said in front of what a failure says when an earlier send under the
+/// draft's id had no known outcome: this attempt may say only what it did
+const EARLIER_MAY_HAVE_GONE: &str = "Your earlier send may have gone through \
+     (Agora didn't say whether it did).";
+
+/// Which call of a message's send failed
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MessageCall {
+    /// `POST /poster/messages/tap`: it sends nothing, whatever its answer
+    Tap,
+    /// `POST /poster/messages`: the send itself
+    Send,
+}
+
+/// Why a refusal refused, without saying nothing was sent (for
+/// [`message_failed`] when an earlier send may have gone)
+fn refusal_reason(e: &ApiError) -> String {
+    match e {
+        ApiError::SignedOut(_) => {
+            "you're no longer signed in (sign in again in \
+             another tab, then send it)."
+                .to_owned()
+        }
+        _ if e.suspension().is_some() => e
+            .suspension()
+            .map(|ban| format!("{}.", ban.human_summary()))
+            .unwrap_or_default(),
+        ApiError::Forbidden(_) if e.code().is_none() => {
+            "Agora didn't accept this page's sign-in; if it is refused again, \
+             sign in again in another tab."
+                .to_owned()
+        }
+        _ => match e.code() {
+            Some(RefusalCode::TapRefused) => {
+                "the passkey tap wasn't accepted (it \
+                 took too long, was used already, or another passkey request \
+                 replaced it): press Send to tap again."
+                    .to_owned()
+            }
+            Some(RefusalCode::TapNeeded) => {
+                "it needs a passkey tap: press Send to tap.".to_owned()
+            }
+            Some(RefusalCode::NotFriends) => {
+                "you can send a private message only to a friend.".to_owned()
+            }
+            _ => match e {
+                ApiError::Status { message, .. } => message.clone(),
+                ApiError::Forbidden(body) => body.human_message(),
+                _ => e.to_string(),
+            },
+        },
+    }
+}
+
+/// What a message box says when `call` failed with `e`. `unsure`: an
+/// earlier send under the draft's action id had no known outcome, so a
+/// failure now never says "nothing was sent" (that one may have gone); it
+/// says what this attempt did. A send with no answer may have been sent
+/// ("sent", not "posted": a message isn't posted anywhere)
+fn message_failed(e: &ApiError, unsure: bool, call: MessageCall) -> Said {
+    match (call, e.outcome_unknown()) {
+        (MessageCall::Tap, true) if unsure => Said::Failed(format!(
+            "Agora didn't answer the request for a passkey tap ({e}), and \
+             asking for a tap sends nothing. {EARLIER_MAY_HAVE_GONE} Press \
+             Send to try again: sent unchanged, it can't go twice. Your text \
+             is kept here."
+        )),
+        (MessageCall::Tap, true) => Said::Failed(format!(
+            "Agora didn't answer the request for a passkey tap ({e}). \
+             Nothing was sent: press Send to try again. Your text is kept \
+             here."
+        )),
+        (MessageCall::Send, true) => {
+            let why = match e {
+                ApiError::Network(detail) => {
+                    format!("Agora couldn't be reached ({detail})")
+                }
+                ApiError::Status { status, .. } => {
+                    format!("Agora had a problem ({status})")
+                }
+                ApiError::Decode(detail) => {
+                    format!("Agora's answer couldn't be read ({detail})")
+                }
+                _ => format!("Agora didn't answer ({e})"),
+            };
+            Said::Failed(format!(
+                "{why}, so it may or may not have been sent. Your text is \
+                 kept here; sending it again unchanged can't send it twice."
+            ))
+        }
+        (_, false) if !unsure => Said::failed(e),
+        (_, false) => match e.code() {
+            Some(RefusalCode::ReusedActionId) => Said::failed(e),
+            _ => Said::Failed(format!(
+                "This attempt was refused, so it sent nothing: {} \
+                 {EARLIER_MAY_HAVE_GONE} Your text is kept here.",
+                refusal_reason(e)
+            )),
+        },
+    }
+}
+
 /// Everything a message box's controls act on, as for a reply
 /// ([`ReplyControls`])
 #[derive(Clone, Copy)]
@@ -2354,6 +2531,24 @@ impl MessageControls {
         });
     }
 
+    /// The session, when it can write; when it can't, the draft says why
+    /// (the session changed since the box was drawn)
+    fn writer_or_say(
+        self,
+        draft: Signal<Draft<MessageDraft>>,
+    ) -> Option<SignedIn> {
+        let state = self.handle.get_untracked();
+        let signed_in = writer(&state).cloned();
+        if signed_in.is_none() {
+            let why = blocked(&state).unwrap_or_else(|| {
+                "Your operator poster can't send now. Your text is kept here."
+                    .to_owned()
+            });
+            change(draft, |d| d.said = Some(Said::Failed(why)));
+        }
+        signed_in
+    }
+
     /// The form was submitted: ask for the message's passkey tap, unless a
     /// send is in flight or a tap is already asked for, it can't be sent as
     /// it is, or its text changed since a send with no known outcome. The
@@ -2387,7 +2582,7 @@ impl MessageControls {
             change(draft, |d| d.said = Some(Said::Unsure));
             return;
         }
-        let Some(signed_in) = writer(&self.handle.get()).cloned() else {
+        let Some(signed_in) = self.writer_or_say(draft) else {
             return;
         };
         let request = message_request(action, &to, &text.body, None);
@@ -2406,7 +2601,9 @@ impl MessageControls {
     }
 
     /// The tap call's answer. It writes nothing, so a failure leaves what
-    /// was unsure as it was
+    /// was unsure as it was. A tap asked for withdraws any other box's
+    /// pending one: the server keeps one passkey request per operator, so
+    /// the other could only be refused
     #[allow(clippy::too_many_arguments)]
     fn tap_answered(
         self,
@@ -2420,17 +2617,13 @@ impl MessageControls {
     ) {
         match answer {
             Err(e) => {
-                let said = match e.outcome_unknown() {
-                    true => Said::Failed(format!(
-                        "Agora didn't answer the request for a passkey tap \
-                         ({e}). Nothing was sent: press Send to try again. \
-                         Your text is kept here."
-                    )),
-                    false => Said::failed(&e),
-                };
                 change(draft, |d| {
                     d.sending = false;
-                    d.said = Some(said);
+                    d.said = Some(message_failed(
+                        &e,
+                        d.unsure.is_some(),
+                        MessageCall::Tap,
+                    ));
                 });
                 self.drafts.report();
             }
@@ -2441,6 +2634,7 @@ impl MessageControls {
                 self.deliver(draft, signed_in, sent, request);
             }
             Ok(PortalMessageTap { tap: Some(options) }) => {
+                self.drafts.withdraw_taps(self.to);
                 change(draft, |d| {
                     d.sending = false;
                     d.tap = Some(PendingTap {
@@ -2464,7 +2658,7 @@ impl MessageControls {
         let Some(pending) = draft.peek().tap.clone() else {
             return;
         };
-        let Some(signed_in) = writer(&self.handle.get()).cloned() else {
+        let Some(signed_in) = self.writer_or_say(draft) else {
             return;
         };
         let tapped = self.handle.portal().passkey(&pending.options);
@@ -2488,10 +2682,17 @@ impl MessageControls {
                 Err(failed) => {
                     change(draft, |d| {
                         d.sending = false;
-                        d.said = Some(Said::Failed(format!(
-                            "Not sent: {failed}. Your text is kept here; \
-                             press Send to tap again."
-                        )));
+                        d.said = Some(Said::Failed(match d.unsure {
+                            Some(_) => format!(
+                                "This attempt sent nothing: {failed}. \
+                                 {EARLIER_MAY_HAVE_GONE} Your text is kept \
+                                 here; press Send to tap again."
+                            ),
+                            None => format!(
+                                "Not sent: {failed}. Your text is kept here; \
+                                 press Send to tap again."
+                            ),
+                        }));
                     });
                     self.drafts.report();
                 }
@@ -2499,13 +2700,17 @@ impl MessageControls {
         });
     }
 
-    /// "Cancel" while a tap is asked for: nothing was sent
+    /// "Cancel" while a tap is asked for: this attempt sent nothing
     fn cancel_tap(self) {
         change(self.draft(), |d| {
             d.tap = None;
-            d.said = Some(Said::Failed(
-                "Not sent. Your text is kept here.".to_owned(),
-            ));
+            d.said = Some(Said::Failed(match d.unsure {
+                Some(_) => format!(
+                    "This attempt sent nothing. {EARLIER_MAY_HAVE_GONE} Your \
+                     text is kept here."
+                ),
+                None => "Not sent. Your text is kept here.".to_owned(),
+            }));
         });
         self.drafts.report();
     }
@@ -2533,6 +2738,9 @@ impl MessageControls {
         answer: Result<SendMessageResponse, crate::ui::session::ApiError>,
     ) {
         change(draft, |d| {
+            // Whether a send before this one may have gone: what a refusal
+            // of this one may say
+            let unsure_before = d.unsure.is_some();
             d.answered(sent, &answer);
             d.said = Some(match &answer {
                 Ok(sent) => Said::Sent {
@@ -2544,7 +2752,7 @@ impl MessageControls {
                         .cloned()
                         .collect(),
                 },
-                Err(e) => Said::failed(e),
+                Err(e) => message_failed(e, unsure_before, MessageCall::Send),
             });
             if answer.is_ok() {
                 d.text.body.clear();
@@ -2558,8 +2766,8 @@ impl MessageControls {
     }
 }
 
-/// "Sent", and whatever the server said besides (a STOP notice, its
-/// warning that the conversation isn't end-to-end encrypted)
+/// "Sent", and whatever the server said besides (a STOP notice; any
+/// warning, shown as it came)
 #[component]
 fn SentNote(to: String, also: Vec<String>) -> Element {
     rsx! {
@@ -2604,10 +2812,14 @@ pub fn MessageBox(
     /// A reply's recipient: the message's sender
     #[props(default)]
     recipient: Option<AgentName>,
-    /// Whom a new message can go to; for a reply, the recipient's entry if
-    /// it is a friend (for what the encryption note says)
+    /// Whom a new message can go to, as far as the friends list is read;
+    /// for a reply, the recipient's entry if it is a friend (for what the
+    /// encryption note says)
     #[props(default)]
-    friends: Vec<Recipient>,
+    friends: FriendsList,
+    /// Reads the friends list again ("Try again" when it couldn't be read)
+    #[props(default)]
+    on_retry: Option<EventHandler>,
     #[props(default)] start_open: bool,
 ) -> Element {
     let session = try_use_session();
@@ -2660,9 +2872,38 @@ pub fn MessageBox(
     if open_box() || pending || sending {
         let text = draft.map(|d| d.text).unwrap_or_default();
         let chosen = friends
+            .read()
             .iter()
             .find(|f| f.name.as_str() == text.to.trim())
             .cloned();
+        // Whom the draft goes to is always shown: a name chosen before the
+        // list was read again (or while it loads, or after it failed) is
+        // one of the choices, said to be off the list when it is
+        let to_now = text.to.trim().to_owned();
+        let off_list = !to_now.is_empty() && chosen.is_none();
+        let mut choices: Vec<String> =
+            friends.read().iter().map(|f| f.name.to_string()).collect();
+        if off_list {
+            choices.insert(0, to_now.clone());
+        }
+        let list_state = match &friends {
+            FriendsList::Loading => {
+                Some(("Loading your friends…".to_owned(), false))
+            }
+            FriendsList::Failed(why) => Some((
+                format!("Your friends list couldn't be loaded. {why}"),
+                true,
+            )),
+            FriendsList::Loaded(_) if off_list => Some((
+                format!(
+                    "{to_now} isn't in your friends list as last read, and a \
+                     private message goes only to a friend."
+                ),
+                false,
+            )),
+            FriendsList::Loaded(_) => None,
+        };
+        let failed = matches!(friends, FriendsList::Failed(_));
         let note = match (&recipient, text.to.trim().is_empty()) {
             (None, true) => None,
             _ => Some(not_e2ee_note(chosen.as_ref())),
@@ -2688,26 +2929,43 @@ pub fn MessageBox(
                     if recipient.is_none() {
                         label { class: "ui-field", r#for: "{to_field}",
                             span { class: "ui-field-label", "To" }
-                            if friends.is_empty() {
-                                span { class: "ui-field-hint",
-                                    "You have no friends to write to yet. A private message goes \
-                                     only to a friend: send a friend request from the list below."
-                                }
-                            } else {
+                            if !choices.is_empty() {
                                 select {
                                     id: "{to_field}",
                                     class: "ui-input",
                                     name: "to",
                                     disabled: sending || pending,
-                                    value: "{text.to}",
+                                    value: "{to_now}",
                                     onchange: move |e: FormEvent| controls.choose(e.value()),
                                     option { value: "", "Choose a friend" }
-                                    for friend in friends.iter() {
+                                    for name in choices.iter() {
                                         option {
-                                            key: "{friend.name}",
-                                            value: "{friend.name}",
-                                            selected: friend.name.as_str() == text.to.trim(),
-                                            "{friend.name}"
+                                            key: "{name}",
+                                            value: "{name}",
+                                            selected: *name == to_now,
+                                            "{name}"
+                                        }
+                                    }
+                                }
+                            } else if list_state.is_none() {
+                                span { class: "ui-field-hint",
+                                    "You have no friends to write to yet. A private message goes \
+                                     only to a friend: send a friend request from the list below."
+                                }
+                            }
+                            if let Some((words, alert)) = list_state {
+                                span {
+                                    class: if alert { "ui-field-hint ui-field-over" } else { "ui-field-hint" },
+                                    role: if alert { "alert" } else { "status" },
+                                    "{words} "
+                                    if failed {
+                                        if let Some(retry) = on_retry {
+                                            button {
+                                                class: "ui-pill ui-pill-action",
+                                                r#type: "button",
+                                                onclick: move |_| retry.call(()),
+                                                "Try again"
+                                            }
                                         }
                                     }
                                 }
@@ -2754,6 +3012,7 @@ pub fn MessageBox(
                         check,
                         posted_here: None,
                         on_new: move |_| controls.send_as_new(),
+                        message: true,
                     }
                     if pending {
                         p { class: "ui-note", role: "status",
@@ -2799,10 +3058,11 @@ pub fn MessageBox(
             }
         };
     }
-    let sent_to = match said {
-        Some(Said::Sent { to, also }) => Some((to, also)),
+    let sent_to = match &said {
+        Some(Said::Sent { to, also }) => Some((to.clone(), also.clone())),
         _ => None,
     };
+    let withdrawn = matches!(said, Some(Said::Withdrawn));
     rsx! {
         div { class: "ui-compose ui-compose-message",
             div { class: "ui-actions",
@@ -2819,6 +3079,9 @@ pub fn MessageBox(
                 if let Some((to, also)) = sent_to {
                     SentNote { to, also }
                 }
+            }
+            if withdrawn {
+                p { class: "ui-note", role: "status", "{WITHDRAWN}" }
             }
         }
     }

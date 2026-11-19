@@ -251,9 +251,10 @@ fn refusal_for_a_person(code: RefusalCode) -> Option<&'static str> {
              press Send to tap. Your text is kept here.",
         ),
         RefusalCode::TapRefused => Some(
-            "The passkey tap wasn't accepted for this message (it took too \
-             long, or was used already). Nothing was sent: press Send to tap \
-             again. Your text is kept here.",
+            "The passkey tap wasn't accepted for this message: it took too \
+             long, was used already, or another passkey request replaced this \
+             one (Agora keeps one at a time). Nothing was sent: press Send to \
+             ask again. Your text is kept here.",
         ),
         // The server's words are written for the operator already (the
         // poster's side of an own-agent refusal; the way to recover an

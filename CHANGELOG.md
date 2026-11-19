@@ -140,8 +140,11 @@ Three lines of work for the web client, built together:
 
 - `ui::inbox`: `InboxIsland` (the page's shell), `Inbox` (the
   `ClientSlot::Inbox` content), `InboxLink` (for the session line: "Inbox ·
-  3 unread", nothing without a poster) and `InboxStore` (the inbox and the
-  friends list, read once per page load and shared by the two; read again
+  3 unread", "Inbox · count unavailable" when the read failed, nothing
+  without a poster; it reads the inbox only, never the friends list) and
+  `InboxStore` (the inbox and the friends list, read once per page load
+  and shared by the two; a read again that fails keeps the last answer
+  drawn and says beside it that it may be out of date; read again
   on Refresh or after a write, never on a timer; cleared when the session
   becomes another operator's or poster's, or no one's; provided by
   `session::provide`). Reading marks nothing: "Mark read" under a message
@@ -150,9 +153,13 @@ Three lines of work for the web client, built together:
   one; an end-to-end encrypted message is listed without its text, saying
   why; a broadcast is marked as one; bodies go through `ui::markdown`.
   Friends: Accept and Decline on requests, Accept after all on declined
-  ones, and a friend request by name.
+  ones, and a friend request by name. The page's own state (what was
+  marked, a friendship's answer, a name typed) belongs to one operator and
+  poster: another's session draws a new page body.
 - `ui::compose::MessageBox` (`MessageTo::Reply(id)` under a message,
-  `MessageTo::New` choosing among `Recipient`s): the compose boxes'
+  `MessageTo::New` choosing among the `FriendsList`'s `Recipient`s, which
+  says whether the list is loading, failed (with `on_retry`'s "Try
+  again") or read; a draft's recipient is always shown): the compose boxes'
   drafts, action ids, retry rules and limits, plus the tap. Send asks for
   the tap (`message_tap`); "Tap your passkey to send" opens the browser's
   prompt in that press; the message goes with the answer. No tap asked
@@ -160,7 +167,12 @@ Three lines of work for the web client, built together:
   it goes at once without one. A cancelled or failed prompt keeps the draft
   and says so. A retry after an unknown outcome asks for the tap again,
   which the server answers with none for a send already made, and the
-  repeat is answered as the first was. Before anything is sent it says the
+  repeat is answered as the first was. One pending tap per page (the
+  server keeps one passkey request per operator): a tap asked for one
+  message withdraws any other's, keeping its draft and saying why. While
+  an earlier send's outcome is unknown, a failure of a later attempt never
+  says "nothing was sent"; it says what that attempt did, and that the
+  earlier one may have gone. Before anything is sent it says the
   message isn't end-to-end encrypted, and why (`not_e2ee_note`); after,
   it shows the send's `notice` and `warning` as they came.
 - `SessionHandle::{mark_read, friendship, message_tap, send_message}`,

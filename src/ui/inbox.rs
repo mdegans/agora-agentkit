@@ -41,7 +41,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     ClientOnly, ClientSlot,
-    compose::{MessageBox, MessageTo, Recipient, put},
+    compose::{FriendsList, MessageBox, MessageTo, Recipient, put},
     format,
     markdown::Markdown,
     page::document_title,
@@ -152,6 +152,9 @@ pub struct InboxStore {
     refreshing: Signal<bool>,
     /// Why the last read again failed, while the last answer stays drawn
     stale: Signal<Option<String>>,
+    /// Why the friends list's last read again failed, while the last list
+    /// stays drawn
+    friends_stale: Signal<Option<String>>,
     /// Bumped by each read, so an older answer never replaces a newer
     inbox_asked: CopyValue<u64>,
     friends_asked: CopyValue<u64>,
@@ -183,6 +186,7 @@ impl InboxStore {
             friends: Signal::new_in_scope(Load::NotAsked, ScopeId::ROOT),
             refreshing: Signal::new_in_scope(false, ScopeId::ROOT),
             stale: Signal::new_in_scope(None, ScopeId::ROOT),
+            friends_stale: Signal::new_in_scope(None, ScopeId::ROOT),
             inbox_asked: CopyValue::new_in_scope(0, ScopeId::ROOT),
             friends_asked: CopyValue::new_in_scope(0, ScopeId::ROOT),
             owner: CopyValue::new_in_scope(None, ScopeId::ROOT),
@@ -211,6 +215,7 @@ impl InboxStore {
         put(self.friends, Load::NotAsked);
         put(self.refreshing, false);
         put(self.stale, None);
+        put(self.friends_stale, None);
     }
 
     /// The inbox as last read, subscribing the caller
@@ -223,11 +228,17 @@ impl InboxStore {
         self.friends.read().clone()
     }
 
-    /// Reads both, if they haven't been for this session
-    pub fn ensure(self, handle: SessionHandle) {
+    /// Reads the inbox, if it hasn't been for this session (the session
+    /// line's link needs no more)
+    pub fn ensure_inbox(self, handle: SessionHandle) {
         if matches!(*self.inbox.peek(), Load::NotAsked) {
             self.read_inbox(handle);
         }
+    }
+
+    /// Reads both, if they haven't been for this session (the inbox page)
+    pub fn ensure(self, handle: SessionHandle) {
+        self.ensure_inbox(handle);
         if matches!(*self.friends.peek(), Load::NotAsked) {
             self.read_friends(handle);
         }
@@ -282,7 +293,8 @@ impl InboxStore {
         });
     }
 
-    /// Reads the friends list (again), as [`Self::read_inbox`]
+    /// Reads the friends list (again), as [`Self::read_inbox`]: a failure
+    /// with a list drawn says beside it that the list may be out of date
     pub fn read_friends(self, handle: SessionHandle) {
         let Some(signed_in) = Self::reader(handle) else {
             return;
@@ -303,11 +315,15 @@ impl InboxStore {
             }
             match answer {
                 Ok(friends) => {
+                    put(self.friends_stale, None);
                     put(self.friends, Load::Loaded(Rc::new(friends)));
                 }
                 Err(e) => {
-                    if !matches!(*self.friends.peek(), Load::Loaded(_)) {
-                        put(self.friends, Load::Failed(read_failed(&e)));
+                    let words = read_failed(&e);
+                    if matches!(*self.friends.peek(), Load::Loaded(_)) {
+                        put(self.friends_stale, Some(words));
+                    } else {
+                        put(self.friends, Load::Failed(words));
                     }
                     handle.note_write_error(&signed_in, &e);
                 }
@@ -428,9 +444,34 @@ pub(crate) struct InboxControls {
 }
 
 impl InboxControls {
-    /// The session, when it may write
-    fn writer(&self) -> Option<SignedIn> {
-        super::compose::writer(&self.handle.get_untracked()).cloned()
+    /// The session, when it may write; when it can't (the session changed
+    /// since the page was drawn), `said` says why
+    fn writer(&self, said: Signal<Option<(String, bool)>>) -> Option<SignedIn> {
+        let state = self.handle.get_untracked();
+        let signed_in = super::compose::writer(&state).cloned();
+        if signed_in.is_none() {
+            let why = match &state {
+                Session::SignedIn(s) => match s.suspension() {
+                    Some(ban) => {
+                        use super::session::BanInfoExt;
+                        ban.human_summary().to_owned()
+                    }
+                    None => "Your operator poster can't act now.".to_owned(),
+                },
+                Session::SignedOut => "You're no longer signed in: sign in \
+                     again, in another tab, then refresh."
+                    .to_owned(),
+                Session::Loading => {
+                    "Still checking who is signed in: try again in a moment."
+                        .to_owned()
+                }
+                Session::Failed(e) => {
+                    format!("Couldn't check who is signed in ({e}).")
+                }
+            };
+            put(said, Some((why, true)));
+        }
+        signed_in
     }
 
     /// Marks `messages` read, and reads the inbox again after
@@ -438,7 +479,7 @@ impl InboxControls {
         if messages.is_empty() || *self.marking.peek() {
             return;
         }
-        let Some(signed_in) = self.writer() else {
+        let Some(signed_in) = self.writer(self.marked) else {
             return;
         };
         let request = PortalMarkReadRequest {
@@ -502,7 +543,7 @@ impl InboxControls {
         if *self.befriending.peek() {
             return;
         }
-        let Some(signed_in) = self.writer() else {
+        let Some(signed_in) = self.writer(self.friend_said) else {
             return;
         };
         let request = PortalFriendshipRequest {
@@ -534,8 +575,10 @@ impl InboxControls {
 }
 
 /// The session line's way to the inbox, with the unread count once the
-/// inbox is read (one read per page load, shared with the page). Nothing
-/// unless an operator with a poster is signed in
+/// inbox is read (one read per page load, shared with the page; the
+/// friends list is read only on the inbox page). Says quietly when the
+/// count couldn't be read. Nothing unless an operator with a poster is
+/// signed in
 #[component]
 pub fn InboxLink() -> Element {
     let session = try_use_session();
@@ -545,7 +588,7 @@ pub fn InboxLink() -> Element {
             && let Session::SignedIn(s) = handle.get()
             && s.poster().is_some()
         {
-            store.ensure(handle);
+            store.ensure_inbox(handle);
         }
     });
     let (Some(handle), Some(store)) = (session, store) else {
@@ -560,7 +603,8 @@ pub fn InboxLink() -> Element {
         Load::Loaded(inbox) if inbox.unread > 0 => {
             format!("Inbox · {} unread", inbox.unread)
         }
-        _ => "Inbox".to_owned(),
+        Load::Failed(_) => "Inbox · count unavailable".to_owned(),
+        Load::NotAsked | Load::Loading | Load::Loaded(_) => "Inbox".to_owned(),
     };
     rsx! {
         p { class: "ui-inbox-link",
@@ -611,25 +655,43 @@ pub fn Inbox() -> Element {
                     "You have no operator poster, so there is no inbox here."
                 }
             },
-            Some(poster) => rsx! {
-                InboxBody { handle, store, poster: poster.name.clone(), can_write: s.can_write() }
-            },
+            // Keyed by whose it is: another operator's or poster's inbox is
+            // a new body, so nothing the page said or holds (what was
+            // marked, a friendship's answer, a name typed) crosses over.
+            // A list of one, as dioxus compares keys only in a list
+            Some(poster) => {
+                let owner = format!("{}/{}", s.operator().id, poster.id);
+                rsx! {
+                    for owner in std::iter::once(owner) {
+                        InboxBody {
+                            key: "{owner}",
+                            handle,
+                            store,
+                            poster: poster.name.clone(),
+                            can_write: s.can_write(),
+                        }
+                    }
+                }
+            }
         },
     }
 }
 
-/// The friends a message can go to, from the friends list
-fn recipients(friends: &Load<FriendsResponse>) -> Vec<Recipient> {
+/// The friends a message can go to, from the friends list, as far as it
+/// is read
+fn recipients(friends: &Load<FriendsResponse>) -> FriendsList {
     match friends {
-        Load::Loaded(f) => f
-            .friends
-            .iter()
-            .map(|f| Recipient {
-                name: f.name.clone(),
-                can_e2ee: f.can_e2ee,
-            })
-            .collect(),
-        _ => Vec::new(),
+        Load::Loaded(f) => FriendsList::Loaded(
+            f.friends
+                .iter()
+                .map(|f| Recipient {
+                    name: f.name.clone(),
+                    can_e2ee: f.can_e2ee,
+                })
+                .collect(),
+        ),
+        Load::NotAsked | Load::Loading => FriendsList::Loading,
+        Load::Failed(why) => FriendsList::Failed(why.clone()),
     }
 }
 
@@ -656,6 +718,7 @@ fn InboxBody(
     let friends = store.friends();
     let refreshing = *store.refreshing.read();
     let stale = store.stale.read().clone();
+    let friends_stale = store.friends_stale.read().clone();
     let marking = *controls.marking.read();
     let marked = controls.marked.read().clone();
     let recipients = recipients(&friends);
@@ -706,7 +769,6 @@ fn InboxBody(
                 .filter(|l| !l.is_empty())
                 .map(str::to_owned)
                 .collect();
-            let index = read.index.as_ref().map(|i| i.total);
             rsx! {
                 div { class: "ui-inbox-bar",
                     p { class: "ui-inbox-count", role: "status", "{count}" }
@@ -724,7 +786,7 @@ fn InboxBody(
                             }
                         }
                         button {
-                            class: "ui-pill ui-pill-muted",
+                            class: "ui-pill ui-pill-action",
                             r#type: "button",
                             disabled: refreshing,
                             aria_busy: refreshing.then_some("true"),
@@ -748,11 +810,6 @@ fn InboxBody(
                 for line in warnings {
                     p { class: "ui-note", role: "note", "{line}" }
                 }
-                if let Some(total) = index {
-                    p { class: "ui-note", role: "note",
-                        "{total} unread messages are listed only by id in this read; refresh to see them in full."
-                    }
-                }
                 if read.messages.is_empty() {
                     p { class: "ui-note", "No messages." }
                 }
@@ -763,7 +820,7 @@ fn InboxBody(
                             message: Shown(Rc::new(message.clone())),
                             can_write,
                             marking,
-                            friend: recipients.iter().find(|r| r.name == message.sender_name).cloned(),
+                            friend: recipients.read().iter().find(|r| r.name == message.sender_name).cloned(),
                             on_mark: move |id| controls.mark(vec![id]),
                         }
                     }
@@ -777,10 +834,19 @@ fn InboxBody(
             p { class: "ui-compose-alert", role: "alert", "{why}" }
         }
         div { class: "ui-inbox-new",
-            MessageBox { to: MessageTo::New, friends: recipients.clone() }
+            MessageBox {
+                to: MessageTo::New,
+                friends: recipients.clone(),
+                on_retry: move |_| store.read_friends(handle),
+            }
         }
         div { class: "ui-inbox-messages", {listing} }
-        FriendsPanel { controls, friends: FriendsShown(friends), can_write }
+        FriendsPanel {
+            controls,
+            friends: FriendsShown(friends),
+            stale: friends_stale,
+            can_write,
+        }
     }
 }
 
@@ -830,22 +896,34 @@ fn MessageRow(
                     }
                 },
             }
-            if can_write && unread {
-                div { class: "ui-actions",
-                    button {
-                        class: "ui-pill ui-pill-action",
-                        r#type: "button",
-                        disabled: marking,
-                        onclick: move |_| on_mark.call(id),
-                        "Mark read"
+            // "Mark read" and "Reply" on one row; an open reply box takes
+            // the row's full width below them
+            if can_write && (unread || !broadcast) {
+                div { class: "ui-message-actions",
+                    if unread {
+                        button {
+                            class: "ui-pill ui-pill-action",
+                            r#type: "button",
+                            disabled: marking,
+                            onclick: move |_| on_mark.call(id),
+                            "Mark read"
+                        }
+                    }
+                    if !broadcast {
+                        MessageBox {
+                            to: MessageTo::Reply(id),
+                            recipient: Some(sender.clone()),
+                            friends: FriendsList::Loaded(friend.clone().into_iter().collect()),
+                        }
                     }
                 }
-            }
-            if !broadcast {
+            } else if !broadcast {
+                // A session that can't write: the box draws only a draft
+                // kept from before, if there is one
                 MessageBox {
                     to: MessageTo::Reply(id),
                     recipient: Some(sender.clone()),
-                    friends: friend.into_iter().collect::<Vec<_>>(),
+                    friends: FriendsList::Loaded(friend.into_iter().collect()),
                 }
             }
         }
@@ -885,6 +963,8 @@ impl PartialEq for FriendsShown {
 fn FriendsPanel(
     controls: InboxControls,
     friends: FriendsShown,
+    /// Why the last read again failed, while the last list stays drawn
+    stale: Option<String>,
     can_write: bool,
 ) -> Element {
     let busy = *controls.befriending.read();
@@ -994,6 +1074,11 @@ fn FriendsPanel(
     };
     rsx! {
         section { class: "ui-surface ui-friends", aria_label: "Friends",
+            if let Some(why) = stale {
+                p { class: "ui-compose-alert", role: "alert",
+                    "Couldn't refresh the friends list: {why} The list shown may be out of date."
+                }
+            }
             {list}
             if let Some((words, alert)) = said {
                 p {

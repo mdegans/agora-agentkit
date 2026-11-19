@@ -318,10 +318,6 @@ async fn a_message_goes_with_its_tap() {
     h.act(|| controls::message(MessageTo::New).confirm());
     let html = h.settle().await;
     assert!(html.contains("Sent to ada."), "{html}");
-    assert!(
-        html.contains("This conversation is not end-to-end encrypted."),
-        "the server's warning: {html}"
-    );
     let fake = portal.0.borrow();
     assert_eq!(fake.taps.len(), 1);
     assert_eq!(fake.taps[0].assertion, None);
@@ -660,4 +656,516 @@ async fn another_session_clears_the_inbox() {
         html.contains("other-human has no unread messages."),
         "{html}"
     );
+}
+
+/// The session becomes another operator's, with a poster of its own, and
+/// the page hears of it
+async fn another_operator(h: &mut Harness, portal: &FakePortal) -> String {
+    portal.0.borrow_mut().session = Some(Ok(PortalSessionResponse {
+        operator: crate::operator::OperatorRef {
+            id: OperatorId::from(uuid::Uuid::from_u128(7)),
+            display_name: "other".into(),
+        },
+        poster: Some(crate::operator::AgentRef {
+            id: AgentId::from(uuid::Uuid::from_u128(8)),
+            name: name("other-human"),
+        }),
+        ..fixtures::portal_session(true)
+    }));
+    let handle = h.act(consume_context::<SessionHandle>);
+    h.act(|| handle.refresh());
+    h.settle().await
+}
+
+/// The text of the element whose opening tag contains `marker`, up to its
+/// close: what a test reads one control by
+fn tag<'a>(html: &'a str, marker: &str) -> &'a str {
+    let at = html
+        .find(marker)
+        .unwrap_or_else(|| panic!("no {marker}: {html}"));
+    let start = html[..at].rfind('<').unwrap();
+    let end = at + html[at..].find('>').unwrap();
+    &html[start..=end]
+}
+
+/// The new-message box's text field and recipient choice, as drawn
+fn new_box_fields(html: &str) -> (&str, &str) {
+    (
+        tag(html, "id=\"ui-message-new\""),
+        tag(html, "id=\"ui-message-new-to\""),
+    )
+}
+
+/// While a tap is asked for, and while a send is in flight, the text and
+/// the recipient can't change (the field is read-only, the choice
+/// disabled) and Send isn't offered; a second press asks nothing more
+#[tokio::test]
+async fn a_pending_tap_or_a_send_in_flight_holds_the_draft() {
+    let portal = with(vec![], ada());
+    let (mut h, _) = Harness::new(&portal).await;
+    let html = new_message(&mut h, "held").await;
+    let (field, to) = new_box_fields(&html);
+    assert!(!field.contains("readonly"), "{field}");
+    assert!(!to.contains("disabled"), "{to}");
+    assert!(html.contains(">Send</button>"), "{html}");
+
+    // Pressed twice before the answer: one tap asked for
+    h.act(|| controls::message(MessageTo::New).send());
+    h.act(|| controls::message(MessageTo::New).send());
+    let html = h.settle().await;
+    assert_eq!(portal.0.borrow().taps.len(), 1, "a double press");
+    let (field, to) = new_box_fields(&html);
+    assert!(field.contains("readonly"), "{field}");
+    assert!(to.contains("disabled"), "{to}");
+    assert!(!html.contains(">Send</button>"), "{html}");
+    assert!(html.contains("Tap your passkey to send"), "{html}");
+
+    // Confirmed twice: one prompt, one send
+    let gate = portal.hold();
+    h.act(|| controls::message(MessageTo::New).confirm());
+    h.act(|| controls::message(MessageTo::New).confirm());
+    let html = h.settle().await;
+    let (field, to) = new_box_fields(&html);
+    assert!(field.contains("readonly"), "in flight: {field}");
+    assert!(to.contains("disabled"), "in flight: {to}");
+    assert!(html.contains("Sending…"), "{html}");
+    assert!(!html.contains("Tap your passkey to send"), "{html}");
+    drop(gate);
+    let html = h.settle().await;
+    assert!(html.contains("Sent to ada."), "{html}");
+    let fake = portal.0.borrow();
+    assert_eq!((fake.prompts.len(), fake.messages.len()), (1, 1));
+}
+
+/// A change to the text withdraws the tap asked for the old one: Send is
+/// back, and the next Send asks for a tap for the new text
+#[tokio::test]
+async fn editing_clears_the_pending_tap() {
+    let portal = with(vec![], ada());
+    let (mut h, _) = Harness::new(&portal).await;
+    new_message(&mut h, "first").await;
+    h.act(|| controls::message(MessageTo::New).send());
+    let html = h.settle().await;
+    assert!(html.contains("Tap your passkey to send"), "{html}");
+    h.act(|| controls::message(MessageTo::New).input("second"));
+    let html = h.settle().await;
+    assert!(!html.contains("Tap your passkey to send"), "{html}");
+    assert!(html.contains(">Send</button>"), "{html}");
+    let (field, _) = new_box_fields(&html);
+    assert!(!field.contains("readonly"), "{field}");
+    h.act(|| controls::message(MessageTo::New).send());
+    h.settle().await;
+    let fake = portal.0.borrow();
+    assert_eq!(fake.taps.len(), 2);
+    assert_eq!(fake.taps[1].payload.body, "second");
+    assert!(fake.prompts.is_empty(), "no prompt for the old text");
+}
+
+/// Two drafts ask for taps: the server keeps one passkey request per
+/// operator, so the first one's is withdrawn, its draft kept and back to
+/// Send, saying why; only the second's is pending
+#[tokio::test]
+async fn one_pending_tap_per_page() {
+    let from_ada = fixtures::message(1, "ada", "hi", true);
+    let portal = with(vec![from_ada.clone()], ada());
+    let (mut h, _) = Harness::new(&portal).await;
+    new_message(&mut h, "the new one").await;
+    h.act(|| controls::message(MessageTo::New).send());
+    let html = h.settle().await;
+    assert_eq!(html.matches("Tap your passkey to send").count(), 1);
+    let reply = MessageTo::Reply(from_ada.id);
+    h.act(|| controls::message(reply).open());
+    h.settle().await;
+    h.act(|| controls::message(reply).input("the reply"));
+    h.act(|| controls::message(reply).send());
+    let html = h.settle().await;
+    assert_eq!(
+        html.matches("Tap your passkey to send").count(),
+        1,
+        "one pending tap: {html}"
+    );
+    assert!(
+        html.contains(
+            "The passkey request for this message was withdrawn: you asked \
+             for a tap on another message"
+        ),
+        "{html}"
+    );
+    // The new message's draft is kept, back to Send
+    let (field, _) = new_box_fields(&html);
+    assert!(!field.contains("readonly"), "{field}");
+    assert!(
+        html.contains(">the new one</textarea>")
+            || html.contains("value=\"the new one\""),
+        "{html}"
+    );
+    // The pending one is the reply's
+    let at_reply = html.find(&format!("message-{}", from_ada.id)).unwrap();
+    let at_tap = html.find("Tap your passkey to send").unwrap();
+    assert!(at_tap > at_reply, "{html}");
+    h.act(|| controls::message(reply).confirm());
+    let html = h.settle().await;
+    assert!(html.contains("Sent to ada."), "{html}");
+    let fake = portal.0.borrow();
+    assert_eq!(fake.messages.len(), 1);
+    assert_eq!(fake.messages[0].payload.body, "the reply");
+}
+
+/// A send with no known outcome, then a tap that isn't accepted on the
+/// retry: never "Nothing was sent" (the first may have gone), the draft
+/// kept, and the next Send asks again under the same action id
+#[tokio::test]
+async fn unknown_outcome_then_tap_refused_then_retry_under_the_same_id() {
+    let portal = with(vec![], ada());
+    {
+        let mut fake = portal.0.borrow_mut();
+        fake.message_answers
+            .push_back(Err(ApiError::Network("offline".into())));
+        fake.message_answers.push_back(Err(ApiError::refused(
+            403,
+            ErrorResponse::coded(RefusalCode::TapRefused, "tap expired").into(),
+        )));
+    }
+    let (mut h, _) = Harness::new(&portal).await;
+    new_message(&mut h, "maybe").await;
+    h.act(|| controls::message(MessageTo::New).send());
+    h.settle().await;
+    h.act(|| controls::message(MessageTo::New).confirm());
+    let html = h.settle().await;
+    assert!(html.contains("may or may not have been sent"), "{html}");
+    assert!(!html.contains("posted"), "a message is sent: {html}");
+    h.act(|| controls::message(MessageTo::New).send());
+    h.settle().await;
+    h.act(|| controls::message(MessageTo::New).confirm());
+    let html = h.settle().await;
+    assert!(!html.contains("Nothing was sent"), "{html}");
+    assert!(
+        html.contains("This attempt was refused, so it sent nothing"),
+        "{html}"
+    );
+    assert!(html.contains("another passkey request"), "{html}");
+    assert!(
+        html.contains("Your earlier send may have gone through"),
+        "{html}"
+    );
+    assert!(html.contains("value=\"maybe\""), "{html}");
+    h.act(|| controls::message(MessageTo::New).send());
+    h.settle().await;
+    h.act(|| controls::message(MessageTo::New).confirm());
+    let html = h.settle().await;
+    assert!(html.contains("Sent to ada."), "{html}");
+    let fake = portal.0.borrow();
+    assert_eq!(fake.messages.len(), 3);
+    assert!(
+        fake.messages
+            .iter()
+            .all(|m| m.action_id == fake.messages[0].action_id),
+        "one action id throughout"
+    );
+}
+
+/// After a send with no known outcome, the tap call failing (a 5xx) or
+/// refused (a code) never says nothing was sent: the earlier send may
+/// have gone, and asking for a tap sends nothing
+#[tokio::test]
+async fn a_failed_tap_call_while_unsure_says_what_this_attempt_did() {
+    for (failure, words) in [
+        (
+            ApiError::Status {
+                status: 502,
+                message: "bad gateway".into(),
+                code: None,
+            },
+            "asking for a tap sends nothing",
+        ),
+        (
+            ApiError::refused(
+                403,
+                ErrorResponse::coded(
+                    RefusalCode::NotFriends,
+                    "you can only message accepted friends",
+                )
+                .into(),
+            ),
+            "This attempt was refused, so it sent nothing: you can send a \
+             private message only to a friend.",
+        ),
+    ] {
+        let portal = with(vec![], ada());
+        {
+            let mut fake = portal.0.borrow_mut();
+            fake.message_answers
+                .push_back(Err(ApiError::Network("offline".into())));
+            fake.tap_answers.push_back(Ok(PortalMessageTap {
+                tap: Some(tap_options()),
+            }));
+            fake.tap_answers.push_back(Err(failure));
+        }
+        let (mut h, _) = Harness::new(&portal).await;
+        new_message(&mut h, "unsure").await;
+        h.act(|| controls::message(MessageTo::New).send());
+        h.settle().await;
+        h.act(|| controls::message(MessageTo::New).confirm());
+        h.settle().await;
+        h.act(|| controls::message(MessageTo::New).send());
+        let html = h.settle().await;
+        assert!(html.contains(words), "{words}: {html}");
+        assert!(!html.contains("Nothing was sent"), "{html}");
+        assert!(
+            html.contains("Your earlier send may have gone through"),
+            "{html}"
+        );
+        assert!(html.contains("value=\"unsure\""), "{html}");
+        // Unsure still: the box offers no "nothing happened" reset
+        let fake = portal.0.borrow();
+        assert_eq!(fake.taps[0].action_id, fake.taps[1].action_id);
+    }
+}
+
+/// A coded refusal of the send itself (not the tap call) keeps the draft
+/// and its action id: a refusal renews nothing, so the next Send asks
+/// under the same id
+#[tokio::test]
+async fn a_refused_send_keeps_the_draft_and_its_action_id() {
+    let portal = with(vec![], ada());
+    portal
+        .0
+        .borrow_mut()
+        .message_answers
+        .push_back(Err(ApiError::refused(
+            403,
+            ErrorResponse::coded(
+                RefusalCode::NotFriends,
+                "you can only message accepted friends",
+            )
+            .into(),
+        )));
+    let (mut h, _) = Harness::new(&portal).await;
+    new_message(&mut h, "refused at the end").await;
+    h.act(|| controls::message(MessageTo::New).send());
+    h.settle().await;
+    h.act(|| controls::message(MessageTo::New).confirm());
+    let html = h.settle().await;
+    assert!(
+        html.contains("You can send a private message only to a friend."),
+        "{html}"
+    );
+    assert!(html.contains("value=\"refused at the end\""), "{html}");
+    assert!(html.contains(">Send</button>"), "{html}");
+    h.act(|| controls::message(MessageTo::New).send());
+    h.settle().await;
+    let fake = portal.0.borrow();
+    assert_eq!(fake.taps.len(), 2);
+    assert_eq!(fake.taps[0].action_id, fake.taps[1].action_id);
+    assert_eq!(fake.messages[0].action_id, fake.taps[1].action_id);
+}
+
+/// Another operator signing in clears every message draft, a pending tap
+/// with it: nothing one operator wrote can be sent as another's
+#[tokio::test]
+async fn an_operator_switch_clears_message_drafts_and_taps() {
+    let from_ada = fixtures::message(1, "ada", "hi", true);
+    let portal = with(vec![from_ada.clone()], ada());
+    let (mut h, _) = Harness::new(&portal).await;
+    new_message(&mut h, "the first operator's").await;
+    h.act(|| controls::message(MessageTo::New).send());
+    let html = h.settle().await;
+    assert!(html.contains("Tap your passkey to send"), "{html}");
+    let html = another_operator(&mut h, &portal).await;
+    assert!(!html.contains("Tap your passkey to send"), "{html}");
+    assert!(!html.contains("the first operator's"), "{html}");
+    assert!(!html.contains("draft waiting"), "{html}");
+    assert_eq!(portal.0.borrow().unsent.last(), Some(&false));
+}
+
+/// The page's own signals are the session's: what was marked, a
+/// friendship's answer and a name typed don't cross to another operator
+#[tokio::test]
+async fn page_signals_dont_cross_a_session_switch() {
+    let from_ada = fixtures::message(1, "ada", "hi", true);
+    let portal = with(vec![from_ada.clone()], ada());
+    let (mut h, _) = Harness::new(&portal).await;
+    h.act(|| page_controls().mark(vec![from_ada.id]));
+    h.act(|| page_controls().friend(FriendshipAction::Request, name("dee")));
+    h.settle().await;
+    h.act(|| page_controls().name_typed("cyd".into()));
+    let html = h.settle().await;
+    assert!(html.contains("Marked 1 message read."), "{html}");
+    assert!(html.contains("Friend request sent to dee."), "{html}");
+    assert!(html.contains("value=\"cyd\""), "{html}");
+    let html = another_operator(&mut h, &portal).await;
+    assert!(html.contains("other-human"), "{html}");
+    assert!(!html.contains("Marked 1 message read."), "{html}");
+    assert!(!html.contains("Friend request sent to dee."), "{html}");
+    assert!(!html.contains("value=\"cyd\""), "{html}");
+
+    // A mark in flight at the switch answers into nothing of the new page
+    let gate = portal.hold();
+    h.act(|| page_controls().mark(vec![from_ada.id]));
+    h.settle().await;
+    another_operator_back(&mut h, &portal).await;
+    drop(gate);
+    let html = h.settle().await;
+    assert!(!html.contains("Marked 1 message read."), "{html}");
+}
+
+/// The session back to the fixture's operator
+async fn another_operator_back(h: &mut Harness, portal: &FakePortal) {
+    portal.0.borrow_mut().session = Some(Ok(fixtures::portal_session(true)));
+    let handle = h.act(consume_context::<SessionHandle>);
+    h.act(|| handle.refresh());
+    h.settle().await;
+}
+
+/// The friends list read again and failing: the list stays, and the page
+/// says it may be out of date and why
+#[tokio::test]
+async fn a_failed_friends_refresh_says_the_list_may_be_stale() {
+    let portal = with(vec![], ada());
+    portal
+        .0
+        .borrow_mut()
+        .friends_answers
+        .push_back(Err(ApiError::Network("offline".into())));
+    let (mut h, html) = Harness::new(&portal).await;
+    assert!(!html.contains("may be out of date"), "{html}");
+    h.act(|| page_controls().refresh());
+    let html = h.settle().await;
+    assert!(
+        html.contains(
+            "Couldn't refresh the friends list: Agora couldn't load it ("
+        ),
+        "{html}"
+    );
+    assert!(
+        html.contains("The list shown may be out of date."),
+        "{html}"
+    );
+    assert!(html.contains(">ada</a>"), "the list stays: {html}");
+}
+
+/// The new-message box says what the friends list is: loading, failed
+/// (with a way to try again), or truly empty; and a draft that has a
+/// recipient always shows whom it goes to
+#[tokio::test]
+async fn the_new_message_box_says_what_the_friends_list_is() {
+    // Failed: said, with Try again, never "no friends"
+    let portal = FakePortal::signed_in(true);
+    portal
+        .0
+        .borrow_mut()
+        .friends_answers
+        .push_back(Err(ApiError::Network("offline".into())));
+    let (mut h, _) = Harness::new(&portal).await;
+    h.act(|| controls::message(MessageTo::New).open());
+    let html = h.settle().await;
+    assert!(
+        html.contains("Your friends list couldn't be loaded."),
+        "{html}"
+    );
+    assert!(!html.contains("You have no friends"), "{html}");
+    assert!(html.contains(">Try again</button>"), "{html}");
+    // A recipient chosen before (the draft's) is shown even so
+    h.act(|| controls::message(MessageTo::New).choose("ada"));
+    let html = h.settle().await;
+    let (_, to) = new_box_fields(&html);
+    assert!(to.contains("select"), "{to}");
+    assert!(html.contains("<option value=\"ada\" selected"), "{html}");
+
+    // Truly empty: said so
+    let portal = with(vec![], vec![]);
+    let (mut h, _) = Harness::new(&portal).await;
+    h.act(|| controls::message(MessageTo::New).open());
+    let html = h.settle().await;
+    assert!(
+        html.contains("You have no friends to write to yet."),
+        "{html}"
+    );
+
+    // A chosen recipient no longer on the list: still shown, and said
+    let portal = with(vec![], ada());
+    let (mut h, _) = Harness::new(&portal).await;
+    new_message(&mut h, "to ada").await;
+    portal.0.borrow_mut().friends_answers.clear();
+    portal
+        .0
+        .borrow_mut()
+        .friends_answers
+        .push_back(Ok(FriendsResponse::default()));
+    h.act(|| page_controls().refresh());
+    let html = h.settle().await;
+    assert!(html.contains("<option value=\"ada\" selected"), "{html}");
+    assert!(
+        html.contains("ada isn't in your friends list as last read"),
+        "{html}"
+    );
+}
+
+/// Loading, the box says the list is loading, not that there are no
+/// friends
+#[tokio::test]
+async fn a_loading_friends_list_is_not_an_empty_one() {
+    let portal = FakePortal::signed_in(true);
+    let (mut h, _) = Harness::new(&portal).await;
+    // The list being read again from nothing: drawn before the answer
+    let store = h.act(consume_context::<InboxStore>);
+    h.act(|| put(store.friends, Load::Loading));
+    h.act(|| controls::message(MessageTo::New).open());
+    h.dom
+        .render_immediate(&mut dioxus::dioxus_core::NoOpMutations);
+    let html = dioxus_ssr::render(&h.dom).replace("&#39;", "'");
+    assert!(html.contains("Loading your friends…"), "{html}");
+    assert!(!html.contains("You have no friends"), "{html}");
+}
+
+/// The session line's link alone reads the inbox, not the friends list,
+/// and says quietly when the count couldn't be read
+#[tokio::test]
+async fn the_link_reads_only_the_inbox_and_says_when_it_cant() {
+    #[allow(non_snake_case)]
+    fn LinkOnly() -> Element {
+        rsx! { ClientOnly { slot: ClientSlot::Session } }
+    }
+    let portal = FakePortal::signed_in(true);
+    portal
+        .0
+        .borrow_mut()
+        .inbox_answers
+        .push_back(Err(ApiError::Network("offline".into())));
+    let mut dom = VirtualDom::new(LinkOnly);
+    dom.provide_root_context(
+        ClientSlots::new().with(ClientSlot::Session, InboxLink),
+    );
+    session::provide(&dom, portal.clone());
+    dom.rebuild_in_place();
+    let html = settle(&mut dom).await;
+    assert!(html.contains("Inbox · count unavailable"), "{html}");
+    let fake = portal.0.borrow();
+    assert_eq!((fake.inbox_calls, fake.friends_calls), (1, 0));
+}
+
+/// A send whose answer never came says it may have been sent (a message
+/// is sent, not posted), and anything else the server said on a send is
+/// still shown
+#[tokio::test]
+async fn a_sent_message_shows_what_the_server_said_besides() {
+    let portal = with(vec![], ada());
+    portal.0.borrow_mut().message_answers.push_back(Ok(
+        crate::responses::SendMessageResponse {
+            notice: Some("ada asked the Council to stop.".into()),
+            warning: Some("A cap was reached.".into()),
+            id: crate::ui::test_portal::sent_message(),
+            encryption: crate::enums::MessageEncryption::Server,
+            sent_at: Some(fixtures::at()),
+        },
+    ));
+    let (mut h, _) = Harness::new(&portal).await;
+    new_message(&mut h, "hello").await;
+    h.act(|| controls::message(MessageTo::New).send());
+    h.settle().await;
+    h.act(|| controls::message(MessageTo::New).confirm());
+    let html = h.settle().await;
+    assert!(html.contains("Sent to ada."), "{html}");
+    assert!(html.contains("ada asked the Council to stop."), "{html}");
+    assert!(html.contains("A cap was reached."), "{html}");
 }

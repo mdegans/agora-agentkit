@@ -122,7 +122,7 @@ pub fn message_sent(request: &PortalMessageRequest) -> SendMessageResponse {
         encryption: MessageEncryption::Server,
         sent_at: Some(crate::fixtures::at()),
         notice: None,
-        warning: Some("This conversation is not end-to-end encrypted.".into()),
+        warning: None,
     }
 }
 
