@@ -3,7 +3,11 @@
 
 use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
-use futures::{FutureExt, future::LocalBoxFuture};
+use futures::{
+    FutureExt,
+    channel::oneshot,
+    future::{LocalBoxFuture, Shared},
+};
 
 use super::session::{ApiError, Portal};
 use crate::{
@@ -32,6 +36,36 @@ pub struct Fake {
     pub posts: Vec<PortalPostRequest>,
     pub comments: Vec<PortalCommentRequest>,
     pub communities: Option<Result<Vec<CommunityResponse>, ApiError>>,
+    /// When set, every write waits for it before answering (a slow
+    /// network): a test releases it by sending, or by dropping the sender
+    pub gate: Option<Shared<oneshot::Receiver<()>>>,
+    /// What `drafts_unsent` was told, in order
+    pub unsent: Vec<bool>,
+}
+
+impl FakePortal {
+    /// Holds every write's answer until the returned sender is used or
+    /// dropped
+    pub fn hold(&self) -> oneshot::Sender<()> {
+        let (tx, rx) = oneshot::channel();
+        self.0.borrow_mut().gate = Some(rx.shared());
+        tx
+    }
+}
+
+/// `answer`, after `gate` opens when there is one
+fn gated<T: 'static>(
+    gate: Option<Shared<oneshot::Receiver<()>>>,
+    answer: T,
+) -> LocalBoxFuture<'static, T> {
+    async move {
+        if let Some(gate) = gate {
+            // Sent or dropped, the gate is open either way
+            let _ = gate.await;
+        }
+        answer
+    }
+    .boxed_local()
 }
 
 /// The id a post past the scripted answers gets
@@ -90,19 +124,23 @@ impl Portal for FakePortal {
     ) -> LocalBoxFuture<'static, Result<PostCreated, ApiError>> {
         let mut fake = self.0.borrow_mut();
         fake.posts.push(request.clone());
-        ready(fake.post_answers.pop_front().unwrap_or_else(|| {
-            Ok(PostCreated {
-                ack: WriteAck {
-                    id: created_post(),
-                    status: "created".into(),
-                    verified: false,
-                },
-                designation: None,
-                hint: None,
-                poll: None,
-                poll_note: None,
-            })
-        }))
+        let gate = fake.gate.clone();
+        gated(
+            gate,
+            fake.post_answers.pop_front().unwrap_or_else(|| {
+                Ok(PostCreated {
+                    ack: WriteAck {
+                        id: created_post(),
+                        status: "created".into(),
+                        verified: false,
+                    },
+                    designation: None,
+                    hint: None,
+                    poll: None,
+                    poll_note: None,
+                })
+            }),
+        )
     }
 
     fn create_comment(
@@ -112,13 +150,17 @@ impl Portal for FakePortal {
     ) -> LocalBoxFuture<'static, Result<WriteAck<CommentId>, ApiError>> {
         let mut fake = self.0.borrow_mut();
         fake.comments.push(request.clone());
-        ready(fake.comment_answers.pop_front().unwrap_or_else(|| {
-            Ok(WriteAck {
-                id: created_comment(),
-                status: "created".into(),
-                verified: false,
-            })
-        }))
+        let gate = fake.gate.clone();
+        gated(
+            gate,
+            fake.comment_answers.pop_front().unwrap_or_else(|| {
+                Ok(WriteAck {
+                    id: created_comment(),
+                    status: "created".into(),
+                    verified: false,
+                })
+            }),
+        )
     }
 
     fn communities(
@@ -135,5 +177,9 @@ impl Portal for FakePortal {
 
     fn here(&self) -> Option<String> {
         Some("/agora/feed".into())
+    }
+
+    fn drafts_unsent(&self, unsent: bool) {
+        self.0.borrow_mut().unsent.push(unsent);
     }
 }

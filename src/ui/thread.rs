@@ -37,6 +37,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     ClientOnly, ClientSlot, Reload,
     badges::Badges,
+    compose::AfterReply,
     feed::{NOT_FOUND_TITLE, NotFound, TestPill, post_author, public},
     format,
     markdown::{Markdown, Site},
@@ -772,39 +773,63 @@ pub fn ThreadIsland(page: ThreadPage) -> Element {
         document_title(&title_of(&thread.read()))
     }));
     // A reply box posted: load the thread again, keeping the one drawn if
-    // that fails (the box keeps its link to the comment), then go to the
-    // new comment once it is drawn. Where to go is kept outside the
-    // signals: the effect that goes there runs when the thread changes
+    // that fails (the box says so, beside its link to the comment), then
+    // go to the new comment once it is drawn. Where to go is kept outside
+    // the signals: the effect that goes there runs when the thread changes.
+    // The box tells the thread through signals, which a write answering
+    // after this page is gone finds dropped (and so does nothing)
     let reposted = try_use_context::<Reload<ThreadLoad>>();
     let arrive_at =
         use_hook(|| std::rc::Rc::new(std::cell::Cell::new(None::<CommentId>)));
     let go_to = super::route::use_go_to();
+    let posted = super::compose::CommentPosted::use_new();
+    use_context_provider(|| posted);
+    let top_level = use_memo(move || match &*thread.read() {
+        ThreadLoad::Loaded(read) => super::compose::TopLevel::of(read),
+        _ => Vec::new(),
+    });
+    use_context_provider(|| super::compose::TopLevel(top_level));
     let pending = arrive_at.clone();
-    let posted = use_callback(move |id: CommentId| {
+    use_effect(move || {
+        let Some(id) = posted.posted() else { return };
         let Some(reload) = reposted.clone() else {
             return;
         };
         let pending = pending.clone();
+        posted.set_reload(AfterReply::Loading);
         spawn(async move {
-            match reload.load().await {
+            let after = match reload.load().await {
                 loaded @ ThreadLoad::Loaded(_) => {
                     pending.set(Some(id));
                     thread.set(loaded);
+                    AfterReply::Done
                 }
-                ThreadLoad::Pending => {}
-                ThreadLoad::Failed(e) => tracing::warn!(
-                    comment = %id,
-                    error = %e,
-                    "the thread couldn't be loaded again after a reply; keeping the one drawn"
-                ),
-                ThreadLoad::NotFound => tracing::warn!(
-                    comment = %id,
-                    "the thread was not found after a reply; keeping the one drawn"
-                ),
-            }
+                ThreadLoad::Pending => {
+                    tracing::warn!(
+                        comment = %id,
+                        "the thread's load after a reply came back pending; keeping the one drawn"
+                    );
+                    AfterReply::Failed("no answer yet".to_owned())
+                }
+                ThreadLoad::Failed(e) => {
+                    tracing::warn!(
+                        comment = %id,
+                        error = %e,
+                        "the thread couldn't be loaded again after a reply; keeping the one drawn"
+                    );
+                    AfterReply::Failed(e)
+                }
+                ThreadLoad::NotFound => {
+                    tracing::warn!(
+                        comment = %id,
+                        "the thread was not found after a reply; keeping the one drawn"
+                    );
+                    AfterReply::Failed(POST_NOT_FOUND.to_owned())
+                }
+            };
+            posted.set_reload(after);
         });
     });
-    use_context_provider(|| super::compose::CommentPosted(posted));
     use_effect(move || {
         if matches!(*thread.read(), ThreadLoad::Loaded(_))
             && let Some(id) = arrive_at.take()

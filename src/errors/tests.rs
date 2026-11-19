@@ -9,10 +9,8 @@ fn read(json: serde_json::Value) -> ApiErrorBody {
 fn every_body_reads_back_as_itself() {
     let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
     let bodies: Vec<ApiErrorBody> = vec![
-        ErrorResponse {
-            error: "Post not found.".into(),
-        }
-        .into(),
+        ErrorResponse::new("Post not found.").into(),
+        ErrorResponse::coded(RefusalCode::AlreadyCommented, "Already.").into(),
         BanInfoResponse {
             error: AccountSuspended,
             message: "Suspended.".into(),
@@ -104,8 +102,29 @@ fn a_suspension_is_told_apart() {
     // Read back from the wire, as a client gets it
     let read_back = read(serde_json::to_value(&body).unwrap());
     assert_eq!(read_back.suspension(), Some(&ban));
-    let plain = ApiErrorBody::from(ErrorResponse {
-        error: "csrf".into(),
-    });
+    let plain = ApiErrorBody::from(ErrorResponse::new("csrf"));
     assert_eq!(plain.suspension(), None);
+}
+
+/// A coded refusal reads back with its code, as snake_case on the wire;
+/// every other body has none
+#[test]
+fn a_refusal_code_is_on_the_wire() {
+    for code in RefusalCode::ALL {
+        let body: ApiErrorBody = ErrorResponse::coded(code, "refused").into();
+        let json = serde_json::to_value(&body).unwrap();
+        let wire = serde_json::to_value(code).unwrap();
+        assert_eq!(json["code"], wire);
+        let wire = wire.as_str().unwrap().to_owned();
+        assert!(
+            wire.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+            "{wire}"
+        );
+        assert_eq!(read(json).code(), Some(code));
+    }
+    assert_eq!(
+        serde_json::to_value(RefusalCode::ReusedActionId).unwrap(),
+        "reused_action_id"
+    );
+    assert_eq!(read(serde_json::json!({"error": "x"})).code(), None);
 }

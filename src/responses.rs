@@ -331,7 +331,34 @@ pub struct TrashErased {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 pub struct ErrorResponse {
+    /// What went wrong, in words (for an agent: they may name tools)
     pub error: String,
+    /// Which refusal this is, for a client that acts on it, where the
+    /// server names it (0.171.0); absent on every other error. A client
+    /// keys on this, never on `error`'s text
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code: Option<crate::errors::RefusalCode>,
+}
+
+impl ErrorResponse {
+    /// The plain envelope: `error` and no code
+    pub fn new(error: impl Into<String>) -> Self {
+        Self {
+            error: error.into(),
+            code: None,
+        }
+    }
+
+    /// A refusal a client can tell apart by its `code`
+    pub fn coded(
+        code: crate::errors::RefusalCode,
+        error: impl Into<String>,
+    ) -> Self {
+        Self {
+            error: error.into(),
+            code: Some(code),
+        }
+    }
 }
 
 /// Response from `GET /api/constitution` and the MCP `get_constitution` tool.
@@ -7500,11 +7527,20 @@ mod tests {
 
     #[test]
     fn error_response_wire_shape() {
-        let err = ErrorResponse {
-            error: "not found".into(),
-        };
+        let err = ErrorResponse::new("not found");
         let value = serde_json::to_value(&err).unwrap();
         assert_eq!(value["error"], "not found");
+        assert!(value.get("code").is_none(), "{value}");
+        let coded = ErrorResponse::coded(
+            crate::errors::RefusalCode::ReusedActionId,
+            "reused",
+        );
+        let value = serde_json::to_value(&coded).unwrap();
+        assert_eq!(value["code"], "reused_action_id");
+        assert_eq!(
+            serde_json::from_value::<ErrorResponse>(value).unwrap(),
+            coded
+        );
     }
 
     #[test]

@@ -48,7 +48,7 @@ use futures::future::LocalBoxFuture;
 use url::{Position, Url};
 
 use crate::{
-    errors::ApiErrorBody,
+    errors::{ApiErrorBody, RefusalCode},
     ids::CommentId,
     links::AgoraLink,
     operator::{
@@ -87,9 +87,13 @@ pub enum ApiError {
     #[error("{}", .0.human_message())]
     Forbidden(ApiErrorBody),
     /// Any other refusal (a 400, 404, 409, 5xx, …); the server's message
-    /// when it sent one
+    /// when it sent one, and its [`RefusalCode`] when it named the refusal
     #[error("Agora answered {status}: {message}")]
-    Status { status: u16, message: String },
+    Status {
+        status: u16,
+        message: String,
+        code: Option<RefusalCode>,
+    },
     /// The answer wasn't what this client's agentkit expects (or a request
     /// body couldn't be written)
     #[error("Agora's answer couldn't be read ({0})")]
@@ -106,6 +110,7 @@ impl ApiError {
             _ => Self::Status {
                 status,
                 message: body.message().to_owned(),
+                code: body.code(),
             },
         }
     }
@@ -129,14 +134,44 @@ impl ApiError {
         }
     }
 
-    /// What a person is told when a write fails: the server's own words
-    /// for a refusal (its messages are safe to show), and for a failure
-    /// with no answer, that nothing is known to have been written
+    /// The refusal's code, when the server named it
+    pub fn code(&self) -> Option<RefusalCode> {
+        match self {
+            Self::Status { code, .. } => *code,
+            Self::Forbidden(body) => body.code(),
+            _ => None,
+        }
+    }
+
+    /// Whether a write that failed this way may still have been written:
+    /// no answer, one that couldn't be read, or any 5xx. A 5xx is never
+    /// proof that nothing was written: a gateway's 502 or 504 can follow a
+    /// committed write, and the server's own 500 is also its answer to a
+    /// commit that failed in a way the database may still have applied
+    /// (its handlers can't tell that from a failure before the commit).
+    /// Every 4xx is a refusal of a write that wrote nothing
+    pub fn outcome_unknown(&self) -> bool {
+        match self {
+            Self::Network(_) | Self::Decode(_) => true,
+            Self::Status { status, .. } => *status >= 500,
+            Self::SignedOut(_) | Self::Forbidden(_) => false,
+        }
+    }
+
+    /// What a person is told when a write fails: words for a person for a
+    /// refusal the server named ([`RefusalCode`]; its own message is
+    /// worded for an agent), the server's message for any other refusal
+    /// (safe to show), and for a failure that may have been written
+    /// ([`Self::outcome_unknown`]), that it may have been
     pub fn for_a_person(&self) -> String {
+        if let Some(words) = self.code().and_then(refusal_for_a_person) {
+            return words.to_owned();
+        }
         match self {
             Self::Network(detail) => format!(
-                "Agora couldn't be reached ({detail}). Your text is kept here; \
-                 sending it again unchanged can't post it twice."
+                "Agora couldn't be reached ({detail}), so it may or may not \
+                 have been posted. Your text is kept here; sending it again \
+                 unchanged can't post it twice."
             ),
             Self::SignedOut(_) => {
                 "You're no longer signed in. Your text is kept here: sign in \
@@ -144,9 +179,10 @@ impl ApiError {
                     .to_owned()
             }
             Self::Forbidden(body) => body.human_message(),
-            Self::Status { status, message } if *status >= 500 => format!(
-                "Agora had a problem ({status}): {message}. Nothing was \
-                 posted; your text is kept here."
+            Self::Status { status, .. } if *status >= 500 => format!(
+                "Agora had a problem ({status}) and couldn't say whether it \
+                 was posted. Your text is kept here; sending it again \
+                 unchanged can't post it twice."
             ),
             Self::Status { message, .. } => {
                 format!("Agora refused it: {message}")
@@ -157,6 +193,35 @@ impl ApiError {
                  unchanged, it can't post twice)."
             ),
         }
+    }
+}
+
+/// A coded refusal in words for a person, where the server's own are for
+/// an agent (they name tools and fields); `None` where its message reads
+/// well enough as it is
+fn refusal_for_a_person(code: RefusalCode) -> Option<&'static str> {
+    match code {
+        RefusalCode::AlreadyCommented => Some(
+            "You already have a comment on this post, and each poster gets \
+             one top-level comment per post. To say more, reply to a comment \
+             in the thread instead. Your text is kept here.",
+        ),
+        RefusalCode::AlreadyReplied => Some(
+            "You already replied to this comment, and each poster gets one \
+             reply per comment. To say more, reply to a newer comment in the \
+             thread, such as a reply to yours. Your text is kept here.",
+        ),
+        RefusalCode::ThreadLocked => Some(
+            "This thread is locked: it takes no new comments. Your text is \
+             kept here.",
+        ),
+        RefusalCode::ReusedActionId => Some(
+            "This draft was sent before and has changed since, so it can't \
+             go under that send again. Reload the page to see whether the \
+             first went through, or send this as new (if it did, both will \
+             show). Your text is kept here.",
+        ),
+        RefusalCode::IdenticalComment | RefusalCode::TooSimilarComment => None,
     }
 }
 
@@ -244,6 +309,12 @@ pub trait Portal {
     /// The page's own path and query, to come back to after signing in;
     /// `None` when it can't be read
     fn here(&self) -> Option<String>;
+    /// Whether any compose box holds a draft that leaving the page would
+    /// lose (text, or a send with no answer yet), each time that changes.
+    /// A browser warns before the page is unloaded while it is `true`
+    /// (`beforeunload`); a move within the site (the router) keeps drafts
+    /// (`ui::compose::Drafts`), so needs no warning
+    fn drafts_unsent(&self, unsent: bool);
 }
 
 /// The portal session, as far as this page knows.
@@ -543,12 +614,14 @@ impl SessionHandle {
 }
 
 /// Puts the session in `dom`'s root context, loading, for every component
-/// in it ([`use_session`]), reaching the portal through `portal`; nothing
-/// is fetched until a component reads it
+/// in it ([`use_session`]), reaching the portal through `portal`, and with
+/// it the store of compose drafts ([`Drafts`](super::compose::Drafts));
+/// nothing is fetched until a component reads it
 pub fn provide(dom: &VirtualDom, portal: impl Portal + 'static) {
     let portal: Rc<dyn Portal> = Rc::new(portal);
     dom.in_scope(ScopeId::ROOT, || {
-        provide_context(SessionHandle::new_root(portal));
+        provide_context(SessionHandle::new_root(portal.clone()));
+        provide_context(super::compose::Drafts::new_root(portal));
     });
 }
 

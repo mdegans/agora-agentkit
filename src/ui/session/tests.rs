@@ -36,9 +36,9 @@ fn banned() -> ApiError {
 }
 
 fn plain_403() -> ApiError {
-    ApiError::Forbidden(ApiErrorBody::Plain(ErrorResponse {
-        error: "a write must carry this session's CSRF token".into(),
-    }))
+    ApiError::Forbidden(ApiErrorBody::Plain(ErrorResponse::new(
+        "a write must carry this session's CSRF token",
+    )))
 }
 
 fn decode_error() -> ApiError {
@@ -54,7 +54,7 @@ fn can_write(session: &Session) -> bool {
 /// A refusal reads as its status says
 #[test]
 fn a_refusal_is_read_by_its_status() {
-    let body = |e: &str| ApiErrorBody::Plain(ErrorResponse { error: e.into() });
+    let body = |e: &str| ApiErrorBody::Plain(ErrorResponse::new(e));
     assert_eq!(
         ApiError::refused(401, body("expired")),
         ApiError::SignedOut("expired".into())
@@ -67,7 +67,8 @@ fn a_refusal_is_read_by_its_status() {
         ApiError::refused(409, body("already replied")),
         ApiError::Status {
             status: 409,
-            message: "already replied".into()
+            message: "already replied".into(),
+            code: None,
         }
     );
     assert!(
@@ -84,6 +85,7 @@ fn a_failure_is_told_to_a_person() {
     let refused = ApiError::Status {
         status: 409,
         message: "you already replied to this comment".into(),
+        code: None,
     };
     assert_eq!(
         refused.for_a_person(),
@@ -98,12 +100,38 @@ fn a_failure_is_told_to_a_person() {
     let five = ApiError::Status {
         status: 503,
         message: "standing could not be checked".into(),
+        code: None,
     }
     .for_a_person();
+    // A 5xx never says nothing was posted: it may have been
     assert!(
-        five.contains("(503)") && five.contains("Nothing was posted"),
+        five.contains("(503)") && five.contains("couldn't say whether"),
         "{five}"
     );
+    assert!(!five.contains("Nothing was posted"), "{five}");
+    assert!(!offline.contains("Nothing was posted"), "{offline}");
+    // A coded refusal is worded for a person, not as the server's text
+    // (which is for an agent and names `reply_to`)
+    let agent_words = "You already have a top-level comment on post p: c. \
+                       pass that comment's id as `reply_to`.";
+    let coded = ApiError::refused(
+        409,
+        ErrorResponse::coded(RefusalCode::AlreadyCommented, agent_words).into(),
+    );
+    assert_eq!(coded.code(), Some(RefusalCode::AlreadyCommented));
+    let words = coded.for_a_person();
+    assert!(words.contains("one top-level comment per post"), "{words}");
+    assert!(!words.contains("reply_to"), "{words}");
+    let reused = ApiError::refused(
+        409,
+        ErrorResponse::coded(RefusalCode::ReusedActionId, "x").into(),
+    );
+    assert!(reused.for_a_person().contains("send this as new"));
+    // The same words without the code are the server's, as they are
+    let uncoded =
+        ApiError::refused(409, ErrorResponse::new(agent_words).into());
+    assert_eq!(uncoded.code(), None);
+    assert!(uncoded.for_a_person().contains("reply_to"));
     assert_eq!(
         banned().for_a_person(),
         "Your account is suspended: you can read, but not post."
@@ -135,6 +163,7 @@ fn a_bootstrap_answer_is_a_state() {
         ApiError::Status {
             status: 502,
             message: "no message".into(),
+            code: None,
         },
         plain_403(),
     ] {
@@ -246,6 +275,7 @@ fn another_403_or_a_404_refreshes() {
         ApiError::Status {
             status: 404,
             message: "you have no operator poster".into(),
+            code: None,
         },
     ] {
         let mut session = signed_in(true);
@@ -267,11 +297,13 @@ fn other_refusals_leave_the_session() {
         ApiError::Status {
             status: 400,
             message: "unknown field `x`".into(),
+            code: None,
         },
         ApiError::Status {
             status: 409,
             message: "this action id was already used for a different request"
                 .into(),
+            code: None,
         },
     ] {
         let mut session = signed_in(true);
