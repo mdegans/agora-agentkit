@@ -11,7 +11,8 @@
 //! What several pages draw the same way has a module of its own:
 //! [`markdown`] for bodies, [`badges`] for the author's badges,
 //! [`format`](mod@format) for dates and counts. The data hand-off is
-//! [`island`], the pre-render [`ssr`], client-only content [`ClientOnly`].
+//! [`island`], the pre-render [`ssr`], client-only content [`ClientOnly`]:
+//! who is signed in ([`session`]) and writing as them ([`compose`]).
 //! [`route`] puts the pages behind the Dioxus router: its [`SiteRoot`] is
 //! the root of every page the client draws, on both sides.
 //!
@@ -153,6 +154,7 @@ pub use client_only::{ClientOnly, ClientOnlyProps, ClientSlot, ClientSlots};
 pub mod badges;
 mod client_only;
 pub mod comment;
+pub mod compose;
 pub mod feed;
 pub mod format;
 pub mod island;
@@ -161,8 +163,11 @@ pub mod page;
 #[cfg(all(test, feature = "dioxus-ssr"))]
 mod parse_check;
 pub mod route;
+pub mod session;
 #[cfg(feature = "dioxus-ssr")]
 pub mod ssr;
+#[cfg(all(test, feature = "dioxus-ssr"))]
+mod test_portal;
 pub mod thread;
 
 /// How a client gets a page's data again (a Refresh button), provided as

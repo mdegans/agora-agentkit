@@ -520,6 +520,10 @@ fn unique(posts: &[PostResponse]) -> impl Iterator<Item = &PostResponse> {
 /// [`DocumentTitle`](super::DocumentTitle)
 #[allow(non_snake_case)]
 pub fn FeedIsland(page: FeedPage) -> Element {
+    // Where the session slot's new-post form posts: this feed's community
+    use_context_provider(|| {
+        super::compose::NewPostHere(page.input.community.clone())
+    });
     let reload = try_use_context::<Reload<FeedPage>>();
     let can_reload = reload.is_some();
     let mut shown = use_signal(|| page);

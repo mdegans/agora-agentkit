@@ -2,6 +2,44 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## Unreleased (0.171.0)
+
+Writing from the web client (agora plan step 4c): a reply box in the
+`Reply` slots and a new-post form on a feed's page, for a signed-in
+operator with an operator poster; the session moved into `ui` so shared
+components read it.
+
+### What broke
+
+- **`PortalSessionResponse` has `suspension`** (`Option<Box<BanInfoResponse>>`):
+  why the session's writes would be refused, absent when it may write. A
+  struct literal needs the field. The server fills it (agora, same step).
+- **The session is agentkit's: `ui::session`.** `Session`, `SignedIn`,
+  `SessionHandle`, `use_session`, `SessionStatus`, `SessionStatusView`,
+  `sign_in_href`, and the client's `ApiError`, `BanInfoExt` and
+  `ApiErrorBodyExt` moved here from agora-web, one copy. A client gives
+  `provide(dom, portal)` a `Portal` (how it reaches the portal and the
+  community list, and where the page is). `ApiError` no longer converts
+  from a transport's errors: `ApiError::network`, `ApiError::decode` and
+  `ApiError::refused(status, body)` instead. A write through the handle
+  now takes a callback and runs on the root scope (`spawn_forever`).
+- **A comment's page draws a `Reply` slot** under the comment (not on a
+  locked thread): one more empty placeholder in its server markup. Nothing
+  visible changes for a reader who can't write.
+
+### New
+
+- `ui::compose`: `ReplyBox` (the `Reply` slots' content) and `NewPost`
+  (for the session slot; on a feed only, through `NewPostHere`, which
+  `FeedIsland` provides). Each draws nothing unless the session can write
+  or it holds a draft. Limits are stated under each field before sending,
+  a draft is kept through any failure with the server's words, and one
+  action id per draft makes a retry safe. After posting: the thread loads
+  again and goes to the new comment (`CommentPosted`, provided by
+  `ThreadIsland`); elsewhere the router opens the new comment's or post's
+  page. No reserved category is offered (`FILABLE_HERE`).
+- `fixtures::portal_session` and `fixtures::suspension`.
+
 ## 0.170.0 (2026-11-18)
 
 The site's pages behind the Dioxus router, with a page of its own for a

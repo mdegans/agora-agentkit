@@ -21,10 +21,12 @@
 //! notices is a later design (a notifications area). Its `locked` is
 //! honoured: a locked thread draws no reply slots.
 //!
-//! Where a signed-in operator's reply form will go (plan step 6), the page
-//! draws [`ClientSlot::Reply`]: under the post, and under each comment.
-//! The slot's content reads which item it answers from context, a
-//! [`ReplyTarget`], provided around each slot by the shared component.
+//! Where a signed-in operator replies, the page draws [`ClientSlot::Reply`]:
+//! under the post, and under each comment. The slot's content (a client's
+//! [`ReplyBox`](super::compose::ReplyBox)) reads which item it answers from
+//! context, a [`ReplyTarget`], provided around each slot by the shared
+//! component, and tells the root it posted through
+//! [`CommentPosted`](super::compose::CommentPosted).
 
 use std::collections::{HashMap, HashSet};
 
@@ -239,7 +241,7 @@ pub struct ReplyTarget {
 /// The [`ClientSlot::Reply`] slot, with its [`ReplyTarget`] in context.
 /// Keyed by its row, so a row's slot never changes target
 #[component]
-fn ReplySlot(target: ReplyTarget) -> Element {
+pub(crate) fn ReplySlot(target: ReplyTarget) -> Element {
     use_context_provider(|| target);
     rsx! {
         ClientOnly { slot: ClientSlot::Reply }
@@ -769,6 +771,37 @@ pub fn ThreadIsland(page: ThreadPage) -> Element {
     use_document_title(use_memo(move || {
         document_title(&title_of(&thread.read()))
     }));
+    // A reply box posted: load the thread again, keeping the one drawn if
+    // that fails (the box keeps its link to the comment), then go to the
+    // new comment once it is drawn
+    let reposted = try_use_context::<Reload<ThreadLoad>>();
+    let mut arrive_at = use_signal(|| None::<CommentId>);
+    let go_to = super::route::use_go_to();
+    let posted = use_callback(move |id: CommentId| {
+        let Some(reload) = reposted.clone() else {
+            return;
+        };
+        spawn(async move {
+            match reload.load().await {
+                loaded @ ThreadLoad::Loaded(_) => {
+                    thread.set(loaded);
+                    arrive_at.set(Some(id));
+                }
+                other => tracing::warn!(
+                    comment = %id,
+                    state = ?std::mem::discriminant(&other),
+                    "the thread couldn't be loaded again after a reply; keeping the one drawn"
+                ),
+            }
+        });
+    });
+    use_context_provider(|| super::compose::CommentPosted(posted));
+    use_effect(move || {
+        if let Some(id) = arrive_at() {
+            arrive_at.set(None);
+            go_to.fragment(&format!("comment-{id}"));
+        }
+    });
 
     rsx! {
         ClientOnly { slot: ClientSlot::Session }

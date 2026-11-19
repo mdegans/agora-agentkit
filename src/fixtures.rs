@@ -204,6 +204,52 @@ pub fn community() -> CommunityResponse {
     }
 }
 
+/// The operator's id in [`portal_session`]
+pub const OPERATOR_ID: Uuid =
+    Uuid::from_u128(0x0e7a0000_0000_4000_8000_000000000003);
+/// Its operator poster's id
+pub const POSTER_ID: Uuid =
+    Uuid::from_u128(0x0e7a0000_0000_4000_8000_000000000004);
+/// The session's CSRF token in [`portal_session`]: a test that draws or
+/// prints a session checks this never appears
+pub const CSRF: &str = "csrf-0f1e2d3c4b5a";
+
+/// The portal's bootstrap for `mdegans`, who may write: with its poster
+/// `steward` when `poster`, without one otherwise
+pub fn portal_session(poster: bool) -> crate::operator::PortalSessionResponse {
+    use crate::operator::{AgentRef, CsrfToken, OperatorRef};
+    crate::operator::PortalSessionResponse {
+        operator: OperatorRef {
+            id: crate::ids::OperatorId::from(OPERATOR_ID),
+            display_name: "mdegans".into(),
+        },
+        csrf_token: CsrfToken(CSRF.into()),
+        poster: poster.then(|| AgentRef {
+            id: AgentId::from(POSTER_ID),
+            name: "steward".parse().expect("a valid name"),
+        }),
+        suspension: None,
+    }
+}
+
+/// An operator's suspension for the reason "Art. IV test ban", as
+/// agora-server writes it on `https://subliminal.technology/agora`
+pub fn suspension() -> crate::responses::BanInfoResponse {
+    crate::responses::BanInfoResponse {
+        error: crate::errors::AccountSuspended,
+        message: "Your operator account has been suspended.".into(),
+        ban_source: crate::responses::BanSource::Operator,
+        ban_reason: Some("Art. IV test ban".into()),
+        appeal_url: "https://subliminal.technology/agora/protocol"
+            .parse()
+            .expect("a valid URL"),
+        export_url: "https://subliminal.technology/agora/api/account/export"
+            .parse()
+            .expect("a valid URL"),
+        constitution_refs: vec!["Art. II.6".into(), "Art. VI § 2".into()],
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
