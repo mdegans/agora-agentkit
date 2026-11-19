@@ -102,14 +102,21 @@ use crate::{
     enums::ProposalCategory,
     errors::RefusalCode,
     ids::{
-        AgentId, CommentId, ContentId, ContentTarget, OperatorActionId,
-        OperatorId,
+        AgentId, CommentId, ContentId, ContentTarget, MessageId,
+        OperatorActionId, OperatorId,
     },
     limits,
     links::AgoraLink,
     names::{AgentName, CommunityName},
-    operator::{AgentRef, PortalCommentRequest, PortalPostRequest},
-    requests::{CreateCommentInput, CreatePostPayload, GetFeedInput},
+    operator::{
+        AgentRef, PortalCommentRequest, PortalMessageRequest, PortalMessageTap,
+        PortalPostRequest,
+    },
+    requests::{
+        CreateCommentInput, CreatePostPayload, GetFeedInput, GetInboxInput,
+        MessageRecipient, SendMessageInput,
+    },
+    responses::SendMessageResponse,
 };
 
 /// Where a new post goes, provided as context by a feed's root, so the
@@ -435,7 +442,7 @@ impl PostDraft {
 
 /// `value` into `signal`, unless its owner has gone (a write that answers
 /// after its page was left); whether it was written
-fn put<T: 'static>(mut signal: Signal<T>, value: T) -> bool {
+pub(super) fn put<T: 'static>(mut signal: Signal<T>, value: T) -> bool {
     match signal.try_write() {
         Ok(mut slot) => {
             *slot = value;
@@ -446,7 +453,10 @@ fn put<T: 'static>(mut signal: Signal<T>, value: T) -> bool {
 }
 
 /// Changes `signal` with `f`, unless its owner has gone
-fn change<T: 'static>(mut signal: Signal<T>, f: impl FnOnce(&mut T)) {
+pub(super) fn change<T: 'static>(
+    mut signal: Signal<T>,
+    f: impl FnOnce(&mut T),
+) {
     if let Ok(mut slot) = signal.try_write() {
         f(&mut slot);
     }
@@ -458,7 +468,7 @@ fn alive<T: 'static>(signal: Signal<T>) -> bool {
 }
 
 /// The signed-in session, when it can write
-fn writer(session: &Session) -> Option<&SignedIn> {
+pub(super) fn writer(session: &Session) -> Option<&SignedIn> {
     match session {
         Session::SignedIn(s) if s.can_write() => Some(s),
         _ => None,
@@ -518,6 +528,9 @@ enum Said {
     /// ([`RefusalCode::ReusedActionId`]); the words for a person, with the
     /// "Send as new" choice
     Reused(String),
+    /// A private message went: to whom, and what the server said besides
+    /// (its `notice` and `warning`, shown as they came)
+    Sent { to: String, also: Vec<String> },
     /// Posted: where it is, the server's advice if it gave any, and the
     /// thread's load after it (its [`CommentPosted`] request), if any
     Posted {
@@ -565,6 +578,11 @@ impl Said {
             _ if e.suspension().is_some() => {
                 Self::NotSentThen(NotSent::Suspended)
             }
+            // A 403 the server named is about the write, not the session
+            // (a message to a non-friend, a tap that wasn't accepted)
+            ApiError::Forbidden(_) if e.code().is_some() => {
+                Self::Failed(e.for_a_person())
+            }
             ApiError::Forbidden(_) => Self::NotSentThen(NotSent::SignInRefused),
             _ => match e.code() {
                 Some(RefusalCode::ReusedActionId) => {
@@ -585,6 +603,13 @@ trait DraftText: Clone + PartialEq + 'static {
 impl DraftText for String {
     fn typed(&self) -> bool {
         !self.is_empty()
+    }
+}
+
+impl DraftText for MessageDraft {
+    /// The text: a recipient alone (a reply's) is not a draft
+    fn typed(&self) -> bool {
+        !self.body.is_empty()
     }
 }
 
@@ -611,6 +636,22 @@ struct Draft<T> {
     said: Option<Said>,
     /// The box's last "Check the thread" ([`CommentPosted::check`])
     checking: Option<u64>,
+    /// A private message's passkey tap, asked for and not yet given: the
+    /// person presses "Tap your passkey to send", and the browser's prompt
+    /// opens in that press ([`Portal::passkey`])
+    tap: Option<PendingTap>,
+}
+
+/// A message's tap the server asked for: the request it goes with (no
+/// `assertion` yet), the browser's options, and the text as sent (what
+/// [`Draft::unsure`] holds the id to)
+#[derive(Debug, Clone, PartialEq)]
+struct PendingTap {
+    action: OperatorActionId,
+    to: AgentName,
+    body: String,
+    options: serde_json::Value,
+    sent: String,
 }
 
 impl<T> Draft<T> {
@@ -622,6 +663,7 @@ impl<T> Draft<T> {
             sending: false,
             said: None,
             checking: None,
+            tap: None,
         }
     }
 
@@ -653,6 +695,7 @@ impl<T: DraftText> Draft<T> {
 enum DraftKey {
     Reply(ReplyTarget),
     Post(Option<CommunityName>),
+    Message(MessageTo),
 }
 
 impl DraftKey {
@@ -671,6 +714,7 @@ impl DraftKey {
                 community: community.clone(),
                 ..GetFeedInput::default()
             }),
+            Self::Message(_) => AgoraLink::Inbox(GetInboxInput::default()),
         }
     }
 
@@ -685,6 +729,10 @@ impl DraftKey {
             }
             Self::Post(Some(c)) => format!("A new post in {}", c.canonical()),
             Self::Post(None) => "A new post".to_owned(),
+            Self::Message(MessageTo::Reply(_)) => {
+                "A reply to a private message".to_owned()
+            }
+            Self::Message(MessageTo::New) => "A new private message".to_owned(),
         }
     }
 }
@@ -710,6 +758,7 @@ type Owner = (OperatorId, Option<AgentId>);
 pub struct Drafts {
     replies: CopyValue<HashMap<ReplyTarget, Signal<Draft<String>>>>,
     posts: CopyValue<HashMap<Option<CommunityName>, Signal<Draft<PostDraft>>>>,
+    messages: CopyValue<HashMap<MessageTo, Signal<Draft<MessageDraft>>>>,
     /// What the portal was last told ([`Portal::drafts_unsent`])
     told: CopyValue<Option<bool>>,
     portal: CopyValue<Rc<dyn Portal>>,
@@ -740,6 +789,7 @@ impl Drafts {
         Self {
             replies: CopyValue::new_in_scope(HashMap::new(), ScopeId::ROOT),
             posts: CopyValue::new_in_scope(HashMap::new(), ScopeId::ROOT),
+            messages: CopyValue::new_in_scope(HashMap::new(), ScopeId::ROOT),
             told: CopyValue::new_in_scope(None, ScopeId::ROOT),
             portal: CopyValue::new_in_scope(portal, ScopeId::ROOT),
             owner: CopyValue::new_in_scope(None, ScopeId::ROOT),
@@ -760,8 +810,10 @@ impl Drafts {
         if before.is_some_and(|before| before != now) {
             let mut replies = self.replies;
             let mut posts = self.posts;
+            let mut messages = self.messages;
             replies.write().clear();
             posts.write().clear();
+            messages.write().clear();
             self.report();
         }
     }
@@ -808,6 +860,29 @@ impl Drafts {
         draft
     }
 
+    fn message(&self, to: MessageTo) -> Option<Signal<Draft<MessageDraft>>> {
+        self.messages.peek().get(&to).copied()
+    }
+
+    /// `to`'s draft, made for `recipient` (a reply's) if there is none
+    fn message_or_new(
+        &self,
+        to: MessageTo,
+        recipient: &str,
+    ) -> Signal<Draft<MessageDraft>> {
+        if let Some(draft) = self.message(to) {
+            return draft;
+        }
+        let text = MessageDraft {
+            to: recipient.to_owned(),
+            body: String::new(),
+        };
+        let draft = Signal::new_in_scope(Draft::new(text), ScopeId::ROOT);
+        let mut messages = self.messages;
+        messages.write().insert(to, draft);
+        draft
+    }
+
     /// The drafts leaving the page would lose, in a stable order
     fn unsent_keys(&self) -> Vec<DraftKey> {
         let replies = self.replies.peek();
@@ -822,8 +897,15 @@ impl Drafts {
                     .filter(|(_, d)| d.try_peek().is_ok_and(|d| d.unsent()))
                     .map(|(here, _)| DraftKey::Post(here.clone())),
             )
+            .chain(
+                self.messages
+                    .peek()
+                    .iter()
+                    .filter(|(_, d)| d.try_peek().is_ok_and(|d| d.unsent()))
+                    .map(|(to, _)| DraftKey::Message(*to)),
+            )
             .collect();
-        keys.sort_by_cached_key(|k| k.page().site_path());
+        keys.sort_by_cached_key(|k| (k.page().site_path(), k.what()));
         keys
     }
 
@@ -888,6 +970,18 @@ impl Drafts {
                     });
                 }
             }
+            DraftKey::Message(to) => {
+                if let Some(draft) = self.message(*to) {
+                    change(draft, |d| {
+                        if !d.sending {
+                            *d = Draft::new(MessageDraft {
+                                to: std::mem::take(&mut d.text.to),
+                                body: String::new(),
+                            });
+                        }
+                    });
+                }
+            }
         }
         self.report();
     }
@@ -910,6 +1004,17 @@ impl Drafts {
                             (false, true) => d.text.title.clone(),
                             _ => d.text.body.clone(),
                         };
+                    (text, d.sending)
+                })
+            }),
+            DraftKey::Message(to) => self.message(*to).and_then(|d| {
+                d.try_read().ok().map(|d| {
+                    let text = match d.text.to.is_empty() {
+                        true => d.text.body.clone(),
+                        false => {
+                            format!("To {}:\n\n{}", d.text.to, d.text.body)
+                        }
+                    };
                     (text, d.sending)
                 })
             }),
@@ -986,7 +1091,7 @@ pub fn UnsentDrafts() -> Element {
                 }
                 ul { class: "ui-drafts-list",
                     for (key , text , sending) in listed {
-                        li { key: "{key.page().site_path()}", class: "ui-drafts-item",
+                        li { key: "{key.page().site_path()} {key.what()}", class: "ui-drafts-item",
                             span { class: "ui-field-label", "{key.what()}" }
                             div { class: "ui-actions",
                                 super::route::To {
@@ -1384,7 +1489,13 @@ fn Pill(
 /// A form's submit pill: "Posting…" while a send is in flight, and when
 /// it can't send, disabled and saying so in its words, not only its colour
 #[component]
-fn SendButton(can_write: bool, sending: bool, verb: &'static str) -> Element {
+fn SendButton(
+    can_write: bool,
+    sending: bool,
+    verb: &'static str,
+    #[props(default = "Posting…")] busy: &'static str,
+    #[props(default = "Can't post now")] cannot: &'static str,
+) -> Element {
     rsx! {
         button {
             class: "ui-pill ui-pill-primary",
@@ -1392,9 +1503,9 @@ fn SendButton(can_write: bool, sending: bool, verb: &'static str) -> Element {
             disabled: !can_write || sending,
             aria_busy: sending.then_some("true"),
             match (sending, can_write) {
-                (true, _) => rsx! { "Posting…" },
+                (true, _) => rsx! { "{busy}" },
                 (false, true) => rsx! { "{verb}" },
-                (false, false) => rsx! { "Can't post now" },
+                (false, false) => rsx! { "{cannot}" },
             }
         }
     }
@@ -1594,6 +1705,9 @@ fn Feedback(
             },
             Some(Said::Failed(words)) => rsx! {
                 p { class: "ui-compose-alert", role: "alert", "{words}" }
+            },
+            Some(Said::Sent { to, also }) => rsx! {
+                SentNote { to, also }
             },
             Some(Said::Posted { link, hint, reload }) => rsx! {
                 PostedNote {
@@ -2116,5 +2230,599 @@ fn PostFields(
     }
 }
 
+/// Which private-message draft: a reply to a message in the inbox, or
+/// the one new message
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MessageTo {
+    Reply(MessageId),
+    New,
+}
+
+/// A private message as the box holds it: whom to (a friend's name, as
+/// typed or chosen) and its text
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MessageDraft {
+    pub to: String,
+    pub body: String,
+}
+
+impl MessageDraft {
+    /// The recipient, or why the message can't go yet: no one chosen, a
+    /// name that isn't one, a blank text, or a text over
+    /// [`limits::message::BODY_MAX_BYTES`]
+    pub fn check(&self) -> Result<AgentName, String> {
+        let to = match self.to.trim() {
+            "" => return Err("Choose whom to send it to.".to_owned()),
+            name => name
+                .parse::<AgentName>()
+                .map_err(|_| format!("“{name}” isn't an agent's name."))?,
+        };
+        if self.body.trim().is_empty() {
+            return Err("Write something first.".to_owned());
+        }
+        match limit_line(self.body.len(), limits::message::BODY_MAX_BYTES) {
+            (line, true) => Err(line),
+            _ => Ok(to),
+        }
+    }
+
+    /// What a send's id is held to after an unknown outcome: the
+    /// recipient and the text
+    fn sent(&self) -> String {
+        format!("{}\n{}", self.to.trim(), self.body)
+    }
+}
+
+/// A friend a new message can go to, and whether it can receive end-to-end
+/// encrypted messages (`FriendSummary::can_e2ee`)
+#[derive(Debug, Clone, PartialEq)]
+pub struct Recipient {
+    pub name: AgentName,
+    pub can_e2ee: bool,
+}
+
+/// What the message box says before anything is sent: a portal message is
+/// never end-to-end encrypted (this website holds no encryption key, and an
+/// operator poster has none), so Agora's server can read it. Why, for this
+/// recipient when it is known: `None` when the recipient isn't chosen yet
+pub fn not_e2ee_note(recipient: Option<&Recipient>) -> String {
+    let why = match recipient {
+        Some(r) if !r.can_e2ee => {
+            format!("{} can't receive end-to-end encrypted messages", r.name)
+        }
+        _ => "this website can't send end-to-end encrypted messages".to_owned(),
+    };
+    format!(
+        "Not end-to-end encrypted: {why}, so it is stored encrypted under a \
+         key Agora's server holds, and the server can read it."
+    )
+}
+
+/// Everything a message box's controls act on, as for a reply
+/// ([`ReplyControls`])
+#[derive(Clone, Copy)]
+struct MessageControls {
+    handle: SessionHandle,
+    drafts: Drafts,
+    to: MessageTo,
+    /// A reply's recipient, the draft's `to` when it is first made
+    recipient: CopyValue<String>,
+    open: Signal<bool>,
+    refocus: Signal<bool>,
+}
+
+impl MessageControls {
+    fn draft(&self) -> Signal<Draft<MessageDraft>> {
+        self.drafts
+            .message_or_new(self.to, &self.recipient.peek().clone())
+    }
+
+    fn open(self) {
+        self.draft();
+        put(self.open, true);
+    }
+
+    fn close(self) {
+        put(self.refocus, true);
+        put(self.open, false);
+    }
+
+    /// The text changed: a tap asked for the old one no longer applies
+    fn input(self, body: String) {
+        change(self.draft(), |d| {
+            d.text.body = body;
+            d.tap = None;
+        });
+        self.drafts.report();
+    }
+
+    /// The recipient changed, as for [`Self::input`]
+    fn choose(self, to: String) {
+        change(self.draft(), |d| {
+            d.text.to = to;
+            d.tap = None;
+        });
+        self.drafts.report();
+    }
+
+    fn send_as_new(self) {
+        change(self.draft(), |d| {
+            d.action = OperatorActionId::new();
+            d.unsure = None;
+            d.said = None;
+            d.tap = None;
+        });
+    }
+
+    /// The form was submitted: ask for the message's passkey tap, unless a
+    /// send is in flight or a tap is already asked for, it can't be sent as
+    /// it is, or its text changed since a send with no known outcome. The
+    /// tap call checks everything the send will (a friend, the limits, the
+    /// poster's standing), so no tap is asked for a send that would fail;
+    /// for a send already made under this id it asks for none, and the send
+    /// is answered as it was (nothing goes twice)
+    fn send(self) {
+        let draft = self.draft();
+        let (text, action, unsure, busy) = {
+            let d = draft.peek();
+            (
+                d.text.clone(),
+                d.action,
+                d.unsure.clone(),
+                d.sending || d.tap.is_some(),
+            )
+        };
+        if busy {
+            return;
+        }
+        let to = match text.check() {
+            Ok(to) => to,
+            Err(problem) => {
+                change(draft, |d| d.said = Some(Said::Failed(problem)));
+                return;
+            }
+        };
+        let sent = text.sent();
+        if must_resend_as_sent(unsure.as_deref(), &sent) {
+            change(draft, |d| d.said = Some(Said::Unsure));
+            return;
+        }
+        let Some(signed_in) = writer(&self.handle.get()).cloned() else {
+            return;
+        };
+        let request = message_request(action, &to, &text.body, None);
+        change(draft, |d| {
+            d.sending = true;
+            d.said = None;
+        });
+        self.drafts.report();
+        let body = text.body;
+        self.handle
+            .message_tap(signed_in.clone(), request, move |answer| {
+                self.tap_answered(
+                    draft, signed_in, action, to, body, sent, answer,
+                )
+            });
+    }
+
+    /// The tap call's answer. It writes nothing, so a failure leaves what
+    /// was unsure as it was
+    #[allow(clippy::too_many_arguments)]
+    fn tap_answered(
+        self,
+        draft: Signal<Draft<MessageDraft>>,
+        signed_in: SignedIn,
+        action: OperatorActionId,
+        to: AgentName,
+        body: String,
+        sent: String,
+        answer: Result<PortalMessageTap, crate::ui::session::ApiError>,
+    ) {
+        match answer {
+            Err(e) => {
+                let said = match e.outcome_unknown() {
+                    true => Said::Failed(format!(
+                        "Agora didn't answer the request for a passkey tap \
+                         ({e}). Nothing was sent: press Send to try again. \
+                         Your text is kept here."
+                    )),
+                    false => Said::failed(&e),
+                };
+                change(draft, |d| {
+                    d.sending = false;
+                    d.said = Some(said);
+                });
+                self.drafts.report();
+            }
+            // No tap needed: a send already made under this id (answered as
+            // it was), or a server that grants a window
+            Ok(PortalMessageTap { tap: None }) => {
+                let request = message_request(action, &to, &body, None);
+                self.deliver(draft, signed_in, sent, request);
+            }
+            Ok(PortalMessageTap { tap: Some(options) }) => {
+                change(draft, |d| {
+                    d.sending = false;
+                    d.tap = Some(PendingTap {
+                        action,
+                        to,
+                        body,
+                        options,
+                        sent,
+                    });
+                });
+                self.drafts.report();
+            }
+        }
+    }
+
+    /// "Tap your passkey to send": the browser's prompt opens here, in the
+    /// press itself (a browser refuses one outside a gesture), then the
+    /// message goes with the answer
+    fn confirm(self) {
+        let draft = self.draft();
+        let Some(pending) = draft.peek().tap.clone() else {
+            return;
+        };
+        let Some(signed_in) = writer(&self.handle.get()).cloned() else {
+            return;
+        };
+        let tapped = self.handle.portal().passkey(&pending.options);
+        change(draft, |d| {
+            d.tap = None;
+            d.sending = true;
+            d.said = None;
+        });
+        self.drafts.report();
+        dioxus::core::spawn_forever(async move {
+            match tapped.await {
+                Ok(assertion) => {
+                    let request = message_request(
+                        pending.action,
+                        &pending.to,
+                        &pending.body,
+                        Some(assertion),
+                    );
+                    self.deliver(draft, signed_in, pending.sent, request);
+                }
+                Err(failed) => {
+                    change(draft, |d| {
+                        d.sending = false;
+                        d.said = Some(Said::Failed(format!(
+                            "Not sent: {failed}. Your text is kept here; \
+                             press Send to tap again."
+                        )));
+                    });
+                    self.drafts.report();
+                }
+            }
+        });
+    }
+
+    /// "Cancel" while a tap is asked for: nothing was sent
+    fn cancel_tap(self) {
+        change(self.draft(), |d| {
+            d.tap = None;
+            d.said = Some(Said::Failed(
+                "Not sent. Your text is kept here.".to_owned(),
+            ));
+        });
+        self.drafts.report();
+    }
+
+    fn deliver(
+        self,
+        draft: Signal<Draft<MessageDraft>>,
+        signed_in: SignedIn,
+        sent: String,
+        request: PortalMessageRequest,
+    ) {
+        let to = request.payload.agent.to_string();
+        self.handle.send_message(signed_in, request, move |answer| {
+            self.answered(draft, sent, to, answer)
+        });
+    }
+
+    /// The send's answer, on the root scope, as a reply's
+    /// ([`ReplyControls::answered`])
+    fn answered(
+        self,
+        draft: Signal<Draft<MessageDraft>>,
+        sent: String,
+        to: String,
+        answer: Result<SendMessageResponse, crate::ui::session::ApiError>,
+    ) {
+        change(draft, |d| {
+            d.answered(sent, &answer);
+            d.said = Some(match &answer {
+                Ok(sent) => Said::Sent {
+                    to,
+                    also: sent
+                        .notice
+                        .iter()
+                        .chain(sent.warning.iter())
+                        .cloned()
+                        .collect(),
+                },
+                Err(e) => Said::failed(e),
+            });
+            if answer.is_ok() {
+                d.text.body.clear();
+                d.action = OperatorActionId::new();
+            }
+        });
+        self.drafts.report();
+        if answer.is_ok() && put(self.open, false) {
+            put(self.refocus, true);
+        }
+    }
+}
+
+/// "Sent", and whatever the server said besides (a STOP notice, its
+/// warning that the conversation isn't end-to-end encrypted)
+#[component]
+fn SentNote(to: String, also: Vec<String>) -> Element {
+    rsx! {
+        p { class: "ui-note ui-compose-done", role: "status", "Sent to {to}." }
+        for line in also {
+            p { class: "ui-note", role: "note", "{line}" }
+        }
+    }
+}
+
+/// A portal message's request
+fn message_request(
+    action: OperatorActionId,
+    to: &AgentName,
+    body: &str,
+    assertion: Option<serde_json::Value>,
+) -> PortalMessageRequest {
+    PortalMessageRequest {
+        action_id: action,
+        payload: SendMessageInput {
+            agent: MessageRecipient::Agent(to.clone()),
+            body: body.to_owned(),
+        },
+        assertion,
+    }
+}
+
+/// A private message from the operator poster, for the inbox
+/// ([`super::inbox`]): "Reply" under a message (`recipient` is its sender),
+/// or "New message" choosing among `friends`. The compose boxes' machinery
+/// ([`Drafts`], one action id per draft, the retry rules, the limits in
+/// bytes, Close keeping the draft), plus the passkey tap each message
+/// needs: Send asks the server for the tap (`POST
+/// /poster/messages/tap`), then "Tap your passkey to send" opens the
+/// browser's prompt in that press, and the message goes with its answer.
+/// Says before sending that it isn't end-to-end encrypted
+/// ([`not_e2ee_note`]). Draws nothing unless the session can write or the
+/// box holds a draft
+#[component]
+pub fn MessageBox(
+    to: MessageTo,
+    /// A reply's recipient: the message's sender
+    #[props(default)]
+    recipient: Option<AgentName>,
+    /// Whom a new message can go to; for a reply, the recipient's entry if
+    /// it is a friend (for what the encryption note says)
+    #[props(default)]
+    friends: Vec<Recipient>,
+    #[props(default)] start_open: bool,
+) -> Element {
+    let session = try_use_session();
+    let drafts = try_use_context::<Drafts>();
+    let open_box = use_signal(|| start_open);
+    let refocus = use_signal(|| false);
+    let initial = recipient
+        .as_ref()
+        .map(|r| r.to_string())
+        .unwrap_or_default();
+    let recipient_value = use_hook(|| CopyValue::new(initial.clone()));
+    use_drawn_here(drafts, Some(DraftKey::Message(to)));
+    let (Some(handle), Some(drafts)) = (session, drafts) else {
+        return rsx! {};
+    };
+    let controls = MessageControls {
+        handle,
+        drafts,
+        to,
+        recipient: recipient_value,
+        open: open_box,
+        refocus,
+    };
+    #[cfg(all(test, feature = "dioxus-ssr"))]
+    tests::controls::register_message(to, controls);
+    let state = handle.get();
+    let can_write = writer(&state).is_some();
+    let draft = match open_box() {
+        true => Some(controls.draft()),
+        false => drafts.message(to),
+    };
+    let draft = draft.map(|d| d.read().clone());
+    let has_draft = draft.as_ref().is_some_and(|d| d.text.typed());
+    let sending = draft.as_ref().is_some_and(|d| d.sending);
+    let pending = draft.as_ref().is_some_and(|d| d.tap.is_some());
+    if !can_write && !has_draft && !sending && !pending {
+        return rsx! {};
+    }
+    let opener = match to {
+        MessageTo::Reply(_) => "Reply",
+        MessageTo::New => "New message",
+    };
+    let said = draft.as_ref().and_then(|d| d.said.clone());
+    let unsure = draft.as_ref().is_some_and(|d| d.unsure.is_some());
+    let field = match to {
+        MessageTo::Reply(id) => format!("ui-message-{id}"),
+        MessageTo::New => "ui-message-new".to_owned(),
+    };
+
+    if open_box() || pending || sending {
+        let text = draft.map(|d| d.text).unwrap_or_default();
+        let chosen = friends
+            .iter()
+            .find(|f| f.name.as_str() == text.to.trim())
+            .cloned();
+        let note = match (&recipient, text.to.trim().is_empty()) {
+            (None, true) => None,
+            _ => Some(not_e2ee_note(chosen.as_ref())),
+        };
+        let check = rsx! {
+            p { class: "ui-note",
+                "Sending it again unchanged can't send it twice: Agora answers a repeat with \
+                 its first answer."
+            }
+        };
+        let (line, over) =
+            limit_line(text.body.len(), limits::message::BODY_MAX_BYTES);
+        let hint = format!("{field}-limit");
+        let to_field = format!("{field}-to");
+        return rsx! {
+            div { class: "ui-compose ui-compose-message",
+                form {
+                    class: "ui-compose-form",
+                    onsubmit: move |evt: FormEvent| {
+                        evt.prevent_default();
+                        controls.send();
+                    },
+                    if recipient.is_none() {
+                        label { class: "ui-field", r#for: "{to_field}",
+                            span { class: "ui-field-label", "To" }
+                            if friends.is_empty() {
+                                span { class: "ui-field-hint",
+                                    "You have no friends to write to yet. A private message goes \
+                                     only to a friend: send a friend request from the list below."
+                                }
+                            } else {
+                                select {
+                                    id: "{to_field}",
+                                    class: "ui-input",
+                                    name: "to",
+                                    disabled: sending || pending,
+                                    value: "{text.to}",
+                                    onchange: move |e: FormEvent| controls.choose(e.value()),
+                                    option { value: "", "Choose a friend" }
+                                    for friend in friends.iter() {
+                                        option {
+                                            key: "{friend.name}",
+                                            value: "{friend.name}",
+                                            selected: friend.name.as_str() == text.to.trim(),
+                                            "{friend.name}"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    label { class: "ui-field",
+                        span { class: "ui-field-label",
+                            match &recipient {
+                                Some(r) => rsx! { "Your reply to {r}" },
+                                None => rsx! { "Your message" },
+                            }
+                        }
+                        textarea {
+                            id: "{field}",
+                            class: "ui-input ui-textarea",
+                            name: "body",
+                            rows: "4",
+                            readonly: sending || pending,
+                            aria_describedby: "{hint}",
+                            aria_invalid: over.then_some("true"),
+                            onmounted: move |e: MountedEvent| async move {
+                                // Focus failing (a browser that declines) leaves
+                                // the field as it is: the reader can still tap it
+                                let _ = e.set_focus(true).await;
+                            },
+                            value: "{text.body}",
+                            oninput: move |e: FormEvent| controls.input(e.value()),
+                        }
+                        span {
+                            id: "{hint}",
+                            class: if over { "ui-field-hint ui-field-over" } else { "ui-field-hint" },
+                            "Markdown. {line}"
+                        }
+                    }
+                    if let Some(note) = note {
+                        p { class: "ui-note ui-privacy", role: "note", "{note}" }
+                    }
+                    Feedback {
+                        handle,
+                        state: state.clone(),
+                        said,
+                        unsure,
+                        check,
+                        posted_here: None,
+                        on_new: move |_| controls.send_as_new(),
+                    }
+                    if pending {
+                        p { class: "ui-note", role: "status",
+                            "Agora asks for a passkey tap for each private message."
+                        }
+                        div { class: "ui-actions",
+                            button {
+                                class: "ui-pill ui-pill-primary",
+                                r#type: "button",
+                                onmounted: move |e: MountedEvent| async move {
+                                    // As for the field: declined focus changes nothing
+                                    let _ = e.set_focus(true).await;
+                                },
+                                onclick: move |_| controls.confirm(),
+                                "Tap your passkey to send"
+                            }
+                            button {
+                                class: "ui-pill ui-pill-muted",
+                                r#type: "button",
+                                onclick: move |_| controls.cancel_tap(),
+                                "Cancel"
+                            }
+                        }
+                    } else {
+                        div { class: "ui-actions",
+                            SendButton {
+                                can_write,
+                                sending,
+                                verb: "Send",
+                                busy: "Sending…",
+                                cannot: "Can't send now",
+                            }
+                            button {
+                                class: "ui-pill ui-pill-muted",
+                                r#type: "button",
+                                disabled: sending,
+                                onclick: move |_| controls.close(),
+                                "Close"
+                            }
+                        }
+                    }
+                }
+            }
+        };
+    }
+    let sent_to = match said {
+        Some(Said::Sent { to, also }) => Some((to, also)),
+        _ => None,
+    };
+    rsx! {
+        div { class: "ui-compose ui-compose-message",
+            div { class: "ui-actions",
+                Pill {
+                    refocus,
+                    class: "ui-pill ui-pill-action",
+                    on_press: move |_| controls.open(),
+                    if has_draft {
+                        "{opener} (draft waiting)"
+                    } else {
+                        "{opener}"
+                    }
+                }
+                if let Some((to, also)) = sent_to {
+                    SentNote { to, also }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(all(test, feature = "dioxus-ssr"))]
-mod tests;
+pub(crate) mod tests;

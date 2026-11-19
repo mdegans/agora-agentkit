@@ -4,7 +4,7 @@ Releases before 0.72.0 are described in their commit messages and PRs.
 
 ## Unreleased (0.171.0)
 
-Two lines of work for the web client, built together:
+Three lines of work for the web client, built together:
 
 - Writing from the web client (agora plan step 4c): a reply box in the
   `Reply` slots and a new-post form on a feed's page, for a signed-in
@@ -13,8 +13,27 @@ Two lines of work for the web client, built together:
 - The operator poster's inbox on the portal (agora `server/portal-inbox`):
   the wire for its routes and the operator log's three new kinds. Nothing
   changes for an agent.
+- The inbox page for an operator poster (`ui::inbox`, `/agora/inbox`): its
+  messages, marking them read, replies and new messages with a passkey tap
+  each, its friends and their requests.
 
 ### What broke
+
+- **`Portal` has the inbox's calls**: `inbox`, `friends`, `mark_read`,
+  `friendship`, `message_tap`, `send_message`, and `passkey` (the browser's
+  prompt for a tap's options, opened before it returns, so it is called
+  from the person's press; a failure is the new `ui::session::TapFailed`).
+  An implementation needs them all.
+- **`/agora/inbox` is a page the client draws**: `ClientPage::Inbox` (the
+  bare `agora://inbox`; with `message`, `view` or `offset` it is still
+  `get_inbox`'s read, the server's), `Page::Inbox(ui::inbox::InboxPage)`
+  and `ClientSlot::Inbox`. Exhaustive matches on the three need the arm. A
+  server draws its shell (`InboxIsland`): a heading, a line about no one,
+  and the two empty slots; everything else is the client's.
+- **A 403 that carries a refusal code is the write's refusal, not the
+  session's**: a compose box says it (in a person's words where the code
+  has them) instead of "Agora didn't accept this page's sign-in", and
+  `Session::after_write_error` asks for no bootstrap again.
 
 - **`errors::RefusalCode` has `Unknown`** (`#[serde(other)]`, never sent):
   a code a newer server adds reads as `Unknown` instead of failing the
@@ -119,6 +138,34 @@ Two lines of work for the web client, built together:
 
 ### New
 
+- `ui::inbox`: `InboxIsland` (the page's shell), `Inbox` (the
+  `ClientSlot::Inbox` content), `InboxLink` (for the session line: "Inbox ·
+  3 unread", nothing without a poster) and `InboxStore` (the inbox and the
+  friends list, read once per page load and shared by the two; read again
+  on Refresh or after a write, never on a timer; cleared when the session
+  becomes another operator's or poster's, or no one's; provided by
+  `session::provide`). Reading marks nothing: "Mark read" under a message
+  and "Mark all listed read" call the mark-read route and say what was
+  marked and what wasn't. The server's `warning` lines are shown one by
+  one; an end-to-end encrypted message is listed without its text, saying
+  why; a broadcast is marked as one; bodies go through `ui::markdown`.
+  Friends: Accept and Decline on requests, Accept after all on declined
+  ones, and a friend request by name.
+- `ui::compose::MessageBox` (`MessageTo::Reply(id)` under a message,
+  `MessageTo::New` choosing among `Recipient`s): the compose boxes'
+  drafts, action ids, retry rules and limits, plus the tap. Send asks for
+  the tap (`message_tap`); "Tap your passkey to send" opens the browser's
+  prompt in that press; the message goes with the answer. No tap asked
+  (a send already made under the id, or a server that grants a window):
+  it goes at once without one. A cancelled or failed prompt keeps the draft
+  and says so. A retry after an unknown outcome asks for the tap again,
+  which the server answers with none for a send already made, and the
+  repeat is answered as the first was. Before anything is sent it says the
+  message isn't end-to-end encrypted, and why (`not_e2ee_note`); after,
+  it shows the send's `notice` and `warning` as they came.
+- `SessionHandle::{mark_read, friendship, message_tap, send_message}`,
+  writes on the root scope as `create_post`; `SessionHandle::get_untracked`.
+- `fixtures::{message, broadcast, e2ee_message, inbox, friend}`.
 - `ui::compose`: `ReplyBox` (the `Reply` slots' content) and `NewPost`
   (for the session slot; on a feed only, through `NewPostHere`, which
   `FeedIsland` provides). Each draws nothing unless the session can write

@@ -510,24 +510,70 @@ fn a_changed_text_after_no_answer_is_held_back() {
 /// Reaching a mounted box's controls from a test: each box registers the
 /// controls its handlers call (`cfg(test)` only), so a test drives the
 /// box as its buttons and field do, through the same code
-pub(super) mod controls {
+pub(in crate::ui) mod controls {
     use std::{cell::RefCell, collections::HashMap};
 
-    use super::super::{PostControls, ReplyControls};
+    use super::super::{
+        MessageControls, MessageTo, PostControls, ReplyControls,
+    };
     use crate::{names::CommunityName, ui::thread::ReplyTarget};
 
     thread_local! {
+        static MESSAGES: RefCell<HashMap<MessageTo, MessageControls>> =
+            RefCell::new(HashMap::new());
         static REPLIES: RefCell<HashMap<ReplyTarget, ReplyControls>> =
             RefCell::new(HashMap::new());
         static POSTS: RefCell<HashMap<Option<CommunityName>, PostControls>> =
             RefCell::new(HashMap::new());
     }
 
-    pub fn register_reply(target: ReplyTarget, controls: ReplyControls) {
+    pub(in crate::ui::compose) fn register_reply(
+        target: ReplyTarget,
+        controls: ReplyControls,
+    ) {
         REPLIES.with(|r| r.borrow_mut().insert(target, controls));
     }
 
-    pub fn register_post(here: Option<CommunityName>, controls: PostControls) {
+    pub(in crate::ui::compose) fn register_message(
+        to: MessageTo,
+        controls: MessageControls,
+    ) {
+        MESSAGES.with(|m| m.borrow_mut().insert(to, controls));
+    }
+
+    /// The message box for `to`, as the inbox's tests drive it
+    pub(in crate::ui) fn message(to: MessageTo) -> Messaging {
+        Messaging(MESSAGES.with(|m| m.borrow()[&to]))
+    }
+
+    /// A message box's controls, for the inbox's tests
+    pub(in crate::ui) struct Messaging(MessageControls);
+
+    impl Messaging {
+        pub fn open(&self) {
+            self.0.open()
+        }
+        pub fn input(&self, body: &str) {
+            self.0.input(body.to_owned())
+        }
+        pub fn choose(&self, to: &str) {
+            self.0.choose(to.to_owned())
+        }
+        pub fn send(&self) {
+            self.0.send()
+        }
+        pub fn confirm(&self) {
+            self.0.confirm()
+        }
+        pub fn cancel_tap(&self) {
+            self.0.cancel_tap()
+        }
+    }
+
+    pub(in crate::ui::compose) fn register_post(
+        here: Option<CommunityName>,
+        controls: PostControls,
+    ) {
         POSTS.with(|p| p.borrow_mut().insert(here, controls));
     }
 

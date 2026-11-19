@@ -42,6 +42,9 @@ pub enum ClientSlot {
     /// comments. Its content reads what it answers from the
     /// [`ReplyTarget`](super::thread::ReplyTarget) in context
     Reply,
+    /// The inbox page's content ([`super::inbox::Inbox`]): everything on
+    /// it is the signed-in operator's, so none of it is the server's
+    Inbox,
 }
 
 /// What a client draws in each slot, provided as root context. The server

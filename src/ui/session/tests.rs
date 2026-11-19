@@ -489,7 +489,11 @@ fn dom_and_handle(portal: FakePortal) -> (VirtualDom, SessionHandle) {
     let handle = dom.in_scope(ScopeId::ROOT, || {
         let portal: Rc<dyn Portal> = Rc::new(portal);
         let drafts = crate::ui::compose::Drafts::new_root(portal.clone());
-        SessionHandle::new_root(portal, drafts)
+        SessionHandle::new_root(
+            portal,
+            drafts,
+            crate::ui::inbox::InboxStore::new_root(),
+        )
     });
     (dom, handle)
 }

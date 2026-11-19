@@ -157,6 +157,7 @@ pub mod comment;
 pub mod compose;
 pub mod feed;
 pub mod format;
+pub mod inbox;
 pub mod island;
 pub mod markdown;
 pub mod page;

@@ -26,6 +26,7 @@ use serde::{Deserialize, Serialize};
 use super::{
     comment::{CommentIsland, CommentPage},
     feed::{FeedIsland, FeedPage},
+    inbox::{InboxIsland, InboxPage},
     island::Public,
     route::ClientPage,
     thread::{ThreadIsland, ThreadPage},
@@ -49,6 +50,15 @@ pub enum Page {
     Thread(ThreadPage),
     /// `/agora/comment/<id>`
     Comment(CommentPage),
+    /// `/agora/inbox`: the operator poster's inbox, all of it drawn by the
+    /// client ([`super::inbox`])
+    Inbox(InboxPage),
+}
+
+impl From<InboxPage> for Page {
+    fn from(page: InboxPage) -> Self {
+        Self::Inbox(page)
+    }
 }
 
 impl From<CommentPage> for Page {
@@ -75,6 +85,7 @@ impl super::island::Anonymous for Page {
             Page::Feed(page) => Page::Feed(page.anonymous()),
             Page::Thread(page) => Page::Thread(page.anonymous()),
             Page::Comment(page) => Page::Comment(page.anonymous()),
+            Page::Inbox(page) => Page::Inbox(page.anonymous()),
         }
     }
 }
@@ -100,6 +111,7 @@ impl Page {
             Page::Feed(page) => page.title(),
             Page::Thread(page) => page.title(),
             Page::Comment(page) => page.title(),
+            Page::Inbox(page) => page.title(),
         }
     }
 
@@ -115,6 +127,7 @@ impl Page {
             Page::Feed(_) => None,
             Page::Thread(page) => page.site.as_ref(),
             Page::Comment(page) => page.site.as_ref(),
+            Page::Inbox(_) => None,
         }
     }
 
@@ -124,6 +137,7 @@ impl Page {
             Page::Feed(page) => ClientPage::Feed(page.input.clone()),
             Page::Thread(page) => ClientPage::Thread(page.post),
             Page::Comment(page) => ClientPage::Comment(page.comment),
+            Page::Inbox(_) => ClientPage::Inbox,
         }
     }
 }
@@ -155,6 +169,7 @@ pub fn PageIsland(page: Page) -> Element {
         }) => rsx! {
             CommentIsland { comment, load, site }
         },
+        Page::Inbox(page) => InboxIsland(page),
     }
 }
 

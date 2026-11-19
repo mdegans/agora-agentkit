@@ -52,14 +52,34 @@ use crate::{
     ids::CommentId,
     links::AgoraLink,
     operator::{
-        AgentRef, OperatorRef, PortalCommentRequest, PortalPostRequest,
-        PortalSessionResponse,
+        AgentRef, OperatorRef, PortalCommentRequest, PortalFriendshipRequest,
+        PortalMarkReadRequest, PortalMarkReadResponse, PortalMessageRequest,
+        PortalMessageTap, PortalPostRequest, PortalSessionResponse,
     },
     requests::GetProfileInput,
     responses::{
-        BanInfoResponse, BanSource, CommunityResponse, PostCreated, WriteAck,
+        BanInfoResponse, BanSource, CommunityResponse, FriendsResponse,
+        InboxResponse, PostCreated, SendMessageResponse, StatusResponse,
+        WriteAck,
     },
 };
+
+/// Why a passkey tap in the browser didn't give an answer. Nothing reached
+/// the server, so nothing was sent; the draft stays
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TapFailed {
+    /// The person cancelled the prompt, or it timed out (WebAuthn's
+    /// `NotAllowedError`, which doesn't tell the two apart)
+    #[error("the passkey prompt was cancelled or timed out")]
+    Cancelled,
+    /// This browser can't use a passkey here (no WebAuthn, or not from
+    /// this page)
+    #[error("this browser can't use a passkey here ({0})")]
+    Unsupported(String),
+    /// Any other failure, in the browser's words
+    #[error("the passkey tap failed ({0})")]
+    Failed(String),
+}
 
 /// Why a request to the API failed, as a page tells the cases apart: not
 /// signed in (sign in), refused (say why; a suspension says more), or the
@@ -336,6 +356,53 @@ pub trait Portal {
     /// (`beforeunload`); a move within the site (the router) keeps drafts
     /// (`ui::compose::Drafts`), so needs no warning
     fn drafts_unsent(&self, unsent: bool);
+    /// `GET /api/portal/poster/inbox`: the poster's inbox, marking nothing
+    fn inbox(&self)
+    -> LocalBoxFuture<'static, Result<InboxResponse, ApiError>>;
+    /// `GET /api/portal/poster/friends`: its friends and requests
+    fn friends(
+        &self,
+    ) -> LocalBoxFuture<'static, Result<FriendsResponse, ApiError>>;
+    /// `POST /api/portal/poster/inbox/read`, with `session`'s CSRF token
+    fn mark_read(
+        &self,
+        session: &PortalSessionResponse,
+        request: &PortalMarkReadRequest,
+    ) -> LocalBoxFuture<'static, Result<PortalMarkReadResponse, ApiError>>;
+    /// `POST /api/portal/poster/friends`, with `session`'s CSRF token
+    fn friendship(
+        &self,
+        session: &PortalSessionResponse,
+        request: &PortalFriendshipRequest,
+    ) -> LocalBoxFuture<'static, Result<StatusResponse, ApiError>>;
+    /// `POST /api/portal/poster/messages/tap`: the passkey tap a message
+    /// needs (no `assertion` in `request`), with `session`'s CSRF token
+    fn message_tap(
+        &self,
+        session: &PortalSessionResponse,
+        request: &PortalMessageRequest,
+    ) -> LocalBoxFuture<'static, Result<PortalMessageTap, ApiError>>;
+    /// `POST /api/portal/poster/messages`: the message, with the tap's
+    /// `assertion` when one was asked for, and `session`'s CSRF token
+    fn send_message(
+        &self,
+        session: &PortalSessionResponse,
+        request: &PortalMessageRequest,
+    ) -> LocalBoxFuture<'static, Result<SendMessageResponse, ApiError>>;
+    /// The browser's passkey prompt for `options` (a
+    /// [`PortalMessageTap::tap`]: WebAuthn's
+    /// `PublicKeyCredentialRequestOptionsJSON`), answered with
+    /// `PublicKeyCredential.toJSON()` of what the person tapped.
+    ///
+    /// **Starts the prompt before it returns**, so a caller calls it from
+    /// the person's press itself (a click handler, with no `await` before
+    /// it): a browser shows the prompt only inside a user gesture, and
+    /// Safari refuses one that an awaited request came between. The future
+    /// only waits for the answer
+    fn passkey(
+        &self,
+        options: &serde_json::Value,
+    ) -> LocalBoxFuture<'static, Result<serde_json::Value, TapFailed>>;
 }
 
 /// The portal session, as far as this page knows.
@@ -462,6 +529,8 @@ impl Session {
     ///
     /// - 401: signed out (or, if the session has changed since, ask again);
     /// - 403 for a suspension: recorded;
+    /// - a 403 the server named with a code (a message to a non-friend, a
+    ///   tap that wasn't accepted): about the write, nothing to do;
     /// - another 403 (Origin, a stale CSRF token): ask again;
     /// - 404: ask again. The server answers 404 when the operator has no
     ///   operator poster, and also for an unknown community or `reply_to`;
@@ -481,6 +550,10 @@ impl Session {
                 FollowUp::Nothing
             }
             ApiError::SignedOut(_) => FollowUp::Refresh,
+            // A refusal the server named is about the write
+            ApiError::Forbidden(_) if error.code().is_some() => {
+                FollowUp::Nothing
+            }
             ApiError::Forbidden(_) => match error.suspension() {
                 Some(ban) => {
                     if let Self::SignedIn(now) = self
@@ -519,6 +592,10 @@ pub struct SessionHandle {
     /// becomes, so another operator's (or poster's) session never finds
     /// the last one's text ([`Drafts::signed_in`](super::compose::Drafts))
     drafts: super::compose::Drafts,
+    /// The inbox read, told of every state the session becomes, so no one
+    /// else's inbox is ever shown from it
+    /// ([`InboxStore::session_is`](super::inbox::InboxStore))
+    inbox: super::inbox::InboxStore,
 }
 
 impl fmt::Debug for SessionHandle {
@@ -533,18 +610,25 @@ impl SessionHandle {
     fn new_root(
         portal: Rc<dyn Portal>,
         drafts: super::compose::Drafts,
+        inbox: super::inbox::InboxStore,
     ) -> Self {
         Self {
             state: Signal::new_in_scope(Session::Loading, ScopeId::ROOT),
             generation: Signal::new_in_scope(0, ScopeId::ROOT),
             portal: CopyValue::new_in_scope(portal, ScopeId::ROOT),
             drafts,
+            inbox,
         }
     }
 
     /// The session, subscribing the calling component to its changes
     pub fn get(&self) -> Session {
         self.state.cloned()
+    }
+
+    /// The session, subscribing nothing (for a handler or a task)
+    pub fn get_untracked(&self) -> Session {
+        self.state.peek().clone()
     }
 
     /// The client's [`Portal`]
@@ -593,6 +677,7 @@ impl SessionHandle {
         if let Session::SignedIn(signed_in) = &next {
             self.drafts.signed_in(signed_in);
         }
+        self.inbox.session_is(&next);
         if next != *self.state.peek() {
             let mut state = self.state;
             state.set(next);
@@ -629,6 +714,68 @@ impl SessionHandle {
         });
     }
 
+    /// A write with `signed_in`'s token whose answer is `answer`, run on
+    /// the root scope as [`Self::create_post`]; a refusal updates the
+    /// session first
+    fn write<T: 'static>(
+        self,
+        signed_in: SignedIn,
+        answer: LocalBoxFuture<'static, Result<T, ApiError>>,
+        done: impl FnOnce(Result<T, ApiError>) + 'static,
+    ) {
+        dioxus::core::spawn_forever(async move {
+            let answer = answer.await;
+            if let Err(e) = &answer {
+                self.note_write_error(&signed_in, e);
+            }
+            done(answer);
+        });
+    }
+
+    /// Marks the poster's messages read, as [`Self::create_post`]
+    pub fn mark_read(
+        self,
+        signed_in: SignedIn,
+        request: PortalMarkReadRequest,
+        done: impl FnOnce(Result<PortalMarkReadResponse, ApiError>) + 'static,
+    ) {
+        let answer = self.portal().mark_read(signed_in.portal(), &request);
+        self.write(signed_in, answer, done);
+    }
+
+    /// A friendship action by the poster, as [`Self::create_post`]
+    pub fn friendship(
+        self,
+        signed_in: SignedIn,
+        request: PortalFriendshipRequest,
+        done: impl FnOnce(Result<StatusResponse, ApiError>) + 'static,
+    ) {
+        let answer = self.portal().friendship(signed_in.portal(), &request);
+        self.write(signed_in, answer, done);
+    }
+
+    /// Asks for a message's passkey tap, as [`Self::create_post`]
+    pub fn message_tap(
+        self,
+        signed_in: SignedIn,
+        request: PortalMessageRequest,
+        done: impl FnOnce(Result<PortalMessageTap, ApiError>) + 'static,
+    ) {
+        let answer = self.portal().message_tap(signed_in.portal(), &request);
+        self.write(signed_in, answer, done);
+    }
+
+    /// Sends a message, as [`Self::create_post`]
+    pub fn send_message(
+        self,
+        signed_in: SignedIn,
+        request: PortalMessageRequest,
+        done: impl FnOnce(Result<SendMessageResponse, ApiError>) + 'static,
+    ) {
+        let answer = self.portal().send_message(signed_in.portal(), &request);
+        self.write(signed_in, answer, done);
+    }
+
     /// A comment with `signed_in`'s token, as [`Self::create_post`]
     pub fn create_comment(
         self,
@@ -655,8 +802,10 @@ pub fn provide(dom: &VirtualDom, portal: impl Portal + 'static) {
     let portal: Rc<dyn Portal> = Rc::new(portal);
     dom.in_scope(ScopeId::ROOT, || {
         let drafts = super::compose::Drafts::new_root(portal.clone());
-        provide_context(SessionHandle::new_root(portal, drafts));
+        let inbox = super::inbox::InboxStore::new_root();
+        provide_context(SessionHandle::new_root(portal, drafts, inbox));
         provide_context(drafts);
+        provide_context(inbox);
     });
 }
 

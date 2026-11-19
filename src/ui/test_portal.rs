@@ -9,13 +9,19 @@ use futures::{
     future::{LocalBoxFuture, Shared},
 };
 
-use super::session::{ApiError, Portal};
+use super::session::{ApiError, Portal, TapFailed};
 use crate::{
-    ids::{CommentId, PostId},
+    enums::MessageEncryption,
+    ids::{CommentId, MessageId, PostId},
     operator::{
-        PortalCommentRequest, PortalPostRequest, PortalSessionResponse,
+        PortalCommentRequest, PortalFriendshipRequest, PortalMarkReadRequest,
+        PortalMarkReadResponse, PortalMessageRequest, PortalMessageTap,
+        PortalPostRequest, PortalSessionResponse,
     },
-    responses::{CommunityResponse, PostCreated, WriteAck},
+    responses::{
+        CommunityResponse, FriendsResponse, InboxResponse, PostCreated,
+        SendMessageResponse, StatusResponse, WriteAck,
+    },
 };
 
 /// What the fake answers and what it was asked. Shared (`Rc`), so a test
@@ -41,6 +47,29 @@ pub struct Fake {
     pub gate: Option<Shared<oneshot::Receiver<()>>>,
     /// What `drafts_unsent` was told, in order
     pub unsent: Vec<bool>,
+    /// The inbox's answers, in order; past them, the last one again (an
+    /// empty inbox when there was none)
+    pub inbox_answers: VecDeque<Result<InboxResponse, ApiError>>,
+    pub inbox_calls: usize,
+    pub friends_answers: VecDeque<Result<FriendsResponse, ApiError>>,
+    pub friends_calls: usize,
+    /// Answers to mark-read; past them, everything named is marked
+    pub mark_answers: VecDeque<Result<PortalMarkReadResponse, ApiError>>,
+    pub marks: Vec<PortalMarkReadRequest>,
+    /// Answers to friendship actions; past them, `requested`
+    pub friendship_answers: VecDeque<Result<StatusResponse, ApiError>>,
+    pub friendships: Vec<PortalFriendshipRequest>,
+    /// Answers to the tap call; past them, a tap with [`tap_options`]
+    pub tap_answers: VecDeque<Result<PortalMessageTap, ApiError>>,
+    pub taps: Vec<PortalMessageRequest>,
+    /// Answers to a send; past them, a 201 for [`sent_message`]
+    pub message_answers: VecDeque<Result<SendMessageResponse, ApiError>>,
+    pub messages: Vec<PortalMessageRequest>,
+    /// The browser's answers to a passkey prompt; past them,
+    /// [`assertion`]
+    pub passkey_answers: VecDeque<Result<serde_json::Value, TapFailed>>,
+    /// The options each prompt was opened with
+    pub prompts: Vec<serde_json::Value>,
 }
 
 impl FakePortal {
@@ -66,6 +95,35 @@ fn gated<T: 'static>(
         answer
     }
     .boxed_local()
+}
+
+/// The tap options a tap call past the scripted answers gives
+pub fn tap_options() -> serde_json::Value {
+    serde_json::json!({"challenge": "Y2hhbGxlbmdl", "rpId": "localhost"})
+}
+
+/// The browser's answer a prompt past the scripted answers gives
+pub fn assertion() -> serde_json::Value {
+    serde_json::json!({"id": "a2V5", "type": "public-key"})
+}
+
+/// The id a message past the scripted answers is sent under
+pub fn sent_message() -> MessageId {
+    MessageId::from(uuid::Uuid::from_u128(
+        0x9_0000_0000_4000_8000_0000_0000_0003,
+    ))
+}
+
+/// The answer to a send of `request`
+pub fn message_sent(request: &PortalMessageRequest) -> SendMessageResponse {
+    let _ = request;
+    SendMessageResponse {
+        id: sent_message(),
+        encryption: MessageEncryption::Server,
+        sent_at: Some(crate::fixtures::at()),
+        notice: None,
+        warning: Some("This conversation is not end-to-end encrypted.".into()),
+    }
 }
 
 /// The id a post past the scripted answers gets
@@ -97,6 +155,19 @@ impl FakePortal {
         fake.0.borrow_mut().session =
             Some(Err(ApiError::SignedOut("no session".into())));
         fake
+    }
+}
+
+/// A copy of a scripted answer whose type isn't `Clone`, through its JSON
+fn again<T: serde::Serialize + serde::de::DeserializeOwned>(
+    answer: &Result<T, ApiError>,
+) -> Result<T, ApiError> {
+    match answer {
+        Ok(t) => {
+            Ok(serde_json::from_value(serde_json::to_value(t).unwrap())
+                .unwrap())
+        }
+        Err(e) => Err(e.clone()),
     }
 }
 
@@ -181,5 +252,110 @@ impl Portal for FakePortal {
 
     fn drafts_unsent(&self, unsent: bool) {
         self.0.borrow_mut().unsent.push(unsent);
+    }
+
+    fn inbox(
+        &self,
+    ) -> LocalBoxFuture<'static, Result<InboxResponse, ApiError>> {
+        let mut fake = self.0.borrow_mut();
+        fake.inbox_calls += 1;
+        let answer = match fake.inbox_answers.len() {
+            0 => Ok(crate::fixtures::inbox(Vec::new())),
+            1 => again(&fake.inbox_answers[0]),
+            _ => fake.inbox_answers.pop_front().unwrap(),
+        };
+        ready(answer)
+    }
+
+    fn friends(
+        &self,
+    ) -> LocalBoxFuture<'static, Result<FriendsResponse, ApiError>> {
+        let mut fake = self.0.borrow_mut();
+        fake.friends_calls += 1;
+        let answer = match fake.friends_answers.len() {
+            0 => Ok(FriendsResponse::default()),
+            1 => again(&fake.friends_answers[0]),
+            _ => fake.friends_answers.pop_front().unwrap(),
+        };
+        ready(answer)
+    }
+
+    fn mark_read(
+        &self,
+        _: &PortalSessionResponse,
+        request: &PortalMarkReadRequest,
+    ) -> LocalBoxFuture<'static, Result<PortalMarkReadResponse, ApiError>> {
+        let mut fake = self.0.borrow_mut();
+        fake.marks.push(request.clone());
+        let gate = fake.gate.clone();
+        let all = request.payload.messages.clone();
+        gated(
+            gate,
+            fake.mark_answers.pop_front().unwrap_or(Ok(
+                PortalMarkReadResponse {
+                    marked: all,
+                    not_marked: Vec::new(),
+                },
+            )),
+        )
+    }
+
+    fn friendship(
+        &self,
+        _: &PortalSessionResponse,
+        request: &PortalFriendshipRequest,
+    ) -> LocalBoxFuture<'static, Result<StatusResponse, ApiError>> {
+        let mut fake = self.0.borrow_mut();
+        fake.friendships.push(request.clone());
+        let gate = fake.gate.clone();
+        gated(
+            gate,
+            fake.friendship_answers
+                .pop_front()
+                .unwrap_or_else(|| Ok(StatusResponse::new("requested"))),
+        )
+    }
+
+    fn message_tap(
+        &self,
+        _: &PortalSessionResponse,
+        request: &PortalMessageRequest,
+    ) -> LocalBoxFuture<'static, Result<PortalMessageTap, ApiError>> {
+        let mut fake = self.0.borrow_mut();
+        fake.taps.push(request.clone());
+        let gate = fake.gate.clone();
+        gated(
+            gate,
+            fake.tap_answers.pop_front().unwrap_or_else(|| {
+                Ok(PortalMessageTap {
+                    tap: Some(tap_options()),
+                })
+            }),
+        )
+    }
+
+    fn send_message(
+        &self,
+        _: &PortalSessionResponse,
+        request: &PortalMessageRequest,
+    ) -> LocalBoxFuture<'static, Result<SendMessageResponse, ApiError>> {
+        let mut fake = self.0.borrow_mut();
+        fake.messages.push(request.clone());
+        let gate = fake.gate.clone();
+        let sent = message_sent(request);
+        gated(gate, fake.message_answers.pop_front().unwrap_or(Ok(sent)))
+    }
+
+    fn passkey(
+        &self,
+        options: &serde_json::Value,
+    ) -> LocalBoxFuture<'static, Result<serde_json::Value, TapFailed>> {
+        let mut fake = self.0.borrow_mut();
+        fake.prompts.push(options.clone());
+        ready(
+            fake.passkey_answers
+                .pop_front()
+                .unwrap_or_else(|| Ok(assertion())),
+        )
     }
 }
