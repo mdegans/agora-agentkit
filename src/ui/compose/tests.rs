@@ -210,7 +210,10 @@ async fn the_post_form_states_its_limits() {
     let html =
         drawn(Some(FakePortal::signed_in(true)), in_community(), open_post)
             .await;
-    assert!(html.contains("In meta-governance."), "{html}");
+    assert!(
+        html.contains("Posting publicly as steward, in meta-governance."),
+        "{html}"
+    );
     assert!(!html.contains(r#"name="community""#), "{html}");
 }
 

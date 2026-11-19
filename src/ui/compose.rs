@@ -40,7 +40,8 @@ use dioxus_router::{NavigationTarget, RouterContext, try_router};
 use super::{
     route::Route,
     session::{
-        Session, SessionHandle, SignedIn, sign_in_href, try_use_session,
+        BanInfoExt, Session, SessionHandle, SignedIn, sign_in_href,
+        try_use_session,
     },
     thread::ReplyTarget,
 };
@@ -210,11 +211,10 @@ fn writer(session: &Session) -> Option<&SignedIn> {
 fn blocked(session: &Session) -> Option<String> {
     match session {
         Session::SignedIn(s) => match (s.suspension(), s.poster()) {
-            (Some(_), _) => Some(
-                "Your account can't post now (the line at the top of the page \
-                 says why). Your text is kept here."
-                    .to_owned(),
-            ),
+            (Some(ban), _) => Some(format!(
+                "{}. Your text is kept here.",
+                ban.human_summary()
+            )),
             (None, None) => Some(
                 "You have no operator poster, so this can't be sent. Your \
                  text is kept here."
@@ -439,6 +439,7 @@ fn Feedback(
     said: Option<Said>,
 ) -> Element {
     let blocked = blocked(&state);
+    let blocked_shown = blocked.is_some();
     let signed_out = matches!(state, Session::SignedOut);
     let sign_in = sign_in_href(handle.portal().here().as_deref());
     rsx! {
@@ -463,6 +464,8 @@ fn Feedback(
             }
         }
         match said {
+            // Why it can't be sent now says it already, once
+            Some(Said::Failed(_)) if blocked_shown => rsx! {},
             Some(Said::Failed(words)) => rsx! {
                 p { class: "ui-compose-alert", role: "alert", "{words}" }
             },
@@ -624,7 +627,12 @@ fn NewPostForm(start_open: bool) -> Element {
                     div { class: "ui-compose-head",
                         h2 { class: "ui-eyebrow", "New post" }
                         if let Some(poster) = poster {
-                            p { class: "ui-note", "Posting publicly as {poster}." }
+                            p { class: "ui-note",
+                                match &fixed {
+                                    Some(c) => rsx! { "Posting publicly as {poster}, in {c.canonical()}." },
+                                    None => rsx! { "Posting publicly as {poster}." },
+                                }
+                            }
                         }
                     }
                     PostFields {
@@ -695,9 +703,8 @@ fn PostFields(
     let list_failed = matches!(communities, Some(Err(_)));
     rsx! {
         match fixed {
-            Some(community) => rsx! {
-                p { class: "ui-note", "In {community.canonical()}." }
-            },
+            // Said in the form's head
+            Some(_) => rsx! {},
             None => rsx! {
                 label { class: "ui-field",
                     span { class: "ui-field-label", "Community" }

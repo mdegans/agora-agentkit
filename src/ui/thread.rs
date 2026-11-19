@@ -773,32 +773,42 @@ pub fn ThreadIsland(page: ThreadPage) -> Element {
     }));
     // A reply box posted: load the thread again, keeping the one drawn if
     // that fails (the box keeps its link to the comment), then go to the
-    // new comment once it is drawn
+    // new comment once it is drawn. Where to go is kept outside the
+    // signals: the effect that goes there runs when the thread changes
     let reposted = try_use_context::<Reload<ThreadLoad>>();
-    let mut arrive_at = use_signal(|| None::<CommentId>);
+    let arrive_at =
+        use_hook(|| std::rc::Rc::new(std::cell::Cell::new(None::<CommentId>)));
     let go_to = super::route::use_go_to();
+    let pending = arrive_at.clone();
     let posted = use_callback(move |id: CommentId| {
         let Some(reload) = reposted.clone() else {
             return;
         };
+        let pending = pending.clone();
         spawn(async move {
             match reload.load().await {
                 loaded @ ThreadLoad::Loaded(_) => {
+                    pending.set(Some(id));
                     thread.set(loaded);
-                    arrive_at.set(Some(id));
                 }
-                other => tracing::warn!(
+                ThreadLoad::Pending => {}
+                ThreadLoad::Failed(e) => tracing::warn!(
                     comment = %id,
-                    state = ?std::mem::discriminant(&other),
+                    error = %e,
                     "the thread couldn't be loaded again after a reply; keeping the one drawn"
+                ),
+                ThreadLoad::NotFound => tracing::warn!(
+                    comment = %id,
+                    "the thread was not found after a reply; keeping the one drawn"
                 ),
             }
         });
     });
     use_context_provider(|| super::compose::CommentPosted(posted));
     use_effect(move || {
-        if let Some(id) = arrive_at() {
-            arrive_at.set(None);
+        if matches!(*thread.read(), ThreadLoad::Loaded(_))
+            && let Some(id) = arrive_at.take()
+        {
             go_to.fragment(&format!("comment-{id}"));
         }
     });

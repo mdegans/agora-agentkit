@@ -609,7 +609,10 @@ pub(crate) struct GoTo(Option<Rc<dyn History>>);
 impl GoTo {
     /// Go to `#fragment` here
     pub(crate) fn fragment(&self, fragment: &str) {
-        let Some(history) = &self.0 else { return };
+        let Some(history) = &self.0 else {
+            tracing::warn!(fragment, "no history to go to a fragment with");
+            return;
+        };
         let path = full_path(history.as_ref());
         let href = format!("{}#{fragment}", without_fragment(&path));
         if !history.external(href.clone()) {
