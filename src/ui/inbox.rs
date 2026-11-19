@@ -830,16 +830,14 @@ fn MessageRow(
                     }
                 },
             }
-            if can_write && (unread || !broadcast) {
+            if can_write && unread {
                 div { class: "ui-actions",
-                    if unread {
-                        button {
-                            class: "ui-pill ui-pill-action",
-                            r#type: "button",
-                            disabled: marking,
-                            onclick: move |_| on_mark.call(id),
-                            "Mark read"
-                        }
+                    button {
+                        class: "ui-pill ui-pill-action",
+                        r#type: "button",
+                        disabled: marking,
+                        onclick: move |_| on_mark.call(id),
+                        "Mark read"
                     }
                 }
             }
