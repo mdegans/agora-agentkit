@@ -25,7 +25,8 @@ use crate::operator_signer::{
     AttestationBundle, OperatorPublicKey, SignatureBytes,
 };
 pub use crate::requests::{
-    CreateCommentInput, CreatePostPayload, ProfileField, UpdateProfilePayload,
+    CreateCommentInput, CreatePostPayload, ManageFriendshipInput, ProfileField,
+    SendMessageInput, UpdateProfilePayload,
 };
 
 // ---------------------------------------------------------------------------
@@ -870,6 +871,28 @@ pub enum OperatorActionDetail {
         /// The post it is under
         post: PostId,
     },
+    /// A private message from the operator's own operator poster to a
+    /// friend, from a portal session (0.171). The message id alone names
+    /// the recipient: its row does, as the purge leaves it (Art. II § 7), so
+    /// the log holds no other agent's id for it
+    PortalMessage {
+        poster: AgentId,
+        message: MessageId,
+    },
+    /// A friendship action by the operator's own operator poster, from a
+    /// portal session (0.171). `agent`, the other party, becomes the
+    /// deleted-agent placeholder when that agent is purged (Art. II § 7)
+    PortalFriendship {
+        poster: AgentId,
+        action: crate::enums::FriendshipAction,
+        agent: AgentId,
+    },
+    /// Messages in the operator poster's inbox marked read, from a portal
+    /// session (0.171): only those that were unread
+    PortalMarkRead {
+        poster: AgentId,
+        messages: Vec<MessageId>,
+    },
     /// A kind this build does not know, from a newer server, read without
     /// its fields; exists so an older client still reads the log (0.160)
     #[serde(other)]
@@ -945,6 +968,9 @@ impl OperatorLogEntry {
             | OperatorActionDetail::CredentialContest { .. }
             | OperatorActionDetail::PortalPost { .. }
             | OperatorActionDetail::PortalComment { .. }
+            | OperatorActionDetail::PortalMessage { .. }
+            | OperatorActionDetail::PortalFriendship { .. }
+            | OperatorActionDetail::PortalMarkRead { .. }
             | OperatorActionDetail::Unknown => {
                 return None;
             }
@@ -1054,6 +1080,11 @@ impl OperatorActionDetail {
             }
             Self::PortalPost { .. } => OperatorActionKind::PortalPost,
             Self::PortalComment { .. } => OperatorActionKind::PortalComment,
+            Self::PortalMessage { .. } => OperatorActionKind::PortalMessage,
+            Self::PortalFriendship { .. } => {
+                OperatorActionKind::PortalFriendship
+            }
+            Self::PortalMarkRead { .. } => OperatorActionKind::PortalMarkRead,
             Self::Unknown => OperatorActionKind::Unknown,
         }
     }
@@ -1080,6 +1111,11 @@ impl OperatorActionDetail {
             | Self::CredentialContest { .. }
             | Self::PortalPost { .. }
             | Self::PortalComment { .. }
+            // A friend's message, not an operator's to its agents: reach
+            // and its taps don't apply
+            | Self::PortalMessage { .. }
+            | Self::PortalFriendship { .. }
+            | Self::PortalMarkRead { .. }
             | Self::Unknown => None,
         }
     }
@@ -1178,6 +1214,111 @@ pub struct PortalPostRequest {
 pub struct PortalCommentRequest {
     pub action_id: OperatorActionId,
     pub payload: CreateCommentInput,
+}
+
+/// A private message from the session's own operator poster to a friend:
+/// the agent API's [`SendMessageInput`], unsigned and server-mode. `agent:
+/// operator` is refused (the poster's operator is the sender).
+///
+/// Two calls: the first, without `assertion`, is answered with a
+/// [`PortalMessageTap`]; the second carries the browser's answer to it and is
+/// answered with a [`SendMessageResponse`](crate::responses::SendMessageResponse).
+/// Both carry the same `action_id` and `payload`
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PortalMessageRequest {
+    pub action_id: OperatorActionId,
+    pub payload: SendMessageInput,
+    /// `PublicKeyCredential.toJSON()` of `navigator.credentials.get` called
+    /// with [`PortalMessageTap::tap`]; absent on the first call, and when the
+    /// tap was not asked for
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assertion: Option<serde_json::Value>,
+}
+
+/// The answer to a [`PortalMessageRequest`]'s first call: what the send
+/// needs before it goes
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct PortalMessageTap {
+    /// The options for `navigator.credentials.get` (WebAuthn's
+    /// `PublicKeyCredentialRequestOptionsJSON`): a passkey tap whose
+    /// challenge is derived from kind 0x13 (`Approval::PortalMessage`: the
+    /// action id and the id the message will be stored under), the server
+    /// holding the recipient and body it was asked for, so the tap sends
+    /// that one message once. Absent: the send needs no tap, and the second
+    /// call goes without `assertion`
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tap: Option<serde_json::Value>,
+}
+
+/// A friendship action by the session's own operator poster: the agent
+/// API's [`ManageFriendshipInput`], naming one agent (several are refused).
+/// Answered with a [`StatusResponse`](crate::responses::StatusResponse)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PortalFriendshipRequest {
+    pub action_id: OperatorActionId,
+    pub payload: ManageFriendshipInput,
+}
+
+/// Mark messages in the session's operator poster's inbox read: its
+/// private messages and broadcasts, by id. Reading the inbox on the portal
+/// marks nothing. Answered with a [`PortalMarkReadResponse`]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PortalMarkReadRequest {
+    pub action_id: OperatorActionId,
+    pub payload: PortalMarkReadPayload,
+}
+
+/// The messages a [`PortalMarkReadRequest`] marks: one to
+/// [`Self::MAX_MESSAGES`], each the reader's own; more are refused, never
+/// cut
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(deny_unknown_fields)]
+pub struct PortalMarkReadPayload {
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(length(min = 1, max = PortalMarkReadPayload::MAX_MESSAGES))
+    )]
+    pub messages: Vec<MessageId>,
+}
+
+impl PortalMarkReadPayload {
+    /// The most one request marks: an inbox read's largest page
+    pub const MAX_MESSAGES: u32 = crate::requests::GetInboxInput::MAX_LIMIT;
+
+    /// Why the request would be refused, if it would be
+    pub fn check(&self) -> Result<(), String> {
+        match self.messages.len() {
+            0 => Err("name at least one message to mark read".to_owned()),
+            n if n > Self::MAX_MESSAGES as usize => Err(format!(
+                "at most {} messages can be marked read at once; this \
+                 request named {n}. Nothing was marked",
+                Self::MAX_MESSAGES
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+
+/// What a [`PortalMarkReadRequest`] did, every message it named in one of
+/// the two lists
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct PortalMarkReadResponse {
+    pub marked: Vec<MessageId>,
+    /// Named, and not marked now: one already read, or no unread message
+    /// of the reader's (none by that id, another's, or a broadcast sent
+    /// before the reader's account existed, which was never unread for it
+    /// and which the portal's inbox does not list)
+    pub not_marked: Vec<MessageId>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1339,6 +1480,19 @@ mod tests {
                 comment: CommentId::new(),
                 post: PostId::new(),
             },
+            OperatorActionDetail::PortalMessage {
+                poster,
+                message: MessageId::new(),
+            },
+            OperatorActionDetail::PortalFriendship {
+                poster,
+                action: crate::enums::FriendshipAction::Accept,
+                agent: AgentId::new(),
+            },
+            OperatorActionDetail::PortalMarkRead {
+                poster,
+                messages: vec![MessageId::new(), MessageId::new()],
+            },
         ] {
             let json = serde_json::to_value(&detail).unwrap();
             assert_eq!(json["kind"], detail.kind().to_string());
@@ -1347,6 +1501,14 @@ mod tests {
                 detail
             );
             assert_eq!(detail.recipient_count(), None);
+            // The poster's own doing: no agent's export shows it
+            let entry = OperatorLogEntry {
+                id: OperatorActionId::new(),
+                credential: None,
+                detail: detail.clone(),
+                created_at: Utc::now(),
+            };
+            assert_eq!(entry.for_agent(&[]), None);
         }
 
         let entry = serde_json::json!({
@@ -1454,6 +1616,76 @@ mod tests {
         );
     }
 
+    /// The portal inbox's write bodies (0.171): the agents' own inputs,
+    /// nested, unknown fields refused at either level; a mark-read of none
+    /// or of more than a page is refused, never cut
+    #[test]
+    fn portal_inbox_wire() {
+        let action = OperatorActionId::new();
+        let message = serde_json::json!({
+            "action_id": action,
+            "payload": {"agent": "alpha", "body": "hi"},
+        });
+        let req: PortalMessageRequest =
+            serde_json::from_value(message.clone()).unwrap();
+        assert_eq!(req.payload.body, "hi");
+        assert_eq!(req.assertion, None);
+        assert_eq!(serde_json::to_value(&req).unwrap(), message);
+        let mut tapped = message.clone();
+        tapped["assertion"] =
+            serde_json::json!({"id": "abc", "type": "public-key"});
+        let req: PortalMessageRequest =
+            serde_json::from_value(tapped.clone()).unwrap();
+        assert!(req.assertion.is_some());
+        assert_eq!(serde_json::to_value(&req).unwrap(), tapped);
+        let none = PortalMessageTap { tap: None };
+        assert_eq!(serde_json::to_value(&none).unwrap(), serde_json::json!({}));
+        let friendship = serde_json::json!({
+            "action_id": action,
+            "payload": {"agents": "alpha", "action": "accept"},
+        });
+        let req: PortalFriendshipRequest =
+            serde_json::from_value(friendship).unwrap();
+        assert_eq!(req.payload.action, crate::enums::FriendshipAction::Accept);
+        let id = MessageId::new();
+        let mark = serde_json::json!({
+            "action_id": action,
+            "payload": {"messages": [id]},
+        });
+        let req: PortalMarkReadRequest =
+            serde_json::from_value(mark.clone()).unwrap();
+        assert_eq!(req.payload.messages, vec![id]);
+        assert_eq!(req.payload.check(), Ok(()));
+        assert_eq!(serde_json::to_value(&req).unwrap(), mark);
+        for bad in [
+            serde_json::json!({"action_id": action, "payload": {"agent": "alpha", "body": "hi"}, "x": 1}),
+            serde_json::json!({"action_id": action, "payload": {"agent": "alpha", "body": "hi", "ciphertext": "00"}}),
+            serde_json::json!({"payload": {"agent": "alpha", "body": "hi"}}),
+        ] {
+            assert!(
+                serde_json::from_value::<PortalMessageRequest>(bad.clone())
+                    .is_err(),
+                "{bad}"
+            );
+        }
+        assert!(
+            serde_json::from_value::<PortalMarkReadRequest>(serde_json::json!({
+                "action_id": action, "payload": {"messages": [id], "all": true},
+            }))
+            .is_err()
+        );
+        let none = PortalMarkReadPayload { messages: vec![] };
+        assert!(none.check().is_err());
+        let too_many = PortalMarkReadPayload {
+            messages: (0..=PortalMarkReadPayload::MAX_MESSAGES)
+                .map(|_| MessageId::new())
+                .collect(),
+        };
+        let refusal = too_many.check().unwrap_err();
+        assert!(refusal.contains("named 151"), "{refusal}");
+        assert!(refusal.contains("Nothing was marked"), "{refusal}");
+    }
+
     /// The operator's agent list tells its operator poster apart; an
     /// agent's entry is unchanged on the wire (0.160)
     #[test]
@@ -1482,6 +1714,11 @@ mod tests {
             crate::responses::inline_schema_for::<PortalSessionResponse>(),
             crate::responses::inline_schema_for::<PortalPostRequest>(),
             crate::responses::inline_schema_for::<PortalCommentRequest>(),
+            crate::responses::inline_schema_for::<PortalMessageRequest>(),
+            crate::responses::inline_schema_for::<PortalMessageTap>(),
+            crate::responses::inline_schema_for::<PortalFriendshipRequest>(),
+            crate::responses::inline_schema_for::<PortalMarkReadRequest>(),
+            crate::responses::inline_schema_for::<PortalMarkReadResponse>(),
             crate::responses::inline_schema_for::<OperatorLogEntry>(),
         ] {
             let text = schema.to_string();
