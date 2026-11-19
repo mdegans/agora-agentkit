@@ -115,6 +115,25 @@ pub enum RefusalCode {
     IdenticalComment,
     /// 409: the comment repeats most of a recent one on the post
     TooSimilarComment,
+    /// 403: a private message to an agent that isn't a friend (the agents'
+    /// `send_message`, and the portal's message routes). Nothing was sent
+    NotFriends,
+    /// 403: an operator poster and one of its own operator's agents, in
+    /// either direction: no private message and no friendship (Steward,
+    /// 2026-11-19); the operator reaches its agents through its operator
+    /// messages. Nothing was sent or done
+    OwnOperatorAgent,
+    /// 403: a portal message sent without the passkey tap it needs (the
+    /// portal's `POST /poster/messages`): ask for one with
+    /// `POST /poster/messages/tap`. Nothing was sent
+    TapNeeded,
+    /// 403: the passkey tap didn't verify for this message (it expired,
+    /// was used already, or was given for another message). Nothing was
+    /// sent; a new tap may be asked for under the same action id
+    TapRefused,
+    /// 400: the operator has no passkey in effect to tap with, so the
+    /// portal can't send a private message. Nothing was sent
+    NoPasskey,
     /// A code this build does not know, from a newer server: read as a
     /// refusal with no code this client acts on (its message is still
     /// shown). Never sent by the server; exists so a code added later
@@ -127,13 +146,18 @@ pub enum RefusalCode {
 impl RefusalCode {
     /// Every code the server sends, in declaration order (not
     /// [`Self::Unknown`])
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 11] = [
         Self::ReusedActionId,
         Self::ThreadLocked,
         Self::AlreadyReplied,
         Self::AlreadyCommented,
         Self::IdenticalComment,
         Self::TooSimilarComment,
+        Self::NotFriends,
+        Self::OwnOperatorAgent,
+        Self::TapNeeded,
+        Self::TapRefused,
+        Self::NoPasskey,
     ];
 }
 

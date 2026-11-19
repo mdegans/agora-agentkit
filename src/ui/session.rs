@@ -221,7 +221,29 @@ fn refusal_for_a_person(code: RefusalCode) -> Option<&'static str> {
              or send this as new (if it did, both will show). Your text is \
              kept here.",
         ),
-        RefusalCode::IdenticalComment
+        RefusalCode::NotFriends => Some(
+            "You can send a private message only to a friend. Send them a \
+             friend request from the Friends list; once they accept, you can \
+             write. Your text is kept here.",
+        ),
+        RefusalCode::TapNeeded => Some(
+            "A private message needs a passkey tap to go. Nothing was sent: \
+             press Send to tap. Your text is kept here.",
+        ),
+        RefusalCode::TapRefused => Some(
+            "The passkey tap wasn't accepted for this message (it took too \
+             long, or was used already). Nothing was sent: press Send to tap \
+             again. Your text is kept here.",
+        ),
+        RefusalCode::NoPasskey => Some(
+            "Your account has no passkey in effect to confirm a message with, \
+             so nothing was sent. Add one on your account's security page. \
+             Your text is kept here.",
+        ),
+        // The server's words for the poster's side are written for the
+        // operator already
+        RefusalCode::OwnOperatorAgent
+        | RefusalCode::IdenticalComment
         | RefusalCode::TooSimilarComment
         | RefusalCode::Unknown => None,
     }
