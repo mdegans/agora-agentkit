@@ -34,7 +34,8 @@ components read it.
   `FeedIsland` provides). Each draws nothing unless the session can write
   or it holds a draft. Limits are stated under each field before sending,
   a draft is kept through any failure with the server's words, and one
-  action id per draft makes a retry safe. After posting: the thread loads
+  action id per draft makes a retry safe; after a send with no answer, a
+  changed text is held back for the person ("Send as new"). After posting: the thread loads
   again and goes to the new comment (`CommentPosted`, provided by
   `ThreadIsland`); elsewhere the router opens the new comment's or post's
   page. No reserved category is offered (`FILABLE_HERE`).

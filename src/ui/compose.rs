@@ -24,7 +24,11 @@
 //! ([`OperatorActionId`]), kept until the server says it posted: the
 //! portal answers a repeat of the same id and body with its first answer
 //! and writes nothing again. A refused write wrote nothing, so the same id
-//! may carry an edited text afterwards.
+//! may carry an edited text afterwards. After a send that got no answer
+//! ([`outcome_unknown`]: it may have been posted), only the same text is
+//! sent again under that id; a changed one is held back with a "Send as
+//! new" choice ([`must_resend_as_sent`]), since the server would refuse it
+//! under the old id and might post it twice under a new one.
 //!
 //! **After posting** a reply on a thread, the thread loads again and goes
 //! to the new comment ([`CommentPosted`], provided by the thread's root); on
@@ -40,7 +44,7 @@ use dioxus_router::{NavigationTarget, RouterContext, try_router};
 use super::{
     route::Route,
     session::{
-        BanInfoExt, Session, SessionHandle, SignedIn, sign_in_href,
+        ApiError, BanInfoExt, Session, SessionHandle, SignedIn, sign_in_href,
         try_use_session,
     },
     thread::ReplyTarget,
@@ -115,6 +119,23 @@ pub fn comment_problem(body: &str) -> Option<String> {
     }
     let (line, over) = limit_line(body.len(), limits::comment::BODY_MAX_BYTES);
     over.then_some(line)
+}
+
+/// Whether a write's failure leaves it unknown if the server wrote it: no
+/// answer, or one that couldn't be read. A refusal (any status, a 5xx
+/// included: the server answered and committed nothing) is known
+pub fn outcome_unknown(e: &ApiError) -> bool {
+    matches!(e, ApiError::Network(_) | ApiError::Decode(_))
+}
+
+/// Whether a draft must not be sent as it is: `unsure` is what was last
+/// sent under the draft's action id with no answer (it may have been
+/// posted), and `now` differs from it. Sent unchanged, the server answers
+/// it as it answered the first (and writes nothing again); changed, under
+/// the same id it would be refused (409) and under a new one it might be
+/// posted twice, so the person decides ("Send as new")
+pub fn must_resend_as_sent(unsure: Option<&str>, now: &str) -> bool {
+    unsure.is_some_and(|sent| sent != now)
 }
 
 /// A new post as the form holds it, before it is a request
@@ -248,6 +269,9 @@ fn open(router: Option<RouterContext>, link: AgoraLink) {
 enum Said {
     /// Refused or failed: the words for a person
     Failed(String),
+    /// Not sent: the last send got no answer, so it may have been posted,
+    /// and the text has changed since ([`must_resend_as_sent`])
+    Unsure,
     /// Posted: where it is, and the server's advice if it gave any
     Posted {
         link: Box<AgoraLink>,
@@ -278,9 +302,10 @@ fn Reply(start_open: bool) -> Element {
     let router = try_router();
     let mut open_box = use_signal(|| start_open);
     let body = use_signal(String::new);
-    let action = use_signal(OperatorActionId::new);
+    let mut action = use_signal(OperatorActionId::new);
     let sending = use_signal(|| false);
-    let said = use_signal(|| None::<Said>);
+    let mut said = use_signal(|| None::<Said>);
+    let unsure = use_signal(|| None::<String>);
 
     let Some(handle) = session else {
         return rsx! {};
@@ -310,6 +335,11 @@ fn Reply(start_open: bool) -> Element {
             put(said, Some(Said::Failed(problem)));
             return;
         }
+        if must_resend_as_sent(unsure.peek().as_deref(), &text) {
+            put(said, Some(Said::Unsure));
+            return;
+        }
+        let key = text.clone();
         let Session::SignedIn(signed_in) = handle.get() else {
             return;
         };
@@ -328,6 +358,13 @@ fn Reply(start_open: bool) -> Element {
         put(said, None);
         handle.create_comment(signed_in, request, move |answer| {
             put(sending, false);
+            put(
+                unsure,
+                match &answer {
+                    Err(e) if outcome_unknown(e) => Some(key),
+                    _ => None,
+                },
+            );
             match answer {
                 Ok(ack) => {
                     put(body, String::new());
@@ -357,7 +394,16 @@ fn Reply(start_open: bool) -> Element {
             if open_box() || has_draft && !can_write {
                 form { class: "ui-compose-form", onsubmit: send,
                     CommentField { id: field.clone(), label, body }
-                    Feedback { handle, state: state.clone(), said: said() }
+                    Feedback {
+                        handle,
+                        state: state.clone(),
+                        said: said(),
+                        on_new: move |_| {
+                            action.set(OperatorActionId::new());
+                            put(unsure, None);
+                            said.set(None);
+                        },
+                    }
                     div { class: "ui-actions",
                         button {
                             class: "ui-pill ui-pill-primary",
@@ -437,6 +483,8 @@ fn Feedback(
     handle: SessionHandle,
     state: Session,
     said: Option<Said>,
+    /// "Send as new": a new action id for the draft
+    on_new: EventHandler,
 ) -> Element {
     let blocked = blocked(&state);
     let blocked_shown = blocked.is_some();
@@ -465,7 +513,20 @@ fn Feedback(
         }
         match said {
             // Why it can't be sent now says it already, once
-            Some(Said::Failed(_)) if blocked_shown => rsx! {},
+            Some(Said::Failed(_) | Said::Unsure) if blocked_shown => rsx! {},
+            Some(Said::Unsure) => rsx! {
+                p { class: "ui-compose-alert", role: "alert",
+                    "Your last send got no answer, so it may have been posted, and \
+                     the text has changed since. Reload the page to check first, or \
+                     send this as new (if the first did go through, both will show). "
+                    button {
+                        class: "ui-pill ui-pill-action",
+                        r#type: "button",
+                        onclick: move |_| on_new.call(()),
+                        "Send as new"
+                    }
+                }
+            },
             Some(Said::Failed(words)) => rsx! {
                 p { class: "ui-compose-alert", role: "alert", "{words}" }
             },
@@ -519,9 +580,10 @@ fn NewPostForm(start_open: bool) -> Element {
             .unwrap_or_default(),
         ..PostDraft::default()
     });
-    let action = use_signal(OperatorActionId::new);
+    let mut action = use_signal(OperatorActionId::new);
     let sending = use_signal(|| false);
-    let said = use_signal(|| None::<Said>);
+    let mut said = use_signal(|| None::<Said>);
+    let unsure = use_signal(|| None::<String>);
     let mut communities =
         use_signal(|| None::<Result<Vec<CommunityName>, String>>);
 
@@ -572,6 +634,12 @@ fn NewPostForm(start_open: bool) -> Element {
                 return;
             }
         };
+        // What was sent, to compare a later send with
+        let key = format!("{payload:?}");
+        if must_resend_as_sent(unsure.peek().as_deref(), &key) {
+            put(said, Some(Said::Unsure));
+            return;
+        }
         let Session::SignedIn(signed_in) = handle.get() else {
             return;
         };
@@ -583,6 +651,13 @@ fn NewPostForm(start_open: bool) -> Element {
         put(said, None);
         handle.create_post(signed_in, request, move |answer| {
             put(sending, false);
+            put(
+                unsure,
+                match &answer {
+                    Err(e) if outcome_unknown(e) => Some(key),
+                    _ => None,
+                },
+            );
             match answer {
                 Ok(created) => {
                     let id: PostId = created.ack.id;
@@ -640,7 +715,16 @@ fn NewPostForm(start_open: bool) -> Element {
                         fixed: fixed.clone(),
                         communities: communities(),
                     }
-                    Feedback { handle, state: state.clone(), said: said() }
+                    Feedback {
+                        handle,
+                        state: state.clone(),
+                        said: said(),
+                        on_new: move |_| {
+                            action.set(OperatorActionId::new());
+                            put(unsure, None);
+                            said.set(None);
+                        },
+                    }
                     div { class: "ui-actions",
                         button {
                             class: "ui-pill ui-pill-primary",

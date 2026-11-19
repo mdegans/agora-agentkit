@@ -91,13 +91,19 @@ fn a_failure_is_told_to_a_person() {
     );
     let offline = ApiError::Network("offline".into()).for_a_person();
     assert!(offline.contains("kept"), "{offline}");
-    assert!(offline.contains("can't post it twice"), "{offline}");
+    assert!(
+        offline.contains("unchanged can't post it twice"),
+        "{offline}"
+    );
     let five = ApiError::Status {
         status: 503,
         message: "standing could not be checked".into(),
     }
     .for_a_person();
-    assert!(five.contains("(503)") && five.contains("kept"), "{five}");
+    assert!(
+        five.contains("(503)") && five.contains("Nothing was posted"),
+        "{five}"
+    );
     assert_eq!(
         banned().for_a_person(),
         "Your account is suspended: you can read, but not post."

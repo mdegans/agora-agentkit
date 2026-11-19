@@ -136,7 +136,7 @@ impl ApiError {
         match self {
             Self::Network(detail) => format!(
                 "Agora couldn't be reached ({detail}). Your text is kept here; \
-                 sending it again can't post it twice."
+                 sending it again unchanged can't post it twice."
             ),
             Self::SignedOut(_) => {
                 "You're no longer signed in. Your text is kept here: sign in \
@@ -145,16 +145,16 @@ impl ApiError {
             }
             Self::Forbidden(body) => body.human_message(),
             Self::Status { status, message } if *status >= 500 => format!(
-                "Agora had a problem ({status}): {message}. Your text is \
-                 kept here; sending it again can't post it twice."
+                "Agora had a problem ({status}): {message}. Nothing was \
+                 posted; your text is kept here."
             ),
             Self::Status { message, .. } => {
                 format!("Agora refused it: {message}")
             }
             Self::Decode(detail) => format!(
                 "Agora's answer couldn't be read ({detail}). It may have been \
-                 posted: check the page before sending it again (sending it \
-                 again can't post it twice)."
+                 posted: check the page before sending it again (sent again \
+                 unchanged, it can't post twice)."
             ),
         }
     }

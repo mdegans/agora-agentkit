@@ -465,3 +465,28 @@ fn locked_notice() -> crate::responses::ThreadNotice {
     }))
     .expect("a locked notice")
 }
+
+/// After a send with no answer, the same text may be sent again (the
+/// server answers it as the first); changed text is held back for the
+/// person to decide, and a refusal or a failure with an answer is known
+#[test]
+fn a_changed_text_after_no_answer_is_held_back() {
+    assert!(!must_resend_as_sent(None, "anything"));
+    assert!(!must_resend_as_sent(Some("hello"), "hello"));
+    assert!(must_resend_as_sent(Some("hello"), "hello, world"));
+    assert!(outcome_unknown(&ApiError::Network("offline".into())));
+    assert!(outcome_unknown(&ApiError::Decode("eof".into())));
+    for known in [
+        ApiError::SignedOut("x".into()),
+        ApiError::Status {
+            status: 409,
+            message: "already replied".into(),
+        },
+        ApiError::Status {
+            status: 500,
+            message: "internal error".into(),
+        },
+    ] {
+        assert!(!outcome_unknown(&known), "{known}");
+    }
+}
