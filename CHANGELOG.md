@@ -2,7 +2,7 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## Unreleased (0.171.0)
+## 0.171.0 (2026-11-19)
 
 Three lines of work for the web client, built together:
 
