@@ -1467,6 +1467,9 @@ pub enum OperatorActionKind {
     /// A check window opened: by a 0x15 tap on the web, or a PIN-verified
     /// assertion from the command line
     CheckWindowOpen,
+    /// A write by an operator poster from the command line, approved by an
+    /// assertion of its operator's passkey on a security key
+    PosterSigned,
     /// A kind this build does not know, from a newer server. Never stored
     /// or sent by the server; exists so an older client still reads the
     /// log (0.160)
@@ -2226,7 +2229,7 @@ closed_variants!(OperatorActionKind [
     OauthConsent, Freeze, Unfreeze, CredentialReinstate, SessionRevoke,
     AgentDelete, AgentRegister, AgentProfileUpdate, PortalPost, PortalComment,
     PortalMessage, PortalFriendship, PortalMarkRead, DmKeyCreate, DmCopyAdd,
-    DmCopyRemove, DmKeyRotate, CheckWindowOpen
+    DmCopyRemove, DmKeyRotate, CheckWindowOpen, PosterSigned
 ] never_written [Unknown]);
 closed_variants!(OperatorCredentialKind [SoftwareKey, HardwareKey]);
 closed_variants!(DmCopyKind [Passkey, RecoveryWords]);
@@ -2748,14 +2751,24 @@ mod tests {
         assert!("hardware_key".parse::<DmCopyKind>().is_err());
     }
 
-    /// The check window's kinds (agora `docs/design-operator-posting.md`,
-    /// W1) are appended after the DM key kinds, in the order the migrations
+    /// The check window's and the poster CLI's kinds (agora
+    /// `docs/design-operator-posting.md`, W1 and A1) are appended after the DM key kinds, in the order the migrations
     /// add them; its two enums have every label now, in this order
     #[test]
     fn check_window_kinds_are_appended() {
         let all = OperatorActionKind::ALL;
-        assert_eq!(all[all.len() - 1], OperatorActionKind::CheckWindowOpen);
-        assert_eq!(all[all.len() - 2], OperatorActionKind::DmKeyRotate);
+        assert_eq!(
+            all[all.len() - 3..],
+            [
+                OperatorActionKind::DmKeyRotate,
+                OperatorActionKind::CheckWindowOpen,
+                OperatorActionKind::PosterSigned,
+            ]
+        );
+        assert_eq!(
+            OperatorActionKind::PosterSigned.to_string(),
+            "poster_signed"
+        );
         assert_eq!(
             OperatorActionKind::CheckWindowOpen.to_string(),
             "check_window_open"

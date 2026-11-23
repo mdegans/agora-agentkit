@@ -551,7 +551,8 @@ impl Client {
         let body = SendMessageRequest {
             agent_id,
             payload,
-            signature: sign_hex(key, &bytes, timestamp),
+            signature: Some(sign_hex(key, &bytes, timestamp)),
+            assertion: None,
             timestamp,
         };
         let url = self.url("api/social/messages")?;
@@ -639,7 +640,8 @@ impl Client {
         let body = SendMessageRequest {
             agent_id,
             payload,
-            signature: sign_hex(key, &bytes, timestamp),
+            signature: Some(sign_hex(key, &bytes, timestamp)),
+            assertion: None,
             timestamp,
         };
         let url = self.url("api/social/messages")?;
@@ -688,7 +690,8 @@ impl Client {
         let body = RegisterEncryptionKeyRequest {
             agent_id,
             payload,
-            signature: sign_hex(key, &bytes, timestamp),
+            signature: Some(sign_hex(key, &bytes, timestamp)),
+            assertion: None,
             timestamp,
         };
         let url = self.url("api/social/encryption_key")?;
@@ -1944,7 +1947,8 @@ fn signed<P>(
     SignedRequest {
         agent_id,
         payload,
-        signature: sign_hex(key, &action.canonical_bytes(), timestamp),
+        signature: Some(sign_hex(key, &action.canonical_bytes(), timestamp)),
+        assertion: None,
         timestamp,
     }
 }
@@ -2212,13 +2216,16 @@ mod tests {
         let body = GetDashboardRequest {
             agent_id: AgentId::new(),
             payload: GetDashboardInput::default(),
-            signature: sign_hex(&key, &bytes, timestamp),
+            signature: Some(sign_hex(&key, &bytes, timestamp)),
+            assertion: None,
             timestamp,
         };
         let json = serde_json::to_value(&body).unwrap();
         let back: GetDashboardRequest = serde_json::from_value(json).unwrap();
-        let sig: [u8; 64] =
-            hex::decode(&back.signature).unwrap().try_into().unwrap();
+        let sig: [u8; 64] = hex::decode(back.signature.unwrap())
+            .unwrap()
+            .try_into()
+            .unwrap();
         let sig = ed25519_dalek::Signature::from_bytes(&sig);
         assert!(verify(&verifying, &bytes, back.timestamp, &sig));
     }

@@ -140,6 +140,19 @@ pub enum RefusalCode {
     /// opened. Nothing was done. On the web, a tap in place opens one (0x15),
     /// the page and its drafts kept; on the command line, the PIN does
     CheckNeeded,
+    /// 403: the passkey that asserted can't sign from the command line: it
+    /// has no verified attestation to the pinned Yubico FIDO root (another
+    /// vendor's key, or one registered before attestation was kept). Nothing
+    /// was done; registering the same key again as a new passkey fixes the
+    /// second
+    PasskeyNotAttested,
+    /// 403: the passkey that asserted is synced (backup-eligible), and a
+    /// synced passkey signs on the website only. Nothing was done
+    PasskeySynced,
+    /// 403: a write from the command line whose assertion has no touch (the
+    /// User Present flag clear). Nothing was done: touch the key and send it
+    /// again
+    TouchNeeded,
     /// A code this build does not know, from a newer server: read as a
     /// refusal with no code this client acts on (its message is still
     /// shown). Never sent by the server; exists so a code added later
@@ -152,7 +165,7 @@ pub enum RefusalCode {
 impl RefusalCode {
     /// Every code the server sends, in declaration order (not
     /// [`Self::Unknown`])
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 15] = [
         Self::ReusedActionId,
         Self::ThreadLocked,
         Self::AlreadyReplied,
@@ -165,6 +178,9 @@ impl RefusalCode {
         Self::TapRefused,
         Self::NoPasskey,
         Self::CheckNeeded,
+        Self::PasskeyNotAttested,
+        Self::PasskeySynced,
+        Self::TouchNeeded,
     ];
 }
 

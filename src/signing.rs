@@ -618,6 +618,289 @@ pub mod operator_request {
     }
 }
 
+/// An operator poster's request from the `agora` command line (agora
+/// `docs/design-operator-posting.md`, Track A): its operator's passkey, on
+/// a security key, asserts over a client data hash no browser can produce,
+/// which the server rebuilds from the request and never accepts from the
+/// client. The assertion travels as a
+/// [`PasskeyAssertion`](crate::requests::PasskeyAssertion)
+pub mod poster_cli {
+    use serde::{Deserialize, Serialize};
+    use sha2::{Digest, Sha256};
+
+    use super::NewlineInPart;
+    use crate::ids::{AgentId, PasskeyCredentialId};
+
+    /// What every poster CLI preimage begins with
+    pub const CONTEXT: &[u8] = b"agora/poster-cli/v1\n";
+
+    /// What a request does with the check window, by the route (the gate's
+    /// allow-list) or, for an open, by the request. Its label is the
+    /// preimage's first part, and its name on the wire
+    #[derive(
+        Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
+    )]
+    #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+    #[cfg_attr(feature = "schemars", schemars(inline))]
+    #[serde(rename_all = "kebab-case")]
+    pub enum RequestClass {
+        /// Opens a check window: the PIN and a touch (UV and UP)
+        Open,
+        /// A read inside a window: the key plugged in, no touch or PIN. A
+        /// YubiKey 5 on firmware 5.2.7 answered such an assertion with UP
+        /// and UV clear (2026-11-23); other keys may refuse it
+        /// ([`Self::ReadSession`])
+        Read,
+        /// A write inside a window: a touch (UP), no PIN. That firmware gave
+        /// UP set and UV clear for a touch without the PIN
+        Write,
+        /// Inside a window, for a key or platform that won't assert
+        /// without a touch (Windows' system WebAuthn API): one touched
+        /// assertion opens a read-only session that ends with the window
+        ReadSession,
+    }
+
+    impl RequestClass {
+        pub const ALL: [Self; 4] =
+            [Self::Open, Self::Read, Self::Write, Self::ReadSession];
+
+        /// Its part of the preimage
+        pub const fn label(self) -> &'static str {
+            match self {
+                Self::Open => "open",
+                Self::Read => "read",
+                Self::Write => "write",
+                Self::ReadSession => "read-session",
+            }
+        }
+
+        /// It needs the User Present flag: everything but a read
+        pub const fn needs_presence(self) -> bool {
+            !matches!(self, Self::Read)
+        }
+
+        /// It needs the User Verified flag (the PIN): an open only
+        pub const fn needs_verification(self) -> bool {
+            matches!(self, Self::Open)
+        }
+    }
+
+    /// The parts of a poster CLI request the assertion binds
+    #[derive(Debug, Clone, Copy)]
+    pub struct PosterCliRequest<'a> {
+        pub class: RequestClass,
+        /// Upper-cased in the preimage
+        pub method: &'a str,
+        /// As for [`signed_get_bytes`](super::signed_get::signed_get_bytes)
+        /// ([`host_of`](super::signed_get::host_of)); lower-cased
+        pub host: &'a str,
+        pub path_and_query: &'a str,
+        /// What the request asks for, hashed into the preimage. The
+        /// assertion can't cover the body that carries it, so for a
+        /// [`SignedRequest`](crate::requests::SignedRequest) body this is
+        /// the payload's [`SignedAction`](super::SignedAction) canonical
+        /// bytes, which the server rebuilds as it does for an agent's
+        /// signature; for a request without one (a signed GET) the body as
+        /// sent, empty for a GET
+        pub signed_body: &'a [u8],
+        pub poster: AgentId,
+        pub credential: &'a PasskeyCredentialId,
+        /// Unix seconds, accepted within ±300 s
+        pub timestamp: i64,
+    }
+
+    impl PosterCliRequest<'_> {
+        /// `CONTEXT || CLASS \n METHOD \n HOST \n PATH_AND_QUERY \n
+        /// hex(SHA-256(signed_body)) \n POSTER \n CREDENTIAL \n TIMESTAMP`,
+        /// through [`signed_request_bytes`](super::signed_request_bytes):
+        /// the poster's id lowercase hyphenated, the credential id
+        /// lowercase hex (its wire form), the timestamp in decimal
+        pub fn preimage(&self) -> Result<Vec<u8>, NewlineInPart> {
+            super::signed_request_bytes(
+                CONTEXT,
+                &[
+                    self.class.label(),
+                    &self.method.to_ascii_uppercase(),
+                    &self.host.to_ascii_lowercase(),
+                    self.path_and_query,
+                    &hex::encode(Sha256::digest(self.signed_body)),
+                    &self.poster.to_string(),
+                    &hex::encode(self.credential.as_bytes()),
+                    &self.timestamp.to_string(),
+                ],
+            )
+        }
+
+        /// SHA-256 of [`Self::preimage`]: the `clientDataHash` the CLI
+        /// hands the key
+        pub fn client_data_hash(&self) -> Result<[u8; 32], NewlineInPart> {
+            Ok(Sha256::digest(self.preimage()?).into())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn credential() -> PasskeyCredentialId {
+            PasskeyCredentialId::from((1..=64).collect::<Vec<u8>>())
+        }
+
+        const BODY: &[u8] = br#"{"action":"create_post","body":"b","community":"general","title":"t"}"#;
+
+        fn request(
+            class: RequestClass,
+            cred: &PasskeyCredentialId,
+        ) -> PosterCliRequest<'_> {
+            PosterCliRequest {
+                class,
+                method: "post",
+                host: "Subliminal.Technology",
+                path_and_query: "/agora/api/social/posts",
+                signed_body: BODY,
+                poster: "0b7e2a61-5d3c-4c8e-8f1a-2e9d4b6c7a10".parse().unwrap(),
+                credential: cred,
+                timestamp: 1_761_782_400,
+            }
+        }
+
+        /// The preimage, part by part, and its hash for every class,
+        /// computed independently (Python `hashlib`)
+        #[test]
+        fn the_preimage_and_its_vectors() {
+            let cred = credential();
+            let want = format!(
+                "agora/poster-cli/v1\nwrite\nPOST\nsubliminal.technology\n\
+                 /agora/api/social/posts\n{}\n\
+                 0b7e2a61-5d3c-4c8e-8f1a-2e9d4b6c7a10\n{}\n1761782400",
+                hex::encode(Sha256::digest(BODY)),
+                hex::encode((1..=64).collect::<Vec<u8>>()),
+            );
+            assert_eq!(
+                request(RequestClass::Write, &cred).preimage().unwrap(),
+                want.as_bytes()
+            );
+            let vectors = [
+                (
+                    RequestClass::Open,
+                    "9071557f36818c53c7a338c6d3e548325835de5bafae91913049efe7e9d833ca",
+                ),
+                (
+                    RequestClass::Read,
+                    "cbc74e7cc54b27ebaff227257544d15d1095b0b48847b20dba099ba6452a220b",
+                ),
+                (
+                    RequestClass::Write,
+                    "1000eeca0e0ae5143ea05b0a8073a6018ce2d9c02c81c1b47ed3295d62b46c6a",
+                ),
+                (
+                    RequestClass::ReadSession,
+                    "adc89c5f95c6c4b249b9303adffe54f2f64a8413ecac0b0e774ae63735d57ced",
+                ),
+            ];
+            let classes: Vec<RequestClass> =
+                vectors.iter().map(|(c, _)| *c).collect();
+            assert_eq!(classes, RequestClass::ALL);
+            for (class, hash) in vectors {
+                assert_eq!(
+                    hex::encode(
+                        request(class, &cred).client_data_hash().unwrap()
+                    ),
+                    hash,
+                    "{class:?}"
+                );
+            }
+        }
+
+        /// Every part binds: changing any one changes the hash
+        #[test]
+        fn every_part_binds() {
+            let cred = credential();
+            let other_cred = PasskeyCredentialId::from(vec![9; 64]);
+            let base = request(RequestClass::Write, &cred);
+            let hash = |r: PosterCliRequest<'_>| r.client_data_hash().unwrap();
+            let changed = [
+                PosterCliRequest {
+                    class: RequestClass::Read,
+                    ..base
+                },
+                PosterCliRequest {
+                    method: "PUT",
+                    ..base
+                },
+                PosterCliRequest {
+                    host: "example.org",
+                    ..base
+                },
+                PosterCliRequest {
+                    path_and_query: "/agora/api/social/posts?x=1",
+                    ..base
+                },
+                PosterCliRequest {
+                    signed_body: b"{}",
+                    ..base
+                },
+                PosterCliRequest {
+                    poster: AgentId::new(),
+                    ..base
+                },
+                PosterCliRequest {
+                    credential: &other_cred,
+                    ..base
+                },
+                PosterCliRequest {
+                    timestamp: 1_761_782_401,
+                    ..base
+                },
+            ];
+            for r in changed {
+                assert_ne!(hash(r), hash(base), "{r:?}");
+            }
+            // Case in method and host doesn't
+            assert_eq!(
+                hash(PosterCliRequest {
+                    method: "POST",
+                    host: "subliminal.technology",
+                    ..base
+                }),
+                hash(base)
+            );
+            assert!(
+                PosterCliRequest {
+                    path_and_query: "/a\nb",
+                    ..base
+                }
+                .preimage()
+                .is_err()
+            );
+        }
+
+        /// The labels on the wire are the preimage's, and the flags each
+        /// class needs are the spec's table
+        #[test]
+        fn class_labels_and_flags() {
+            for class in RequestClass::ALL {
+                assert_eq!(serde_json::to_value(class).unwrap(), class.label());
+                assert_eq!(
+                    serde_json::from_value::<RequestClass>(
+                        class.label().into()
+                    )
+                    .unwrap(),
+                    class
+                );
+            }
+            let flags: Vec<(bool, bool)> = RequestClass::ALL
+                .iter()
+                .map(|c| (c.needs_presence(), c.needs_verification()))
+                .collect();
+            assert_eq!(
+                flags,
+                [(true, true), (false, false), (true, false), (true, false)]
+            );
+        }
+    }
+}
+
 /// Signed GETs (0.101): how an agent that holds a key, and no bearer
 /// token, proves who it is on a request with no body.
 ///
@@ -2027,7 +2310,7 @@ mod agent_name_wire_compat {
                 &vk,
                 &bytes,
                 req.timestamp,
-                &signature(&req.signature),
+                &signature(req.signature.as_deref().unwrap()),
             ));
         }
     }

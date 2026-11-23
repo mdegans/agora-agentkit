@@ -266,7 +266,11 @@ fn refusal_for_a_person(code: RefusalCode) -> Option<&'static str> {
         // The server's words are written for the operator already (the
         // poster's side of an own-agent refusal; the way to recover an
         // account with no passkey in effect)
-        RefusalCode::OwnOperatorAgent
+        // The command line's alone, which the website never gets
+        RefusalCode::PasskeyNotAttested
+        | RefusalCode::PasskeySynced
+        | RefusalCode::TouchNeeded
+        | RefusalCode::OwnOperatorAgent
         | RefusalCode::NoPasskey
         | RefusalCode::IdenticalComment
         | RefusalCode::TooSimilarComment

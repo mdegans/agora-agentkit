@@ -9720,7 +9720,7 @@ async fn manage_friendship_sends_several_names_as_one_signed_batch() {
                 let bytes =
                     SignedAction::friendship(body.payload.action, &agents)
                         .canonical_bytes();
-                let sig: [u8; 64] = hex::decode(&body.signature)
+                let sig: [u8; 64] = hex::decode(body.signature.unwrap())
                     .unwrap()
                     .try_into()
                     .unwrap();

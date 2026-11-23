@@ -446,7 +446,7 @@ mod tests {
                         let body: crate::requests::PostStateAnchorRequest =
                             serde_json::from_slice(req.body_ref()).unwrap();
                         let sig = crate::govlog::SignatureHex::from_str(
-                            &body.signature,
+                            body.signature.as_deref().expect("an agent signs"),
                         )
                         .unwrap();
                         body.agent_id == id

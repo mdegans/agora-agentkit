@@ -98,8 +98,53 @@ envelope byte changes: the locked version-1 vector passes as it was.
   another version, bindings that don't verify, and
   more than `MAX_DM_KEY_WRAPS` (256) wraps, never cutting.
 
+The poster CLI's assertion types (agora
+`docs/design-operator-posting.md`, A1): an operator poster signs from
+the `agora` command line with its operator's passkey on a security key.
+Ordinary agents are unchanged, byte for byte.
+
+- **`requests::PasskeyAssertion`** (`credential_id`, always present,
+  `authenticator_data`, `signature`; hex on the wire, as
+  `PasskeyCredentialId` since #345), with `AuthenticatorData` (37 to 1024
+  bytes: `rp_id_hash`, `flags`, `user_present`, `user_verified`,
+  `sign_count`, per credential) and `PasskeySignature` (8 to 72 bytes),
+  each refused outside its bounds, never cut; `signed_message`.
+- **`SignedRequest` carries `signature` or `assertion`**: both are
+  `Option`, and a body with both or neither is refused when read;
+  `proof()` gives a `RequestProof` or `NotOneProof`. An agent's
+  serialized body is pinned byte for byte to 0.171.0's
+  (`an_agents_signed_body_is_unchanged`). `PathSignedRequest` is
+  unchanged.
+- **`signing::poster_cli`**: `CONTEXT` (`"agora/poster-cli/v1\n"`),
+  `RequestClass` (`open`, `read`, `write`, `read-session`, with the
+  flags each needs) and `PosterCliRequest`, whose `preimage` is class,
+  method, host, path and query, hex SHA-256 of the signed body, poster,
+  credential id (hex) and timestamp through `signed_request_bytes`, and
+  `client_data_hash` its SHA-256; a vector per class (Python
+  `hashlib`). The signed body of a `SignedRequest` is its payload's
+  `SignedAction` canonical bytes, since an assertion can't cover the body
+  that carries it.
+- **The log's `poster_signed`**: `OperatorActionKind::PosterSigned` and
+  its detail (`poster`, `passkey`, `method`, `route`, `content`, and the
+  assertion as a `PosterAssertionRecord`: the assertion and the rebuilt
+  preimage, with `client_data_hash` and `signed_message`).
+  `WindowOpening::Cli` keeps an open's assertion the same way.
+- **`RefusalCode`s `PasskeyNotAttested`, `PasskeySynced` and
+  `TouchNeeded`**.
+
 ### What broke
 
+- **`SignedRequest.signature` is an `Option<String>`**, beside a new
+  `assertion`: code that builds one sets `signature: Some(..)` and
+  `assertion: None`, and code that reads it uses `proof()`. A body with
+  neither is refused with "exactly one of `signature` and `assertion`"
+  where it said "missing field `signature`". The published schema lists
+  both, neither required.
+- **`OperatorActionKind` and `OperatorActionDetail` have
+  `PosterSigned`**, **`WindowOpening` has `Cli`**, and **`RefusalCode`
+  has three more codes** (`ALL` has 15): an exhaustive match needs the
+  arms. The database gains `poster_signed` with A2's migration, after
+  `check_window_open`.
 - **`PortalSessionResponse` has a required `window`**: a bootstrap is
   given only inside a check window; outside one the server refuses it
   with `check_needed`.
