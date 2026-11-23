@@ -1516,16 +1516,6 @@ pub enum CheckSurface {
     Cli,
 }
 
-impl CheckSurface {
-    /// Its byte in tap 0x15's canonical bytes
-    pub const fn tag(self) -> u8 {
-        match self {
-            Self::Web => 0,
-            Self::Cli => 1,
-        }
-    }
-}
-
 /// Why a check window ended (`check_window_end_enum`)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -1549,6 +1539,10 @@ pub enum CheckWindowEnd {
     SignedOut,
     /// The account was frozen
     Frozen,
+    /// Its times are later than now, past the allowed skew
+    /// ([`CLOCK_SKEW`](crate::operator_security::CLOCK_SKEW)): drift,
+    /// ended to fail closed
+    Clock,
 }
 
 /// What kind of key an operator credential is (`operator_credential_kind_enum`,
@@ -2128,6 +2122,7 @@ impl_display_fromstr!(NotificationKind);
 impl_display_fromstr!(DmCopyKind);
 impl_display_fromstr!(CheckSurface);
 impl_display_fromstr!(CheckWindowEnd);
+impl_display_fromstr!(crate::operator_security::Tier);
 impl_display_fromstr!(OperatorActionKind);
 impl_display_fromstr!(crate::requests::ProfileField);
 impl_display_fromstr!(OperatorCredentialKind);
@@ -2234,7 +2229,10 @@ closed_variants!(OperatorActionKind [
 closed_variants!(OperatorCredentialKind [SoftwareKey, HardwareKey]);
 closed_variants!(DmCopyKind [Passkey, RecoveryWords]);
 closed_variants!(CheckSurface [Web, Cli]);
-closed_variants!(CheckWindowEnd [Idle, Absolute, Address, Suspended, SignedOut, Frozen]);
+closed_variants!(CheckWindowEnd [Idle, Absolute, Address, Suspended, SignedOut, Frozen, Clock]);
+// Defined beside the window that uses it (`operator_security`)
+use crate::operator_security::Tier;
+closed_variants!(Tier [UpTo5, UpTo50, UpTo500, Over500]);
 closed_variants!(PinPolicy [Never, Once, Always]);
 closed_variants!(TouchPolicy [Never, Always, Cached]);
 closed_variants!(PollMode [Ranked, Approval, Single] never_written [Unknown]);
@@ -2776,7 +2774,6 @@ mod tests {
         let labels: Vec<String> =
             CheckSurface::ALL.iter().map(|k| k.to_string()).collect();
         assert_eq!(labels, ["web", "cli"]);
-        assert_eq!(CheckSurface::ALL.map(CheckSurface::tag), [0, 1]);
         let labels: Vec<String> =
             CheckWindowEnd::ALL.iter().map(|k| k.to_string()).collect();
         assert_eq!(
@@ -2787,9 +2784,16 @@ mod tests {
                 "address",
                 "suspended",
                 "signed_out",
-                "frozen"
+                "frozen",
+                "clock"
             ]
         );
+        let labels: Vec<String> =
+            Tier::ALL.iter().map(|k| k.to_string()).collect();
+        assert_eq!(labels, ["up_to_5", "up_to_50", "up_to_500", "over_500"]);
+        for k in Tier::ALL {
+            assert_eq!(k.to_string().parse::<Tier>().unwrap(), k);
+        }
         for k in CheckWindowEnd::ALL {
             assert_eq!(k.to_string().parse::<CheckWindowEnd>().unwrap(), k);
         }

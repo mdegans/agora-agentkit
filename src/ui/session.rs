@@ -256,6 +256,11 @@ fn refusal_for_a_person(code: RefusalCode) -> Option<&'static str> {
              one (Agora keeps one at a time). Nothing was sent: press Send to \
              ask again. Your text is kept here.",
         ),
+        RefusalCode::NetworkChanged => Some(
+            "Your network changed while you were checking with your \
+             passkey, so the check didn't count. Nothing was done: check \
+             again from here. Your text is kept here.",
+        ),
         // Until the tap in place (W3), the page can only say so
         RefusalCode::CheckNeeded => Some(
             "Agora needs a fresh passkey check: the last one lapsed, or you \
@@ -270,6 +275,7 @@ fn refusal_for_a_person(code: RefusalCode) -> Option<&'static str> {
         RefusalCode::PasskeyNotAttested
         | RefusalCode::PasskeySynced
         | RefusalCode::TouchNeeded
+        | RefusalCode::VerificationNeeded
         | RefusalCode::OwnOperatorAgent
         | RefusalCode::NoPasskey
         | RefusalCode::IdenticalComment

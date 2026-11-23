@@ -6,25 +6,64 @@
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 
 use super::challenge::sha256;
 use crate::enums::{CheckSurface, CheckWindowEnd};
 
 /// An operator's size, by `tier_agent_count` (live agents and those in their
 /// departure grace), read at each request and never cached. The one home of
-/// the 5, 50 and 500 lines
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// the 5, 50 and 500 lines. Ordered strictest last (`operator_tier_enum`,
+/// whose labels sort the same way)
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Serialize,
+    Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(
+    feature = "sqlx",
+    derive(sqlx::Type),
+    sqlx(type_name = "operator_tier_enum")
+)]
 pub enum Tier {
+    #[serde(rename = "up_to_5")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "up_to_5"))]
     UpTo5,
+    #[serde(rename = "up_to_50")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "up_to_50"))]
     UpTo50,
+    #[serde(rename = "up_to_500")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "up_to_500"))]
     UpTo500,
+    #[serde(rename = "over_500")]
+    #[cfg_attr(feature = "sqlx", sqlx(rename = "over_500"))]
     Over500,
 }
 
-impl Tier {
-    pub const ALL: [Self; 4] =
-        [Self::UpTo5, Self::UpTo50, Self::UpTo500, Self::Over500];
+/// A database count that can't be one: negative, or past `u32`. The server
+/// logs it and goes on with [`Self::tier`], the strictest
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("an agent count of {count} is drift; read as the strictest tier")]
+pub struct BadAgentCount {
+    pub count: i64,
+}
 
+impl BadAgentCount {
+    pub const fn tier(self) -> Tier {
+        Tier::Over500
+    }
+}
+
+impl Tier {
     pub const fn of(count: u32) -> Self {
         match count {
             0..=5 => Self::UpTo5,
@@ -34,13 +73,13 @@ impl Tier {
         }
     }
 
-    /// [`Self::of`] for a database count. A negative one is drift, and reads
-    /// as the strictest tier
-    pub const fn of_i64(count: i64) -> Self {
+    /// [`Self::of`] for a database count, refusing one that can't be: the
+    /// caller logs the drift and uses [`BadAgentCount::tier`]
+    pub const fn of_i64(count: i64) -> Result<Self, BadAgentCount> {
         if count < 0 || count > u32::MAX as i64 {
-            Self::Over500
+            Err(BadAgentCount { count })
         } else {
-            Self::of(count as u32)
+            Ok(Self::of(count as u32))
         }
     }
 
@@ -77,9 +116,23 @@ pub struct WindowLimits {
     pub absolute: Duration,
 }
 
+/// How far a window's stored times may be ahead of `now` (servers' clocks
+/// disagreeing) before the window is ended as drift
+/// ([`CheckWindowEnd::Clock`]), failing closed
+pub const CLOCK_SKEW: Duration = Duration::seconds(30);
+
 /// The client's network, as a check window compares it: an IPv4 address,
 /// or an IPv6 address's /64 (privacy addresses rotate within it). An
-/// IPv4-mapped IPv6 address is read as IPv4. It names a network, not a
+/// IPv4-mapped IPv6 address (`::ffff:a.b.c.d`) is read as IPv4. It names a
+/// network, not a device.
+///
+/// Some addresses share a network that isn't one. IPv6 loopback (`::1`),
+/// unspecified (`::`) and the deprecated IPv4-compatible addresses
+/// (`::a.b.c.d`) all fall in `::/64`; [`Self::is_routable`] says no to them
+/// and to IPv4 loopback and `0.0.0.0/8`, and the server refuses to open a
+/// window from one in production. A translator in front of the proxy (NAT64,
+/// Teredo, a carrier-grade NAT) puts many clients on one network, which a
+/// window can't tell apart: the passkey and the cookie are what tie it to a
 /// device
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ClientNet {
@@ -113,6 +166,15 @@ impl ClientNet {
         Self::of(ip) == *self
     }
 
+    /// Not loopback, unspecified, or (IPv6) anything in `::/64`: a network a
+    /// real client could be on
+    pub fn is_routable(&self) -> bool {
+        match self {
+            Self::V4(v4) => !v4.is_loopback() && v4.octets()[0] != 0,
+            Self::V6(prefix) => *prefix != [0; 8],
+        }
+    }
+
     /// `4 ‖ the address (4)` or `6 ‖ the /64 prefix (8)`
     pub fn canonical_bytes(&self) -> Vec<u8> {
         match self {
@@ -129,7 +191,8 @@ impl ClientNet {
         }
     }
 
-    /// SHA-256 of [`Self::canonical_bytes`], as tap 0x15 binds it
+    /// SHA-256 of [`Self::canonical_bytes`]. An IPv4 address's can be
+    /// reversed by trying them all: never publish it
     pub fn sha256(&self) -> [u8; 32] {
         sha256(&self.canonical_bytes())
     }
@@ -187,35 +250,48 @@ pub struct NotAClientNet {
     pub prefix: u8,
 }
 
-/// An open check window's state (`operator_check_windows`): its idle and
-/// absolute limits come from the [`Tier`] at each read, so a count that
-/// crosses a line shortens it at once
+/// An open check window's state (`operator_check_windows`). Its limits come
+/// from the stricter of the operator's [`Tier`] now and `strictest`, the
+/// strictest it has been checked under: a count that crosses a line
+/// shortens it at once, and one that drops back doesn't lengthen it, so a
+/// window that lapsed under a stricter tier stays lapsed
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckWindow {
     pub surface: CheckSurface,
     pub net: ClientNet,
     pub opened_at: DateTime<Utc>,
     pub last_used_at: DateTime<Utc>,
+    pub strictest: Tier,
 }
 
 impl CheckWindow {
+    /// The tier its limits come from, with the operator at `tier` now
+    pub fn effective(&self, tier: Tier) -> Tier {
+        self.strictest.max(tier)
+    }
+
     /// When it ends if unused from now on, absolute limit aside
     pub fn idle_expires_at(&self, tier: Tier) -> DateTime<Utc> {
-        self.last_used_at + tier.window().idle
+        self.last_used_at + self.effective(tier).window().idle
     }
 
     /// When it ends however it is used
     pub fn expires_at(&self, tier: Tier) -> DateTime<Utc> {
-        self.opened_at + tier.window().absolute
+        self.opened_at + self.effective(tier).window().absolute
     }
 
-    /// Why it has lapsed by `now`, if it has: whichever limit came first, and
-    /// at a tie the absolute one. A window is over at its limit, not after
+    /// Why it has lapsed by `now`, if it has: times later than `now` past
+    /// [`CLOCK_SKEW`] first, then whichever limit came first, and at a tie
+    /// the absolute one. A window is over at its limit, not after
     pub fn lapsed(
         &self,
         tier: Tier,
         now: DateTime<Utc>,
     ) -> Option<CheckWindowEnd> {
+        let latest = now + CLOCK_SKEW;
+        if self.opened_at > latest || self.last_used_at > latest {
+            return Some(CheckWindowEnd::Clock);
+        }
         let idle = self.idle_expires_at(tier);
         let absolute = self.expires_at(tier);
         let (first, reason) = if absolute <= idle {
@@ -226,22 +302,22 @@ impl CheckWindow {
         (now >= first).then_some(reason)
     }
 
-    /// Whether a request from `ip` at `now` may use it: refused with why it
-    /// ends otherwise. A lapse is reported before a change of network, since
-    /// it happened first
+    /// Whether a request from `ip` at `now` may use it. `Ok` carries the
+    /// tier to store as `strictest`; `Err` why it ends. A lapse is reported
+    /// before a change of network, since it happened first
     pub fn check(
         &self,
         tier: Tier,
         now: DateTime<Utc>,
         ip: IpAddr,
-    ) -> Result<(), CheckWindowEnd> {
+    ) -> Result<Tier, CheckWindowEnd> {
         if let Some(reason) = self.lapsed(tier, now) {
             return Err(reason);
         }
         if !self.net.contains(ip) {
             return Err(CheckWindowEnd::Address);
         }
-        Ok(())
+        Ok(self.effective(tier))
     }
 
     /// What the portal's bootstrap says of it
@@ -278,11 +354,14 @@ mod tests {
         ];
         for (count, tier) in cases {
             assert_eq!(Tier::of(count), tier, "{count}");
-            assert_eq!(Tier::of_i64(i64::from(count)), tier, "{count}");
+            assert_eq!(Tier::of_i64(i64::from(count)), Ok(tier), "{count}");
         }
-        // Drift reads as the strictest
-        assert_eq!(Tier::of_i64(-1), Tier::Over500);
-        assert_eq!(Tier::of_i64(i64::from(u32::MAX) + 1), Tier::Over500);
+        // Drift is an error the server must handle, with the strictest tier
+        for count in [-1, i64::from(u32::MAX) + 1, i64::MIN] {
+            let err = Tier::of_i64(count).unwrap_err();
+            assert_eq!(err, BadAgentCount { count });
+            assert_eq!(err.tier(), Tier::Over500);
+        }
         // Each line is its tier's most, and the next count is the next tier
         for tier in &Tier::ALL[..3] {
             assert_eq!(Tier::of(tier.max_agents()), *tier);
@@ -365,6 +444,28 @@ mod tests {
         }
     }
 
+    /// Loopback, unspecified and IPv4-compatible addresses collapse into
+    /// `::/64` (or aren't a network at all), and aren't routable
+    #[test]
+    fn what_is_not_a_clients_network() {
+        let loopback6 = ClientNet::of(ip("::1"));
+        assert_eq!(loopback6, ClientNet::of(ip("::")));
+        assert_eq!(loopback6, ClientNet::of(ip("::203.0.113.7")));
+        for not in [
+            "::1",
+            "::",
+            "::203.0.113.7",
+            "127.0.0.1",
+            "127.8.9.10",
+            "0.0.0.0",
+        ] {
+            assert!(!ClientNet::of(ip(not)).is_routable(), "{not}");
+        }
+        for real in ["203.0.113.7", "2001:db8:1:2::1", "::ffff:203.0.113.7"] {
+            assert!(ClientNet::of(ip(real)).is_routable(), "{real}");
+        }
+    }
+
     fn window(net: &str) -> CheckWindow {
         let t0 = DateTime::from_timestamp(1_761_782_400, 0).unwrap();
         CheckWindow {
@@ -372,6 +473,7 @@ mod tests {
             net: ClientNet::of(ip(net)),
             opened_at: t0,
             last_used_at: t0,
+            strictest: Tier::UpTo5,
         }
     }
 
@@ -383,7 +485,7 @@ mod tests {
             let limits = tier.window();
             let idle_at = w.opened_at + limits.idle;
             let second = Duration::seconds(1);
-            assert_eq!(w.check(tier, idle_at - second, here), Ok(()));
+            assert_eq!(w.check(tier, idle_at - second, here), Ok(tier));
             assert_eq!(
                 w.check(tier, idle_at, here),
                 Err(CheckWindowEnd::Idle),
@@ -395,7 +497,7 @@ mod tests {
                 last_used_at: abs_at - second,
                 ..w
             };
-            assert_eq!(busy.check(tier, abs_at - second, here), Ok(()));
+            assert_eq!(busy.check(tier, abs_at - second, here), Ok(tier));
             assert_eq!(
                 busy.check(tier, abs_at, here),
                 Err(CheckWindowEnd::Absolute)
@@ -414,8 +516,78 @@ mod tests {
         let w = window("203.0.113.7");
         let now = w.opened_at + Duration::hours(2);
         let here = ip("203.0.113.7");
-        assert_eq!(w.check(Tier::of(5), now, here), Ok(()));
+        assert_eq!(w.check(Tier::of(5), now, here), Ok(Tier::UpTo5));
         assert_eq!(w.check(Tier::of(6), now, here), Err(CheckWindowEnd::Idle));
+    }
+
+    /// A window doesn't revive: checked under a stricter tier, it keeps that
+    /// tier's limits when the count drops, so one that lapsed stays lapsed
+    #[test]
+    fn a_lapsed_window_does_not_revive_when_the_count_drops() {
+        let w = window("203.0.113.7");
+        let here = ip("203.0.113.7");
+        // Used at 51 agents half an hour in: the strictest is now 51 to 500
+        let t = w.opened_at + Duration::minutes(10);
+        let strictest = w.check(Tier::of(51), t, here).unwrap();
+        assert_eq!(strictest, Tier::UpTo500);
+        let w = CheckWindow {
+            last_used_at: t,
+            strictest,
+            ..w
+        };
+        // 20 minutes idle: lapsed under 15 min, and still lapsed at 5 agents
+        let later = t + Duration::minutes(20);
+        assert_eq!(
+            w.check(Tier::of(51), later, here),
+            Err(CheckWindowEnd::Idle)
+        );
+        assert_eq!(
+            w.check(Tier::of(5), later, here),
+            Err(CheckWindowEnd::Idle)
+        );
+        // Inside 15 minutes, it lives at 5 agents with the stricter limits
+        assert_eq!(
+            w.check(Tier::of(5), t + Duration::minutes(14), here),
+            Ok(Tier::UpTo500)
+        );
+        assert_eq!(
+            w.status(Tier::UpTo5).idle_expires_at,
+            t + Duration::minutes(15)
+        );
+    }
+
+    /// Stored times later than now past the skew end it (fail closed);
+    /// within the skew they don't
+    #[test]
+    fn times_in_the_future_end_it() {
+        let w = window("203.0.113.7");
+        let here = ip("203.0.113.7");
+        let now = w.opened_at;
+        let ahead = |by: Duration| CheckWindow {
+            last_used_at: now + by,
+            ..w
+        };
+        assert_eq!(
+            ahead(CLOCK_SKEW).check(Tier::UpTo5, now, here),
+            Ok(Tier::UpTo5)
+        );
+        assert_eq!(
+            ahead(CLOCK_SKEW + Duration::seconds(1)).check(
+                Tier::UpTo5,
+                now,
+                here
+            ),
+            Err(CheckWindowEnd::Clock)
+        );
+        let opened_ahead = CheckWindow {
+            opened_at: now + Duration::hours(1),
+            last_used_at: now + Duration::hours(1),
+            ..w
+        };
+        assert_eq!(
+            opened_ahead.check(Tier::UpTo5, now, here),
+            Err(CheckWindowEnd::Clock)
+        );
     }
 
     /// Any change of network ends it, on every tier: an IPv4 change, and an
@@ -430,10 +602,10 @@ mod tests {
                 v4.check(tier, now, ip("203.0.113.8")),
                 Err(CheckWindowEnd::Address)
             );
-            assert_eq!(v4.check(tier, now, ip("::ffff:203.0.113.7")), Ok(()));
-            assert_eq!(
-                v6.check(tier, now, ip("2001:db8:1:2:dead:beef:0:9")),
-                Ok(())
+            assert!(v4.check(tier, now, ip("::ffff:203.0.113.7")).is_ok());
+            assert!(
+                v6.check(tier, now, ip("2001:db8:1:2:dead:beef:0:9"))
+                    .is_ok()
             );
             assert_eq!(
                 v6.check(tier, now, ip("2001:db8:1:3::1")),

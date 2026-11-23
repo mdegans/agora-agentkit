@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::enums::{CheckSurface, DmCopyKind, MessageKind, PosterKind};
 pub use crate::enums::{OperatorActionKind, OperatorCredentialKind};
-use crate::govlog::{HexLengthError, PublicKeyHex, SignatureHex};
+use crate::govlog::{HexLengthError, PublicKeyHex, Sha256Hex, SignatureHex};
 use crate::ids::{
     AgentGroupId, AgentId, CommentId, MessageId, ModerationActionId,
     OperatorActionId, OperatorCheckWindowId, OperatorCredentialId,
@@ -30,6 +30,9 @@ use crate::operator_signer::{
 pub use crate::requests::{
     CreateCommentInput, CreatePostPayload, ManageFriendshipInput, ProfileField,
     SendMessageInput, UpdateProfilePayload,
+};
+use crate::signing::poster_cli::{
+    PosterCliError, PosterCliRequest, PosterRoute, RequestClass,
 };
 
 // ---------------------------------------------------------------------------
@@ -948,13 +951,15 @@ pub enum OperatorActionDetail {
     /// approved by an assertion of `passkey`. The entry is the record of
     /// which credential signed what it wrote, and keeps the assertion, so
     /// anyone with the passkey's public key can check it later. `route` is
-    /// the allow-list's route; `content` what the write made or named,
-    /// where that is a post or comment
+    /// the allow-list's (its method and path pattern are the table's);
+    /// `content` what the write made or named, where that is a post or
+    /// comment. Built by [`Self::poster_signed`] from the request the
+    /// verifier checked. Its stored form keeps the full preimage, which
+    /// names other agents and messages; [`Self::public`] leaves it out
     PosterSigned {
         poster: AgentId,
         passkey: OperatorPasskeyId,
-        method: String,
-        route: String,
+        route: PosterRoute,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content: Option<crate::ids::ContentRef>,
         assertion: PosterAssertionRecord,
@@ -985,6 +990,20 @@ pub enum WindowOpening {
 }
 
 impl WindowOpening {
+    /// A command-line opening, from the `open` request the verifier checked
+    pub fn cli(
+        request: &PosterCliRequest<'_>,
+        assertion: crate::requests::PasskeyAssertion,
+    ) -> Result<Self, PosterCliError> {
+        if request.class() != RequestClass::Open {
+            return Err(PosterCliError::WrongClass(request.route()));
+        }
+        Ok(Self::Cli {
+            poster: request.poster(),
+            assertion: PosterAssertionRecord::new(request, assertion)?,
+        })
+    }
+
     pub fn surface(&self) -> CheckSurface {
         match self {
             Self::Web => CheckSurface::Web,
@@ -993,29 +1012,87 @@ impl WindowOpening {
     }
 }
 
-/// A command-line assertion as the log keeps it: the assertion, and the
-/// preimage the server rebuilt from the request
-/// ([`PosterCliRequest::preimage`](crate::signing::poster_cli::PosterCliRequest::preimage),
-/// UTF-8 by construction). The passkey signed
-/// `authenticator_data ‖ SHA-256(preimage)`
+/// A command-line assertion as the log keeps it, made from the request the
+/// verifier checked ([`Self::new`]). The passkey signed
+/// `authenticator_data ‖ preimage_sha256`.
+///
+/// **`preimage` is never published.** It is the preimage the server rebuilt
+/// ([`PosterCliRequest::preimage`]), UTF-8 by construction, and holds the
+/// path and query verbatim, which for friend and message routes name
+/// another agent or a message, and a digest of the signed body, which can
+/// confirm a guessed short message. It is stored, so the record can be
+/// checked in full; the public rendering of an operator's log
+/// ([`Self::public`], [`OperatorActionDetail::public`]) has the hash and
+/// the typed route only
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(deny_unknown_fields)]
 pub struct PosterAssertionRecord {
-    pub assertion: crate::requests::PasskeyAssertion,
-    pub preimage: String,
+    assertion: crate::requests::PasskeyAssertion,
+    preimage_sha256: Sha256Hex,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preimage: Option<String>,
 }
 
 impl PosterAssertionRecord {
-    /// SHA-256 of the preimage: the client data hash the passkey signed
-    pub fn client_data_hash(&self) -> [u8; 32] {
-        crate::operator_security::challenge::sha256(self.preimage.as_bytes())
+    /// The record of `assertion` over `request`: refused when the assertion
+    /// names another credential than the request
+    pub fn new(
+        request: &PosterCliRequest<'_>,
+        assertion: crate::requests::PasskeyAssertion,
+    ) -> Result<Self, PosterCliError> {
+        if &assertion.credential_id != request.credential() {
+            return Err(PosterCliError::OtherCredential);
+        }
+        let preimage = request.preimage()?;
+        Ok(Self {
+            assertion,
+            preimage_sha256: Sha256Hex::from(
+                crate::operator_security::challenge::sha256(&preimage),
+            ),
+            preimage: Some(
+                String::from_utf8(preimage)
+                    .expect("the preimage's parts are UTF-8"),
+            ),
+        })
+    }
+
+    pub fn assertion(&self) -> &crate::requests::PasskeyAssertion {
+        &self.assertion
+    }
+
+    /// The client data hash the passkey signed
+    pub fn preimage_sha256(&self) -> &Sha256Hex {
+        &self.preimage_sha256
+    }
+
+    /// The full preimage: in the stored record only, never published
+    pub fn preimage(&self) -> Option<&str> {
+        self.preimage.as_deref()
+    }
+
+    /// The stored preimage, if any, hashes to `preimage_sha256`
+    pub fn preimage_matches(&self) -> bool {
+        self.preimage.as_ref().is_none_or(|p| {
+            crate::operator_security::challenge::sha256(p.as_bytes())
+                == *self.preimage_sha256.as_bytes()
+        })
     }
 
     /// What the passkey signed
     pub fn signed_message(&self) -> Vec<u8> {
-        self.assertion.signed_message(&self.client_data_hash())
+        self.assertion
+            .signed_message(self.preimage_sha256.as_bytes())
+    }
+
+    /// The record as an operator's log may be published: without the
+    /// preimage
+    pub fn public(&self) -> Self {
+        Self {
+            preimage: None,
+            ..self.clone()
+        }
     }
 }
 
@@ -1172,6 +1249,60 @@ impl CancelReason {
 }
 
 impl OperatorActionDetail {
+    /// A poster's command-line write, from the request the verifier
+    /// checked: its poster and route are the request's
+    pub fn poster_signed(
+        request: &PosterCliRequest<'_>,
+        passkey: OperatorPasskeyId,
+        content: Option<crate::ids::ContentRef>,
+        assertion: crate::requests::PasskeyAssertion,
+    ) -> Result<Self, PosterCliError> {
+        if request.class() != RequestClass::Write {
+            return Err(PosterCliError::WrongClass(request.route()));
+        }
+        Ok(Self::PosterSigned {
+            poster: request.poster(),
+            passkey,
+            route: request.route(),
+            content,
+            assertion: PosterAssertionRecord::new(request, assertion)?,
+        })
+    }
+
+    /// The entry as an operator's log may be published: a command-line
+    /// assertion without its preimage (no path, query or body digest).
+    /// Nothing in any detail names a network
+    pub fn public(&self) -> Self {
+        match self {
+            Self::PosterSigned {
+                poster,
+                passkey,
+                route,
+                content,
+                assertion,
+            } => Self::PosterSigned {
+                poster: *poster,
+                passkey: *passkey,
+                route: *route,
+                content: content.clone(),
+                assertion: assertion.public(),
+            },
+            Self::CheckWindowOpen {
+                window,
+                passkey,
+                opening: WindowOpening::Cli { poster, assertion },
+            } => Self::CheckWindowOpen {
+                window: *window,
+                passkey: *passkey,
+                opening: WindowOpening::Cli {
+                    poster: *poster,
+                    assertion: assertion.public(),
+                },
+            },
+            other => other.clone(),
+        }
+    }
+
     /// Not [`Self::Unknown`]. A server reading its own data or a request
     /// must refuse `Unknown`: read from its own log, it is drift
     pub fn is_known(&self) -> bool {
@@ -2240,53 +2371,73 @@ mod tests {
         assert_eq!(entry.detail.recipient_count(), None);
         assert_eq!(entry.for_agent(&[]), None);
         // The opening's tag is its surface's label
-        let record = PosterAssertionRecord {
-            assertion: crate::requests::PasskeyAssertion {
-                credential_id: crate::ids::PasskeyCredentialId::from(vec![
-                    1;
-                    64
-                ]),
-                authenticator_data: vec![0xab; 37].try_into().unwrap(),
-                signature: vec![0x30; 70].try_into().unwrap(),
-            },
-            preimage: "agora/poster-cli/v1\nopen\nPOST".into(),
+        let cred =
+            crate::ids::PasskeyCredentialId::try_from(vec![1; 64]).unwrap();
+        let assertion = crate::requests::PasskeyAssertion {
+            credential_id: cred.clone(),
+            authenticator_data: vec![0xab; 37].try_into().unwrap(),
+            signature: vec![0x30; 70].try_into().unwrap(),
         };
         let poster = AgentId::new();
-        for opening in [
-            WindowOpening::Web,
-            WindowOpening::Cli {
+        let request = |route: PosterRoute, path: &'static str| {
+            PosterCliRequest::new(
+                route,
+                "subliminal.technology",
+                path,
+                b"{}",
                 poster,
-                assertion: record.clone(),
-            },
-        ] {
+                // Leaked: the test's requests outlive this closure
+                Box::leak(Box::new(cred.clone())),
+                1_761_782_400,
+            )
+            .unwrap()
+        };
+        let open = request(
+            PosterRoute::OpenCheckWindow,
+            "/agora/api/poster/check-window",
+        );
+        let cli = WindowOpening::cli(&open, assertion.clone()).unwrap();
+        for opening in [WindowOpening::Web, cli.clone()] {
             assert_eq!(
                 serde_json::to_value(&opening).unwrap()["surface"],
                 opening.surface().to_string()
             );
         }
 
-        // A poster's command-line write keeps its assertion, and no agent
-        // sees it
+        // A poster's command-line write keeps its assertion, made from the
+        // request the verifier checked; no agent sees it
+        let befriend = request(
+            PosterRoute::FriendRequest,
+            "/agora/api/social/friends/ada-lovelace/request?note=hi",
+        );
+        let detail = OperatorActionDetail::poster_signed(
+            &befriend,
+            OperatorPasskeyId::new(),
+            None,
+            assertion.clone(),
+        )
+        .unwrap();
         let signed = OperatorLogEntry {
             id: OperatorActionId::new(),
             credential: None,
-            detail: OperatorActionDetail::PosterSigned {
-                poster,
-                passkey: OperatorPasskeyId::new(),
-                method: "POST".into(),
-                route: "/api/social/posts".into(),
-                content: Some(crate::ids::ContentRef::Content(
-                    crate::ids::ContentId::from(uuid::Uuid::from_u128(9)),
-                )),
-                assertion: record.clone(),
-            },
+            detail,
             created_at: status.opened_at,
         };
         let json = serde_json::to_value(&signed.detail).unwrap();
         assert_eq!(json["kind"], "poster_signed");
+        assert_eq!(json["route"], "friend_request");
         assert_eq!(
             json["assertion"]["assertion"]["credential_id"],
             "01".repeat(64)
+        );
+        let preimage = befriend.preimage().unwrap();
+        assert_eq!(
+            json["assertion"]["preimage"],
+            String::from_utf8(preimage.clone()).unwrap()
+        );
+        assert_eq!(
+            json["assertion"]["preimage_sha256"],
+            hex::encode(crate::operator_security::challenge::sha256(&preimage))
         );
         assert_eq!(
             serde_json::from_value::<OperatorActionDetail>(json).unwrap(),
@@ -2295,11 +2446,69 @@ mod tests {
         assert_eq!(signed.detail.kind(), OperatorActionKind::PosterSigned);
         assert_eq!(signed.detail.recipient_count(), None);
         assert_eq!(signed.for_agent(&[]), None);
+        let OperatorActionDetail::PosterSigned {
+            assertion: record, ..
+        } = &signed.detail
+        else {
+            unreachable!()
+        };
+        assert!(record.preimage_matches());
         let mut message = vec![0xab; 37];
-        message.extend(crate::operator_security::challenge::sha256(
-            b"agora/poster-cli/v1\nopen\nPOST",
-        ));
+        message.extend(befriend.client_data_hash().unwrap());
         assert_eq!(record.signed_message(), message);
+
+        // The public form: the hash and the typed route, no path, query,
+        // other agent or network
+        let opened = OperatorActionDetail::CheckWindowOpen {
+            window: crate::ids::OperatorCheckWindowId::new(),
+            passkey: OperatorPasskeyId::new(),
+            opening: cli,
+        };
+        for detail in [&signed.detail, &opened] {
+            let public = serde_json::to_string(&detail.public()).unwrap();
+            for leak in [
+                "/agora",
+                "?",
+                "note=hi",
+                "ada-lovelace",
+                "\\n",
+                "203.",
+                "subliminal",
+            ] {
+                assert!(!public.contains(leak), "{leak} in {public}");
+            }
+            assert!(public.contains("preimage_sha256"), "{public}");
+            let stored = serde_json::to_string(detail).unwrap();
+            assert!(stored.contains("/agora"), "{stored}");
+        }
+        assert_eq!(entry.detail.public(), entry.detail);
+
+        // Only the right class, and only the request's own credential
+        assert!(matches!(
+            OperatorActionDetail::poster_signed(
+                &open,
+                OperatorPasskeyId::new(),
+                None,
+                assertion.clone()
+            ),
+            Err(PosterCliError::WrongClass(PosterRoute::OpenCheckWindow))
+        ));
+        assert!(matches!(
+            WindowOpening::cli(&befriend, assertion.clone()),
+            Err(PosterCliError::WrongClass(PosterRoute::FriendRequest))
+        ));
+        let other = crate::requests::PasskeyAssertion {
+            credential_id: crate::ids::PasskeyCredentialId::try_from(vec![
+                2;
+                64
+            ])
+            .unwrap(),
+            ..assertion
+        };
+        assert!(matches!(
+            WindowOpening::cli(&open, other),
+            Err(PosterCliError::OtherCredential)
+        ));
     }
 
     /// The portal's wire: the session bootstrap, its token hidden from
@@ -2700,7 +2909,7 @@ mod tests {
 
         // A copy key's opener carries its kind, and a passkey's what the page
         // unlocks with
-        let credential = PasskeyCredentialId::from(vec![0xab; 16]);
+        let credential = PasskeyCredentialId::try_from(vec![0xab; 16]).unwrap();
         let opener = DmCopyOpener::Passkey {
             passkey,
             credential: credential.clone(),
@@ -2758,7 +2967,8 @@ mod tests {
         let webauthn = "ABEiM0RVZneImaq7zN3u_wEC-_8";
         assert_eq!(b64url(credential.as_bytes()), webauthn);
         assert_eq!(
-            PasskeyCredentialId::from(from_b64url(webauthn).unwrap()),
+            PasskeyCredentialId::try_from(from_b64url(webauthn).unwrap())
+                .unwrap(),
             credential
         );
         let salt = PrfSalt::from([0xfb; 32]);

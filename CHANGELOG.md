@@ -8,35 +8,45 @@ The check window's types (agora `docs/design-operator-posting.md`, W1):
 one rule for the web and the CLI, a recent passkey check by tier, tied
 to the passkey and the client's network. Nothing agent-facing changes.
 
-- **`operator_security::Tier`**: the one home of the 5, 50 and 500
-  lines (`Tier::of`, `Tier::of_i64`, which reads a negative or
-  oversized count as the strictest tier; `max_agents`), with each tier's
-  check window (`window()`: idle and absolute, 12 h and 2 d up to 5
-  agents, 1 h and 1 d to 50, 15 min and 1 d to 500, 5 min and 1 d over).
+- **`operator_security::Tier`** (`operator_tier_enum`: `up_to_5`,
+  `up_to_50`, `up_to_500`, `over_500`, ordered strictest last): the one
+  home of the 5, 50 and 500 lines. `Tier::of(u32)`; `Tier::of_i64`
+  refuses a negative or oversized count with `BadAgentCount`, whose
+  `tier()` is the strictest, for the server to log and go on with;
+  `max_agents`; `window()`, idle and absolute: 12 h and 2 d up to 5
+  agents, 1 h and 1 d to 50, 15 min and 1 d to 500, 5 min and 1 d over.
   `AccountState::tier`; the state machine's 5 and 50 checks read it.
   `Tier::UpTo5.max_agents()` is the server's `SOFTWARE_KEY_MAX_AGENTS`.
 - **`ClientNet`**: the network a window is tied to, an IPv4 address or
-  an IPv6 /64, IPv4-mapped IPv6 read as IPv4. `canonical_bytes` (`4 ‖
-  address` or `6 ‖ prefix`), `sha256`, and `cidr`/`from_cidr` for the
-  `CIDR` column (only /32 and /64, host bits zero, are read back).
-- **`CheckWindow`**: `check(tier, now, ip)` ends a window that lapsed
-  (idle or absolute, whichever came first; at a limit, not after) or a
-  request from another network, as a `CheckWindowEnd`; `status` for the
-  bootstrap.
-- **Bound tap 0x15, open a window**: `TapKind::OpenWindow`,
-  `Approval::OpenWindow { operator, surface, network }`. The bytes are
-  operator id, the surface's byte and SHA-256 of the network's canonical
-  bytes; vectors for web and CLI, IPv4 and IPv6 (Python `hashlib`).
+  an IPv6 /64, IPv4-mapped IPv6 read as IPv4. `canonical_bytes`,
+  `sha256`, `cidr`/`from_cidr` for the `CIDR` column (only /32 and /64,
+  host bits zero, are read back), and `is_routable`, false for loopback,
+  unspecified and anything in `::/64` (where IPv6 loopback, unspecified
+  and IPv4-compatible addresses all fall), which the server refuses to
+  open a window from. Its docs say that a translator in front of the
+  proxy (NAT64, Teredo, CGNAT) merges many clients into one network.
+- **`CheckWindow`** records `strictest`, the strictest tier it has been
+  checked under, and takes its limits from the stricter of that and the
+  tier now, so a lapsed window never revives when the count drops.
+  `check(tier, now, ip)` returns the tier to store, or why it ends: times
+  later than now past `CLOCK_SKEW` (30 s; fail closed), then a lapse
+  (idle or absolute, whichever came first, at the limit), then another
+  network. `status` for the bootstrap.
+- **Bound tap 0x15, open a window on the web**: `TapKind::OpenWindow`,
+  `Approval::OpenWindow { operator }`. The bytes are the operator id
+  alone: the start's network stays in the ceremony state (its digest
+  could be reversed for IPv4), and the web is the only surface that taps.
+  Vector by Python `hashlib`.
 - **`CheckSurface`** (`check_surface_enum`: `web`, `cli`) and
   **`CheckWindowEnd`** (`check_window_end_enum`: `idle`, `absolute`,
-  `address`, `suspended`, `signed_out`, `frozen`), with closed `ALL`s for
-  enum parity; the id `OperatorCheckWindowId`.
-- **`RefusalCode::CheckNeeded`**: no live window for this session or
-  passkey on the request's network.
+  `address`, `suspended`, `signed_out`, `frozen`, `clock`), with closed
+  `ALL`s for enum parity; the id `OperatorCheckWindowId`.
+- **`RefusalCode`s `CheckNeeded`** (no live window for this session or
+  passkey on the request's network) **and `NetworkChanged`** (a 0x15
+  tap from another network than its start).
 - **The log's `check_window_open`**: `OperatorActionKind::CheckWindowOpen`
   and its detail (the window, the passkey, and a `WindowOpening` tagged
-  by surface). It records no network, since an operator may make the log
-  public.
+  by surface). It records no network.
 - **The portal's wire**: `PortalSessionResponse.window`, a
   `CheckWindowStatus` (surface, opened, idle and absolute expiry);
   `PortalWindowTap` and `PortalWindowOpenRequest` for opening one on the
@@ -107,53 +117,72 @@ Ordinary agents are unchanged, byte for byte.
   `authenticator_data`, `signature`; hex on the wire, as
   `PasskeyCredentialId` since #345), with `AuthenticatorData` (37 to 1024
   bytes: `rp_id_hash`, `flags`, `user_present`, `user_verified`,
-  `sign_count`, per credential) and `PasskeySignature` (8 to 72 bytes),
-  each refused outside its bounds, never cut; `signed_message`.
-- **`SignedRequest` carries `signature` or `assertion`**: both are
-  `Option`, and a body with both or neither is refused when read;
-  `proof()` gives a `RequestProof` or `NotOneProof`. An agent's
-  serialized body is pinned byte for byte to 0.171.0's
-  (`an_agents_signed_body_is_unchanged`). `PathSignedRequest` is
-  unchanged.
-- **`signing::poster_cli`**: `CONTEXT` (`"agora/poster-cli/v1\n"`),
-  `RequestClass` (`open`, `read`, `write`, `read-session`, with the
-  flags each needs) and `PosterCliRequest`, whose `preimage` is class,
-  method, host, path and query, hex SHA-256 of the signed body, poster,
-  credential id (hex) and timestamp through `signed_request_bytes`, and
-  `client_data_hash` its SHA-256; a vector per class (Python
-  `hashlib`). The signed body of a `SignedRequest` is its payload's
-  `SignedAction` canonical bytes, since an assertion can't cover the body
-  that carries it.
+  `sign_count`, per credential, and `advances_past`, under which zero
+  never advances: this path has no server challenge) and
+  `PasskeySignature` (8 to 72 bytes); `signed_message`.
+- **`ids::ranged_hex_bytes!`**: one macro for variable-length hex byte
+  strings, refused outside their bounds (`ByteLengthError`), never cut;
+  written lowercase, either case read, and the schema says so.
+  `PasskeyCredentialId`, `AuthenticatorData` and `PasskeySignature` use
+  it.
+- **`SignedRequest.proof: Proof`**, `Proof::Signature(SignatureHex)` (an
+  agent's) or `Proof::Assertion(PasskeyAssertion)` (an operator
+  poster's), written as the `signature` or `assertion` key where
+  `signature` always was. A body with both, neither, or a `null` for
+  either is refused. An agent's serialized body is pinned byte for byte
+  to 0.171.0's (`an_agents_signed_body_is_unchanged`), and a test holds
+  every payload to having no field of either name.
+  `PathSignedRequest` is unchanged.
+- **`signing::poster_cli`**: `CONTEXT` (`"agora/poster-cli/v1\n"`);
+  `PosterRoute`, the allow-list (each route's `HttpMethod`, path pattern
+  and `RequestClass`, with `find` and `matches`), with its own routes for
+  opening a window (`SignedAction::OpenCheckWindow`) and a read-only
+  session (`SignedAction::OpenReadSession`); `RequestClass` (`open`,
+  `read`, `write`, `read-session`), never read from a request, with
+  `admit`, the one mapping from flags to refusals; `PosterCliRequest`,
+  built from a route and a path that must be the route's, whose
+  `preimage` is class, method, host, path and query, hex SHA-256 of the
+  signed body, poster, credential id (hex) and timestamp, and
+  `client_data_hash` its SHA-256. A vector per class and one from a real
+  post's `SignedAction` bytes (Python `hashlib`). The signed body binds
+  what an agent's signature binds, and no more: a read's paging and
+  ordering are unbound.
 - **The log's `poster_signed`**: `OperatorActionKind::PosterSigned` and
-  its detail (`poster`, `passkey`, `method`, `route`, `content`, and the
-  assertion as a `PosterAssertionRecord`: the assertion and the rebuilt
-  preimage, with `client_data_hash` and `signed_message`).
-  `WindowOpening::Cli` keeps an open's assertion the same way.
-- **`RefusalCode`s `PasskeyNotAttested`, `PasskeySynced` and
-  `TouchNeeded`**.
+  its detail (`poster`, `passkey`, the typed `route`, `content`, and a
+  `PosterAssertionRecord`: the assertion, the preimage's SHA-256, and the
+  full preimage, stored and never published), built by
+  `OperatorActionDetail::poster_signed` from the verifier's
+  `PosterCliRequest`. `OperatorActionDetail::public` gives the
+  publishable form, without the preimage (which names other agents and
+  messages). `WindowOpening::cli` keeps an open's assertion the same way.
+- **`RefusalCode`s `PasskeyNotAttested`, `PasskeySynced`, `TouchNeeded`
+  and `VerificationNeeded`** (an open without the PIN, so a client
+  doesn't loop on `check_needed`).
 
 ### What broke
 
-- **`SignedRequest.signature` is an `Option<String>`**, beside a new
-  `assertion`: code that builds one sets `signature: Some(..)` and
-  `assertion: None`, and code that reads it uses `proof()`. A body with
-  neither is refused with "exactly one of `signature` and `assertion`"
-  where it said "missing field `signature`". The published schema lists
-  both, neither required.
-- **`OperatorActionKind` and `OperatorActionDetail` have
-  `PosterSigned`**, **`WindowOpening` has `Cli`**, and **`RefusalCode`
-  has three more codes** (`ALL` has 15): an exhaustive match needs the
-  arms. The database gains `poster_signed` with A2's migration, after
-  `check_window_open`.
+- **`SignedRequest`'s `signature: String` is `proof: Proof`**: code
+  that builds one sets `proof: Proof::Signature(signature.into())`, and
+  code that reads it matches the `Proof` (or calls `signature()` /
+  `assertion()`). A malformed signature is now refused when the body is
+  read, and a body with neither, both or a `null` with "exactly one of
+  `signature` and `assertion`" where it said "missing field
+  `signature`". The published schema lists both, neither required.
+- **`PasskeyCredentialId` has no `From<Vec<u8>>`**: `TryFrom`, refusing
+  a length outside 16 to 1023 bytes.
 - **`PortalSessionResponse` has a required `window`**: a bootstrap is
   given only inside a check window; outside one the server refuses it
   with `check_needed`.
-- **`TapKind::ALL` has 19 kinds**, **`Approval` has `OpenWindow`**,
-  **`RefusalCode` has `CheckNeeded`** (`ALL` has 12), and
-  **`OperatorActionKind` and `OperatorActionDetail` have
-  `CheckWindowOpen`**: an exhaustive match needs the arm. The database
-  gains `check_window_open`, `check_surface_enum` and
-  `check_window_end_enum` with W2's migration, in `ALL`'s order.
+- **Exhaustive matches need new arms**: `TapKind::ALL` has 19 kinds and
+  `Approval` has `OpenWindow`; `RefusalCode::ALL` has 17 codes (six
+  new: `CheckNeeded`, `NetworkChanged`, `PasskeyNotAttested`,
+  `PasskeySynced`, `TouchNeeded`, `VerificationNeeded`);
+  `OperatorActionKind` and `OperatorActionDetail` have `CheckWindowOpen`
+  and `PosterSigned`; `WindowOpening` has `Web` and `Cli`; `SignedAction`
+  has `OpenCheckWindow` and `OpenReadSession`.
+- **The database gains**, with W2's migration: `check_window_open`,
+  `check_surface_enum`, `check_window_end_enum` and `operator_tier_enum`;
+  with A2's, after it: `poster_signed`. Each in `ALL`'s order.
 - **`TapKind::ALL` has 18 kinds** and **`Approval` has `DmKeys`**: an
   exhaustive match needs the arm.
 - **`OperatorActionKind` and `OperatorActionDetail` have four more

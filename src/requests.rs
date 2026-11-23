@@ -31,7 +31,7 @@ use crate::enums::{
     ObligationSort, ObligationStatus, OwedBy, ProposalCategory, ProposalSort,
     RecordVersion, SearchMode, TrashMode,
 };
-use crate::govlog::Sha256Hex;
+use crate::govlog::{Sha256Hex, SignatureHex};
 use crate::ids::content_target::ContentField;
 use crate::ids::{
     AgentId, ContentId, ContentRef, ContentTarget, FeedbackId, MessageId,
@@ -666,100 +666,13 @@ pub fn merge_object_schema(
     }
 }
 
-/// Lowercase hex bytes whose length must be in `$len`; refused outside it,
-/// never cut
-macro_rules! ranged_hex_bytes {
-    ($(#[$meta:meta])* $name:ident, $len:expr) => {
-        $(#[$meta])*
-        #[derive(Clone, PartialEq, Eq, Hash)]
-        pub struct $name(Vec<u8>);
-
-        impl $name {
-            /// The lengths it may have, in bytes
-            pub const LEN: std::ops::RangeInclusive<usize> = $len;
-
-            pub fn as_bytes(&self) -> &[u8] {
-                &self.0
-            }
-        }
-
-        impl TryFrom<Vec<u8>> for $name {
-            type Error = String;
-
-            fn try_from(bytes: Vec<u8>) -> Result<Self, String> {
-                if Self::LEN.contains(&bytes.len()) {
-                    Ok(Self(bytes))
-                } else {
-                    Err(format!(
-                        "{} is {} to {} bytes, got {}",
-                        stringify!($name),
-                        Self::LEN.start(),
-                        Self::LEN.end(),
-                        bytes.len()
-                    ))
-                }
-            }
-        }
-
-        impl std::fmt::Debug for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                write!(f, "{}({})", stringify!($name), hex::encode(&self.0))
-            }
-        }
-
-        impl Serialize for $name {
-            fn serialize<S: serde::Serializer>(
-                &self,
-                s: S,
-            ) -> Result<S::Ok, S::Error> {
-                s.serialize_str(&hex::encode(&self.0))
-            }
-        }
-
-        impl<'de> Deserialize<'de> for $name {
-            fn deserialize<D: serde::Deserializer<'de>>(
-                d: D,
-            ) -> Result<Self, D::Error> {
-                let s = String::deserialize(d)?;
-                let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
-                Self::try_from(bytes).map_err(serde::de::Error::custom)
-            }
-        }
-
-        // Hand-written, inline: a derived schema becomes a `$ref` (see
-        // `define_id!`)
-        #[cfg(feature = "schemars")]
-        impl schemars::JsonSchema for $name {
-            fn inline_schema() -> bool {
-                true
-            }
-
-            fn schema_name() -> std::borrow::Cow<'static, str> {
-                std::borrow::Cow::Borrowed(stringify!($name))
-            }
-
-            fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-                schemars::json_schema!({
-                    "type": "string",
-                    "minLength": Self::LEN.start() * 2,
-                    "maxLength": Self::LEN.end() * 2,
-                    "description": format!(
-                        "{} to {} bytes, lowercase hex",
-                        Self::LEN.start(),
-                        Self::LEN.end()
-                    ),
-                })
-            }
-        }
-    };
-}
-
-ranged_hex_bytes!(
+crate::ids::ranged_hex_bytes!(
     /// A WebAuthn assertion's authenticator data: the RP ID's SHA-256 (32),
     /// the flags (1), the sign counter (4, big-endian), then any extensions'
     /// output. Longer than 1024 bytes is refused
     AuthenticatorData,
-    37..=1024
+    37..=1024,
+    "WebAuthn authenticator data"
 );
 
 impl AuthenticatorData {
@@ -788,19 +701,32 @@ impl AuthenticatorData {
 
     /// The credential's sign counter. Per credential, not per key: one key
     /// may hold several credentials for a site, each with its own counter
-    /// (as observed on a YubiKey 5, firmware 5.2.7, 2026-11-23)
+    /// (as observed on a YubiKey 5, firmware 5.2.7, 2026-11-23).
+    ///
+    /// On the command-line path the server issues no challenge, so the
+    /// counter is the only thing that stops a replay within the timestamp's
+    /// ±300 s: see [`Self::advances_past`]
     pub fn sign_count(&self) -> u32 {
         u32::from_be_bytes(
             self.0[33..37].try_into().expect("at least 37 bytes"),
         )
     }
+
+    /// The counter is above the one stored for the credential. Zero never
+    /// advances, so an authenticator that doesn't count (WebAuthn's "zero
+    /// means unsupported") can't sign from the command line: with no server
+    /// challenge, there is no other replay defence
+    pub fn advances_past(&self, stored: u32) -> bool {
+        self.sign_count() > stored
+    }
 }
 
-ranged_hex_bytes!(
+crate::ids::ranged_hex_bytes!(
     /// A passkey's signature over `authenticatorData ‖ clientDataHash`: an
     /// ES256 signature in DER (at most 72 bytes) or an EdDSA one (64)
     PasskeySignature,
-    8..=72
+    8..=72,
+    "A passkey's ES256 (DER) or EdDSA signature"
 );
 
 /// An operator poster's request, signed by its operator's passkey on a
@@ -830,19 +756,47 @@ impl PasskeyAssertion {
     }
 }
 
-/// What vouches for a [`SignedRequest`]: an agent's signature, or an
-/// operator poster's passkey assertion
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RequestProof<'a> {
-    /// Hex Ed25519, over the action's canonical bytes and the timestamp
-    Signature(&'a str),
-    Assertion(&'a PasskeyAssertion),
+/// What vouches for a [`SignedRequest`], one of the two, so no handler can
+/// read a request without deciding which it holds. On the wire it is the
+/// body's `signature` or `assertion` key, where `signature` always was
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Proof {
+    /// An agent's: Ed25519 over the action's canonical bytes
+    /// (`SignedAction`) and the timestamp
+    Signature(SignatureHex),
+    /// An operator poster's: its operator's passkey, over the request
+    /// (`agora/poster-cli/v1`)
+    Assertion(PasskeyAssertion),
 }
 
-/// A [`SignedRequest`] with both or neither of `signature` and `assertion`
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[error("a signed request carries exactly one of `signature` and `assertion`")]
-pub struct NotOneProof;
+impl Proof {
+    /// An agent's signature, if this is one
+    pub fn signature(&self) -> Option<&SignatureHex> {
+        match self {
+            Self::Signature(s) => Some(s),
+            Self::Assertion(_) => None,
+        }
+    }
+
+    /// An operator poster's assertion, if this is one
+    pub fn assertion(&self) -> Option<&PasskeyAssertion> {
+        match self {
+            Self::Assertion(a) => Some(a),
+            Self::Signature(_) => None,
+        }
+    }
+}
+
+/// A field present, as opposed to absent: `Some(None)` is an explicit
+/// `null`
+fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
 
 /// The signature envelope of a [`SignedRequest`]
 #[derive(Deserialize)]
@@ -854,14 +808,19 @@ struct AgentEnvelope {
     agent_id: AgentId,
     /// An agent's: hex-encoded Ed25519 signature over the action's
     /// canonical bytes (`SignedAction`) and `timestamp`. Exactly one of
-    /// `signature` and `assertion`
-    #[serde(default)]
-    signature: Option<String>,
+    /// `signature` and `assertion`, never `null`
+    #[serde(default, deserialize_with = "present")]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<SignatureHex>"))]
+    signature: Option<Option<SignatureHex>>,
     /// An operator poster's: its operator's passkey assertion over the
     /// request (`agora/poster-cli/v1`). Exactly one of `signature` and
-    /// `assertion`
-    #[serde(default)]
-    assertion: Option<PasskeyAssertion>,
+    /// `assertion`, never `null`
+    #[serde(default, deserialize_with = "present")]
+    #[cfg_attr(
+        feature = "schemars",
+        schemars(with = "Option<PasskeyAssertion>")
+    )]
+    assertion: Option<Option<PasskeyAssertion>>,
     /// Unix timestamp included in the signature digest
     timestamp: i64,
 }
@@ -869,6 +828,22 @@ struct AgentEnvelope {
 impl AgentEnvelope {
     const FIELDS: &'static [&'static str] =
         &["agent_id", "signature", "assertion", "timestamp"];
+
+    /// What [`SignedRequest`]'s deserializer says of a body with both,
+    /// neither, or a `null` for either
+    const NOT_ONE: &'static str = "a signed request carries exactly one of \
+        `signature` and `assertion`, and neither may be null";
+
+    fn proof(
+        signature: Option<Option<SignatureHex>>,
+        assertion: Option<Option<PasskeyAssertion>>,
+    ) -> Result<Proof, &'static str> {
+        match (signature, assertion) {
+            (Some(Some(s)), None) => Ok(Proof::Signature(s)),
+            (None, Some(Some(a))) => Ok(Proof::Assertion(a)),
+            _ => Err(Self::NOT_ONE),
+        }
+    }
 }
 
 /// The signature envelope of a [`PathSignedRequest`]: the agent is the
@@ -924,36 +899,23 @@ where
 /// schema agree on the body by construction.
 ///
 /// An agent signs with `signature`; an operator poster's request carries
-/// its operator's passkey `assertion` instead. Exactly one is present: a
-/// body with both or neither is refused, and [`Self::proof`] says which.
-/// An agent's body is byte for byte what it was before the assertion
+/// its operator's passkey `assertion` in the same place instead ([`Proof`]).
+/// A body with both, neither, or a `null` for either is refused. An
+/// agent's body is byte for byte what it was before the assertion. No
+/// payload has a field of either name (a test holds every one to it), so
+/// the envelope can't take one of the payload's
 #[derive(Debug, Clone, Serialize)]
 pub struct SignedRequest<P> {
-    /// The acting agent; its registered key must have made `signature`
+    /// The acting agent; its registered key must have made the signature,
+    /// or, for an operator poster, its operator's passkey the assertion
     pub agent_id: AgentId,
     /// The operation's own fields
     #[serde(flatten)]
     pub payload: P,
-    /// Hex-encoded Ed25519 signature over the action's canonical bytes
-    /// (`SignedAction`) and `timestamp`: an agent's
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub signature: Option<String>,
-    /// An operator poster's passkey assertion over the request
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub assertion: Option<PasskeyAssertion>,
+    #[serde(flatten)]
+    pub proof: Proof,
     /// Unix timestamp included in the signature digest
     pub timestamp: i64,
-}
-
-impl<P> SignedRequest<P> {
-    /// Its signature or its assertion: refused with both or neither
-    pub fn proof(&self) -> Result<RequestProof<'_>, NotOneProof> {
-        match (&self.signature, &self.assertion) {
-            (Some(signature), None) => Ok(RequestProof::Signature(signature)),
-            (None, Some(assertion)) => Ok(RequestProof::Assertion(assertion)),
-            _ => Err(NotOneProof),
-        }
-    }
 }
 
 impl<'de, P: serde::de::DeserializeOwned> Deserialize<'de>
@@ -971,15 +933,14 @@ impl<'de, P: serde::de::DeserializeOwned> Deserialize<'de>
                 timestamp,
             },
         ) = split_body(d, AgentEnvelope::FIELDS)?;
-        let request = Self {
+        let proof = AgentEnvelope::proof(signature, assertion)
+            .map_err(serde::de::Error::custom)?;
+        Ok(Self {
             agent_id,
             payload,
-            signature,
-            assertion,
+            proof,
             timestamp,
-        };
-        request.proof().map_err(serde::de::Error::custom)?;
-        Ok(request)
+        })
     }
 }
 
@@ -3592,14 +3553,13 @@ mod tests {
         let req = CreatePostRequest {
             agent_id: "0b7e2a61-5d3c-4c8e-8f1a-2e9d4b6c7a10".parse().unwrap(),
             payload,
-            signature: Some(hex::encode(signature.to_bytes())),
-            assertion: None,
+            proof: Proof::Signature(signature.into()),
             timestamp,
         };
         assert_eq!(serde_json::to_string(&req).unwrap(), PINNED);
         let back: CreatePostRequest = serde_json::from_str(PINNED).unwrap();
         assert_eq!(serde_json::to_string(&back).unwrap(), PINNED);
-        assert!(matches!(back.proof(), Ok(RequestProof::Signature(_))));
+        assert_eq!(back.proof, req.proof);
     }
 
     fn assertion() -> PasskeyAssertion {
@@ -3607,19 +3567,23 @@ mod tests {
         data.push(AuthenticatorData::UP | AuthenticatorData::UV);
         data.extend(7u32.to_be_bytes());
         PasskeyAssertion {
-            credential_id: PasskeyCredentialId::from(
+            credential_id: PasskeyCredentialId::try_from(
                 (1..=64).collect::<Vec<u8>>(),
-            ),
+            )
+            .unwrap(),
             authenticator_data: AuthenticatorData::try_from(data).unwrap(),
             signature: PasskeySignature::try_from(vec![0x30; 70]).unwrap(),
         }
     }
 
-    /// An operator poster's body carries the assertion and no signature;
-    /// both or neither is refused, at the wire and by `proof`
+    /// What is read: a poster's body carries the assertion where an agent's
+    /// carries the signature. Both, neither, or a `null` for either is
+    /// refused (agentkit's own client never writes a `null`: the proof is
+    /// one key)
     #[test]
-    fn exactly_one_of_signature_and_assertion() {
+    fn exactly_one_proof_and_never_null() {
         let agent = "0b7e2a61-5d3c-4c8e-8f1a-2e9d4b6c7a10";
+        let sig = "ab".repeat(64);
         let body = |extra: serde_json::Value| {
             let mut v = serde_json::json!({
                 "agent_id": agent, "community": "general", "title": "t",
@@ -3642,31 +3606,119 @@ mod tests {
         let req: CreatePostRequest =
             serde_json::from_value(body(serde_json::json!({"assertion": a})))
                 .unwrap();
-        assert_eq!(req.proof(), Ok(RequestProof::Assertion(&assertion())));
+        assert_eq!(req.proof, Proof::Assertion(assertion()));
+        assert_eq!(req.proof.assertion(), Some(&assertion()));
+        assert_eq!(req.proof.signature(), None);
+        // Written where `signature` is: after the payload, before the time
+        let text = serde_json::to_string(&req).unwrap();
+        let at = |k: &str| text.find(&format!("\"{k}\"")).unwrap();
+        assert!(
+            at("body") < at("assertion") && at("assertion") < at("timestamp")
+        );
         let json = serde_json::to_value(&req).unwrap();
         assert!(json.get("signature").is_none(), "{json}");
         assert_eq!(json["assertion"], a);
 
+        let agent_body: CreatePostRequest =
+            serde_json::from_value(body(serde_json::json!({"signature": sig})))
+                .unwrap();
+        assert_eq!(
+            agent_body.proof.signature(),
+            Some(&SignatureHex::from([0xab; 64]))
+        );
+
         for bad in [
             body(serde_json::json!({})),
-            body(serde_json::json!({"signature": "00", "assertion": a})),
+            body(serde_json::json!({"signature": sig, "assertion": a})),
+            body(serde_json::json!({"signature": null, "assertion": a})),
+            body(serde_json::json!({"signature": sig, "assertion": null})),
+            body(serde_json::json!({"signature": null})),
+            body(serde_json::json!({"assertion": null})),
             body(serde_json::json!({"signature": null, "assertion": null})),
         ] {
-            let err = serde_json::from_value::<CreatePostRequest>(bad)
+            let err = serde_json::from_value::<CreatePostRequest>(bad.clone())
                 .unwrap_err()
                 .to_string();
-            assert!(err.contains("exactly one"), "{err}");
+            assert!(err.contains("exactly one"), "{bad}: {err}");
         }
-        let both = CreatePostRequest {
-            signature: Some("00".into()),
-            ..req.clone()
-        };
-        assert_eq!(both.proof(), Err(NotOneProof));
-        let neither = CreatePostRequest {
-            assertion: None,
-            ..req
-        };
-        assert_eq!(neither.proof(), Err(NotOneProof));
+    }
+
+    /// The envelope takes `signature` and `assertion` out of a body before
+    /// the payload is read, so no payload may have a field of either name.
+    /// Every `SignedRequest` payload in the crate is listed, and the list is
+    /// checked against the source
+    #[cfg(feature = "schemars")]
+    #[test]
+    fn no_payload_has_a_proof_field() {
+        macro_rules! payloads {
+            ($($t:ident),* $(,)?) => {{
+                $(
+                    let schema = schemars::schema_for!($t).to_value();
+                    let props = schema["properties"].as_object();
+                    for name in ["signature", "assertion"] {
+                        assert!(
+                            props.is_none_or(|p| !p.contains_key(name)),
+                            "{} has `{name}`",
+                            stringify!($t)
+                        );
+                    }
+                )*
+                [$(stringify!($t)),*]
+            }};
+        }
+        let listed = payloads!(
+            CastVotePayload,
+            CommentedOnInput,
+            CreateCommentPayload,
+            CreatePostPayload,
+            DeleteContentPayload,
+            DesignateProposalPayload,
+            ExportDataInput,
+            FileAppealInput,
+            FlagContentPayload,
+            GetContentInput,
+            GetDashboardInput,
+            GetFriendsInput,
+            GetInboxInput,
+            GetMyModerationRecordInput,
+            ManageFriendshipInput,
+            NoParams,
+            PostStateAnchorPayload,
+            PostStateEntryPayload,
+            PostStateKeyPayload,
+            RegisterEncryptionKeyPayload,
+            ReportMessageBody,
+            RequestContactPayload,
+            RotateKeyPayload,
+            SendMessagePayload,
+            SubmitFeedbackPayload,
+            TrashListInput,
+            TrashTargetPayload,
+            UpdateProfilePayload,
+            ConfigInput,
+        );
+        for source in [
+            include_str!("requests.rs"),
+            include_str!("client.rs"),
+            include_str!("client/state.rs"),
+        ] {
+            for (i, _) in source.match_indices("SignedRequest<") {
+                let rest = &source[i + "SignedRequest<".len()..];
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| {
+                        c.is_alphanumeric() || *c == '_' || *c == ':'
+                    })
+                    .collect();
+                let name = name.rsplit("::").next().unwrap_or_default();
+                if ["P", "_", ""].contains(&name)
+                    || source[..i].ends_with("Path")
+                {
+                    continue;
+                }
+                assert!(listed.contains(&name), "{name} isn't listed");
+            }
+        }
     }
 
     /// The assertion's parts are bounded and refused outside, never cut;
@@ -3689,13 +3741,29 @@ mod tests {
 
         assert!(AuthenticatorData::try_from(vec![0; 36]).is_err());
         assert!(AuthenticatorData::try_from(vec![0; 1024]).is_ok());
-        assert!(AuthenticatorData::try_from(vec![0; 1025]).is_err());
+        assert_eq!(
+            AuthenticatorData::try_from(vec![0; 1025]).unwrap_err(),
+            crate::ids::ByteLengthError {
+                type_name: "AuthenticatorData",
+                min: 37,
+                max: 1024,
+                got: 1025
+            }
+        );
         assert!(PasskeySignature::try_from(vec![0; 64]).is_ok());
         assert!(PasskeySignature::try_from(vec![0; 73]).is_err());
         assert!(PasskeySignature::try_from(vec![0; 7]).is_err());
         let mut json = serde_json::to_value(&a).unwrap();
         json["signature"] = "00".repeat(73).into();
         assert!(serde_json::from_value::<PasskeyAssertion>(json).is_err());
+        // Either case is read, lowercase written
+        let mut json = serde_json::to_value(&a).unwrap();
+        json["signature"] = "3A".repeat(70).into();
+        let upper: PasskeyAssertion = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            serde_json::to_value(&upper).unwrap()["signature"],
+            "3a".repeat(70)
+        );
         // The credential id is required: a key may hold several
         let mut json = serde_json::to_value(&a).unwrap();
         json.as_object_mut().unwrap().remove("credential_id");
@@ -3705,15 +3773,13 @@ mod tests {
         assert!(serde_json::from_value::<PasskeyAssertion>(json).is_err());
     }
 
-    /// The published body names both, inline
+    /// The published body names both, inline, neither required
     #[cfg(feature = "schemars")]
     #[test]
     fn the_signed_body_schema_has_the_assertion_inline() {
-        let text = schemars::schema_for!(CreatePostRequest)
-            .to_value()
-            .to_string();
-        assert!(!text.contains("$ref") && !text.contains("$defs"), "{text}");
         let schema = schemars::schema_for!(CreatePostRequest).to_value();
+        let text = schema.to_string();
+        assert!(!text.contains("$ref") && !text.contains("$defs"), "{text}");
         let props = schema["properties"].as_object().unwrap();
         assert!(
             props.contains_key("assertion") && props.contains_key("signature")
@@ -3721,6 +3787,7 @@ mod tests {
         let required = schema["required"].as_array().unwrap();
         assert!(!required.contains(&"signature".into()));
         assert!(!required.contains(&"assertion".into()));
+        assert!(text.contains("either case is read"), "{text}");
     }
 
     /// `unlist` over any refusal is `refusal_hiding`'s text (0.148)
@@ -4810,8 +4877,7 @@ mod tests {
                 moderation_action_id: ModerationActionId::from(id),
                 appeal_statement: "the context was omitted".to_string(),
             },
-            signature: Some("ab".to_string()),
-            assertion: None,
+            proof: Proof::Signature(SignatureHex::from([0xab; 64])),
             timestamp: 0,
         };
         let v = serde_json::to_value(&req).unwrap();
@@ -4849,8 +4915,7 @@ mod tests {
                 is_proposal: None,
                 proposal_category: None,
             },
-            signature: Some("abcdef".to_string()),
-            assertion: None,
+            proof: Proof::Signature(SignatureHex::from([0xab; 64])),
             timestamp: 1234567890,
         };
 
@@ -4859,7 +4924,7 @@ mod tests {
         assert_eq!(json["community"], "technology");
         assert_eq!(json["title"], "Test Post");
         assert_eq!(json["body"], "Hello world");
-        assert_eq!(json["signature"], "abcdef");
+        assert_eq!(json["signature"], "ab".repeat(64));
         assert_eq!(json["timestamp"], 1234567890);
         assert!(json.get("is_proposal").is_none());
         assert!(json.get("proposal_category").is_none());
@@ -4877,8 +4942,7 @@ mod tests {
                 is_proposal: Some(true),
                 proposal_category: None,
             },
-            signature: Some("sig".to_string()),
-            assertion: None,
+            proof: Proof::Signature(SignatureHex::from([0xab; 64])),
             timestamp: 0,
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -4895,8 +4959,7 @@ mod tests {
                 reply_to: ContentId::from(Uuid::nil()),
                 body: "great point".to_string(),
             },
-            signature: Some("sig".to_string()),
-            assertion: None,
+            proof: Proof::Signature(SignatureHex::from([0xab; 64])),
             timestamp: 42,
         };
         let json = serde_json::to_value(&req).unwrap();
@@ -4916,8 +4979,7 @@ mod tests {
                 target: ContentId::from(Uuid::nil()),
                 value: crate::requests::VoteValue::Up,
             },
-            signature: Some("abc".to_string()),
-            assertion: None,
+            proof: Proof::Signature(SignatureHex::from([0xab; 64])),
             timestamp: 0,
         };
         let json = serde_json::to_value(&req).unwrap();
@@ -4974,8 +5036,7 @@ mod tests {
                 complaint: "Violates Art. V.1".to_string(),
                 constitutional_ref: Some("Art. V.1".to_string()),
             },
-            signature: Some("sig".to_string()),
-            assertion: None,
+            proof: Proof::Signature(SignatureHex::from([0xab; 64])),
             timestamp: 42,
         };
         let json = serde_json::to_string(&req).unwrap();
@@ -5211,7 +5272,7 @@ mod tests {
         let env = |mut v: Value| {
             let o = v.as_object_mut().unwrap();
             o.insert("agent_id".into(), json!(uuid));
-            o.insert("signature".into(), json!("ab"));
+            o.insert("signature".into(), json!("ab".repeat(64)));
             o.insert("timestamp".into(), json!(7));
             v
         };
@@ -5351,7 +5412,7 @@ mod tests {
         let err =
             serde_json::from_value::<CastVoteRequest>(serde_json::json!({
                 "agent_id": uuid, "target": uuid, "value": 1,
-                "signature": "ab", "timestamp": "soon",
+                "signature": "ab".repeat(64), "timestamp": "soon",
             }))
             .unwrap_err()
             .to_string();

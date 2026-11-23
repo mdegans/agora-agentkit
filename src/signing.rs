@@ -278,6 +278,14 @@ pub enum SignedAction<'a> {
     /// Signed payload for `POST /api/identity/rotate_key`, by the old key
     /// (0.147)
     RotateKey(&'a crate::requests::RotateKeyPayload),
+    /// Signed payload for an operator poster's check-window open from the
+    /// command line ([`poster_cli::PosterRoute::OpenCheckWindow`]): opens a
+    /// window and does nothing else
+    OpenCheckWindow {},
+    /// Signed payload for an operator poster's read-only session
+    /// ([`poster_cli::PosterRoute::OpenReadSession`]), for a key that won't
+    /// assert without a touch
+    OpenReadSession {},
 }
 
 /// `context || part₁ \n part₂ \n … \n partₙ`: the bytes a signed HTTP
@@ -623,26 +631,26 @@ pub mod operator_request {
 /// a security key, asserts over a client data hash no browser can produce,
 /// which the server rebuilds from the request and never accepts from the
 /// client. The assertion travels as a
-/// [`PasskeyAssertion`](crate::requests::PasskeyAssertion)
+/// [`PasskeyAssertion`](crate::requests::PasskeyAssertion).
+///
+/// What a request may do, and with which flags, comes from its route in
+/// [`PosterRoute`], never from the request
 pub mod poster_cli {
     use serde::{Deserialize, Serialize};
     use sha2::{Digest, Sha256};
 
     use super::NewlineInPart;
+    use crate::errors::RefusalCode;
     use crate::ids::{AgentId, PasskeyCredentialId};
+    use crate::requests::AuthenticatorData;
 
     /// What every poster CLI preimage begins with
     pub const CONTEXT: &[u8] = b"agora/poster-cli/v1\n";
 
-    /// What a request does with the check window, by the route (the gate's
-    /// allow-list) or, for an open, by the request. Its label is the
-    /// preimage's first part, and its name on the wire
-    #[derive(
-        Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
-    )]
-    #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
-    #[cfg_attr(feature = "schemars", schemars(inline))]
-    #[serde(rename_all = "kebab-case")]
+    /// What a route does with the check window. Its label is the preimage's
+    /// first part. Never read from a request: it is its
+    /// [`PosterRoute`]'s
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
     pub enum RequestClass {
         /// Opens a check window: the PIN and a touch (UV and UP)
         Open,
@@ -683,44 +691,303 @@ pub mod poster_cli {
         pub const fn needs_verification(self) -> bool {
             matches!(self, Self::Open)
         }
+
+        /// The one place the flags become a refusal: an open without UV is
+        /// [`RefusalCode::VerificationNeeded`], then anything that needs a
+        /// touch without UP is [`RefusalCode::TouchNeeded`]. The counter and
+        /// the window are checked elsewhere
+        pub fn admit(
+            self,
+            data: &AuthenticatorData,
+        ) -> Result<(), RefusalCode> {
+            if self.needs_verification() && !data.user_verified() {
+                return Err(RefusalCode::VerificationNeeded);
+            }
+            if self.needs_presence() && !data.user_present() {
+                return Err(RefusalCode::TouchNeeded);
+            }
+            Ok(())
+        }
     }
 
-    /// The parts of a poster CLI request the assertion binds
+    /// An HTTP method, as a route names it
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub enum HttpMethod {
+        Get,
+        Post,
+        Put,
+        Patch,
+        Delete,
+    }
+
+    impl HttpMethod {
+        pub const ALL: [Self; 5] =
+            [Self::Get, Self::Post, Self::Put, Self::Patch, Self::Delete];
+
+        pub const fn as_str(self) -> &'static str {
+            match self {
+                Self::Get => "GET",
+                Self::Post => "POST",
+                Self::Put => "PUT",
+                Self::Patch => "PATCH",
+                Self::Delete => "DELETE",
+            }
+        }
+
+        /// The method a request names, in any case
+        pub fn parse(method: &str) -> Option<Self> {
+            Self::ALL
+                .into_iter()
+                .find(|m| m.as_str().eq_ignore_ascii_case(method))
+        }
+    }
+
+    /// The routes an operator poster may use from the command line (agora
+    /// `docs/design-operator-posting.md`, *What the gate checks per
+    /// request*): each with its method, path pattern (`{}` a single
+    /// segment) and class. Everything else is refused: the encryption key,
+    /// key rotation, state, the event stream and MCP among them
+    #[derive(
+        Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize,
+    )]
+    #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+    #[cfg_attr(feature = "schemars", schemars(inline))]
+    #[serde(rename_all = "snake_case")]
+    pub enum PosterRoute {
+        OpenCheckWindow,
+        OpenReadSession,
+        /// Classed a read by this table, though the agent API's inbox
+        /// marks what it returns read
+        Inbox,
+        FriendsList,
+        ModerationRecord,
+        Export,
+        Post,
+        Comment,
+        Vote,
+        DesignateProposal,
+        DeleteContent,
+        Flag,
+        FriendRequest,
+        FriendAccept,
+        FriendDecline,
+        FriendRemove,
+        /// Server-mode only: an end-to-end encrypted send is refused in the
+        /// handler, since the poster's DM key lives in the browser
+        Message,
+        Appeal,
+    }
+
+    impl PosterRoute {
+        pub const ALL: [Self; 18] = [
+            Self::OpenCheckWindow,
+            Self::OpenReadSession,
+            Self::Inbox,
+            Self::FriendsList,
+            Self::ModerationRecord,
+            Self::Export,
+            Self::Post,
+            Self::Comment,
+            Self::Vote,
+            Self::DesignateProposal,
+            Self::DeleteContent,
+            Self::Flag,
+            Self::FriendRequest,
+            Self::FriendAccept,
+            Self::FriendDecline,
+            Self::FriendRemove,
+            Self::Message,
+            Self::Appeal,
+        ];
+
+        /// Its method, path pattern and class
+        pub const fn entry(self) -> (HttpMethod, &'static str, RequestClass) {
+            use HttpMethod::Post;
+            use RequestClass::*;
+            match self {
+                Self::OpenCheckWindow => {
+                    (Post, "/agora/api/poster/check-window", Open)
+                }
+                Self::OpenReadSession => {
+                    (Post, "/agora/api/poster/read-session", ReadSession)
+                }
+                Self::Inbox => (Post, "/agora/api/social/messages/inbox", Read),
+                Self::FriendsList => {
+                    (Post, "/agora/api/social/friends/list", Read)
+                }
+                Self::ModerationRecord => {
+                    (Post, "/agora/api/moderation/my-record", Read)
+                }
+                Self::Export => (Post, "/agora/api/account/export", Read),
+                Self::Post => (Post, "/agora/api/social/posts", Write),
+                Self::Comment => (Post, "/agora/api/social/comments", Write),
+                Self::Vote => (Post, "/agora/api/social/votes", Write),
+                Self::DesignateProposal => {
+                    (Post, "/agora/api/social/proposal-designations", Write)
+                }
+                Self::DeleteContent => {
+                    (Post, "/agora/api/social/delete-content", Write)
+                }
+                Self::Flag => (Post, "/agora/api/moderation/flags", Write),
+                Self::FriendRequest => {
+                    (Post, "/agora/api/social/friends/{}/request", Write)
+                }
+                Self::FriendAccept => {
+                    (Post, "/agora/api/social/friends/{}/accept", Write)
+                }
+                Self::FriendDecline => {
+                    (Post, "/agora/api/social/friends/{}/decline", Write)
+                }
+                Self::FriendRemove => {
+                    (Post, "/agora/api/social/friends/{}/remove", Write)
+                }
+                Self::Message => (Post, "/agora/api/social/messages", Write),
+                Self::Appeal => (Post, "/agora/api/moderation/appeals", Write),
+            }
+        }
+
+        pub const fn method(self) -> HttpMethod {
+            self.entry().0
+        }
+
+        pub const fn pattern(self) -> &'static str {
+            self.entry().1
+        }
+
+        pub const fn class(self) -> RequestClass {
+            self.entry().2
+        }
+
+        /// Whether `path` (its query ignored, a trailing `/` allowed) is
+        /// this route's
+        pub fn matches(self, path_and_query: &str) -> bool {
+            let path = path_and_query.split('?').next().unwrap_or_default();
+            let path = path.strip_suffix('/').unwrap_or(path);
+            let mut want = self.pattern().split('/');
+            let mut got = path.split('/');
+            loop {
+                match (want.next(), got.next()) {
+                    (None, None) => break true,
+                    (Some("{}"), Some(seg)) if !seg.is_empty() => {}
+                    (Some(w), Some(g)) if w == g => {}
+                    _ => break false,
+                }
+            }
+        }
+
+        /// The route a request is on, if it is on the list
+        pub fn find(method: HttpMethod, path_and_query: &str) -> Option<Self> {
+            Self::ALL
+                .into_iter()
+                .find(|r| r.method() == method && r.matches(path_and_query))
+        }
+    }
+
+    /// Why a poster CLI request, or the log's record of one, can't be made
+    #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+    pub enum PosterCliError {
+        #[error("{path:?} is not the path of {route:?}")]
+        WrongPath { route: PosterRoute, path: String },
+        #[error("{0:?} is not a route of that class")]
+        WrongClass(PosterRoute),
+        #[error("the assertion names another credential than the request")]
+        OtherCredential,
+        #[error(transparent)]
+        Newline(#[from] NewlineInPart),
+    }
+
+    /// A poster CLI request, as the assertion binds it: built once, by the
+    /// CLI to sign and by the server to verify, and the log's record is made
+    /// from the same value ([`PosterAssertionRecord::new`]), so the three
+    /// can't disagree. The method and class are the route's
+    ///
+    /// [`PosterAssertionRecord::new`]: crate::operator::PosterAssertionRecord::new
     #[derive(Debug, Clone, Copy)]
     pub struct PosterCliRequest<'a> {
-        pub class: RequestClass,
-        /// Upper-cased in the preimage
-        pub method: &'a str,
-        /// As for [`signed_get_bytes`](super::signed_get::signed_get_bytes)
-        /// ([`host_of`](super::signed_get::host_of)); lower-cased
-        pub host: &'a str,
-        pub path_and_query: &'a str,
-        /// What the request asks for, hashed into the preimage. The
-        /// assertion can't cover the body that carries it, so for a
-        /// [`SignedRequest`](crate::requests::SignedRequest) body this is
-        /// the payload's [`SignedAction`](super::SignedAction) canonical
-        /// bytes, which the server rebuilds as it does for an agent's
-        /// signature; for a request without one (a signed GET) the body as
-        /// sent, empty for a GET
-        pub signed_body: &'a [u8],
-        pub poster: AgentId,
-        pub credential: &'a PasskeyCredentialId,
-        /// Unix seconds, accepted within ±300 s
-        pub timestamp: i64,
+        route: PosterRoute,
+        host: &'a str,
+        path_and_query: &'a str,
+        signed_body: &'a [u8],
+        poster: AgentId,
+        credential: &'a PasskeyCredentialId,
+        timestamp: i64,
     }
 
-    impl PosterCliRequest<'_> {
+    impl<'a> PosterCliRequest<'a> {
+        /// - `host` as for
+        ///   [`signed_get_bytes`](super::signed_get::signed_get_bytes)
+        ///   ([`host_of`](super::signed_get::host_of)); lower-cased.
+        /// - `path_and_query` exactly as sent, which must be `route`'s.
+        /// - `signed_body`: what the request asks for, hashed into the
+        ///   preimage. The assertion can't cover the body that carries it,
+        ///   so for a [`SignedRequest`](crate::requests::SignedRequest) body
+        ///   this is the payload's [`SignedAction`](super::SignedAction)
+        ///   canonical bytes, which the server rebuilds as it does for an
+        ///   agent's signature. A poster's request therefore binds exactly
+        ///   what an agent's signature binds, and no more: a read's paging,
+        ///   ordering and view fields are not in its `SignedAction`, so they
+        ///   are unbound, for a poster as for an agent. For a request with no
+        ///   `SignedAction` (a signed GET), the body as sent, empty for a GET.
+        /// - `timestamp`: Unix seconds, accepted within ±300 s
+        pub fn new(
+            route: PosterRoute,
+            host: &'a str,
+            path_and_query: &'a str,
+            signed_body: &'a [u8],
+            poster: AgentId,
+            credential: &'a PasskeyCredentialId,
+            timestamp: i64,
+        ) -> Result<Self, PosterCliError> {
+            if !route.matches(path_and_query) {
+                return Err(PosterCliError::WrongPath {
+                    route,
+                    path: path_and_query.to_owned(),
+                });
+            }
+            Ok(Self {
+                route,
+                host,
+                path_and_query,
+                signed_body,
+                poster,
+                credential,
+                timestamp,
+            })
+        }
+
+        pub fn route(&self) -> PosterRoute {
+            self.route
+        }
+
+        pub fn class(&self) -> RequestClass {
+            self.route.class()
+        }
+
+        pub fn poster(&self) -> AgentId {
+            self.poster
+        }
+
+        pub fn credential(&self) -> &'a PasskeyCredentialId {
+            self.credential
+        }
+
+        pub fn timestamp(&self) -> i64 {
+            self.timestamp
+        }
+
         /// `CONTEXT || CLASS \n METHOD \n HOST \n PATH_AND_QUERY \n
         /// hex(SHA-256(signed_body)) \n POSTER \n CREDENTIAL \n TIMESTAMP`,
         /// through [`signed_request_bytes`](super::signed_request_bytes):
         /// the poster's id lowercase hyphenated, the credential id
-        /// lowercase hex (its wire form), the timestamp in decimal
+        /// lowercase hex (its wire form), the timestamp in decimal. It
+        /// holds the path and query verbatim, which can name another agent
+        /// or a message, so it is never published
         pub fn preimage(&self) -> Result<Vec<u8>, NewlineInPart> {
             super::signed_request_bytes(
                 CONTEXT,
                 &[
-                    self.class.label(),
-                    &self.method.to_ascii_uppercase(),
+                    self.class().label(),
+                    self.route.method().as_str(),
                     &self.host.to_ascii_lowercase(),
                     self.path_and_query,
                     &hex::encode(Sha256::digest(self.signed_body)),
@@ -743,160 +1010,314 @@ pub mod poster_cli {
         use super::*;
 
         fn credential() -> PasskeyCredentialId {
-            PasskeyCredentialId::from((1..=64).collect::<Vec<u8>>())
+            PasskeyCredentialId::try_from((1..=64).collect::<Vec<u8>>())
+                .unwrap()
         }
 
-        const BODY: &[u8] = br#"{"action":"create_post","body":"b","community":"general","title":"t"}"#;
+        const POSTER: &str = "0b7e2a61-5d3c-4c8e-8f1a-2e9d4b6c7a10";
+        const BODY: &[u8] = br#"{"action":"open_check_window"}"#;
 
         fn request(
-            class: RequestClass,
+            route: PosterRoute,
             cred: &PasskeyCredentialId,
         ) -> PosterCliRequest<'_> {
-            PosterCliRequest {
-                class,
-                method: "post",
-                host: "Subliminal.Technology",
-                path_and_query: "/agora/api/social/posts",
-                signed_body: BODY,
-                poster: "0b7e2a61-5d3c-4c8e-8f1a-2e9d4b6c7a10".parse().unwrap(),
-                credential: cred,
-                timestamp: 1_761_782_400,
-            }
+            let path = route.pattern().replace("{}", "ada");
+            PosterCliRequest::new(
+                route,
+                "Subliminal.Technology",
+                Box::leak(path.into_boxed_str()),
+                BODY,
+                POSTER.parse().unwrap(),
+                cred,
+                1_761_782_400,
+            )
+            .unwrap()
         }
 
-        /// The preimage, part by part, and its hash for every class,
-        /// computed independently (Python `hashlib`)
+        /// The preimage, part by part, and its hash for a route of every
+        /// class, computed independently (Python `hashlib`)
         #[test]
         fn the_preimage_and_its_vectors() {
             let cred = credential();
             let want = format!(
                 "agora/poster-cli/v1\nwrite\nPOST\nsubliminal.technology\n\
-                 /agora/api/social/posts\n{}\n\
-                 0b7e2a61-5d3c-4c8e-8f1a-2e9d4b6c7a10\n{}\n1761782400",
+                 /agora/api/social/posts\n{}\n{POSTER}\n{}\n1761782400",
                 hex::encode(Sha256::digest(BODY)),
                 hex::encode((1..=64).collect::<Vec<u8>>()),
             );
             assert_eq!(
-                request(RequestClass::Write, &cred).preimage().unwrap(),
+                request(PosterRoute::Post, &cred).preimage().unwrap(),
                 want.as_bytes()
             );
             let vectors = [
                 (
-                    RequestClass::Open,
-                    "9071557f36818c53c7a338c6d3e548325835de5bafae91913049efe7e9d833ca",
+                    PosterRoute::OpenCheckWindow,
+                    "0b7cc91a6e8092ea890428fe9d12478a649f32c1f18ecfee0e53db39c466613f",
                 ),
                 (
-                    RequestClass::Read,
-                    "cbc74e7cc54b27ebaff227257544d15d1095b0b48847b20dba099ba6452a220b",
+                    PosterRoute::Inbox,
+                    "2484729bbf4045ad46cd6ab9a63e9eed87cb63a8460fe53ea6d391ca3dabde9c",
                 ),
                 (
-                    RequestClass::Write,
-                    "1000eeca0e0ae5143ea05b0a8073a6018ce2d9c02c81c1b47ed3295d62b46c6a",
+                    PosterRoute::Post,
+                    "32968fb6735b40b0d55c53214875de70e9be86e1617025bd6a784b872e8f09db",
                 ),
                 (
-                    RequestClass::ReadSession,
-                    "adc89c5f95c6c4b249b9303adffe54f2f64a8413ecac0b0e774ae63735d57ced",
+                    PosterRoute::OpenReadSession,
+                    "39bed96473506b23d7b5685ce7aaaf9aa1e89a749c2858457fa46528fbffa0fe",
                 ),
             ];
             let classes: Vec<RequestClass> =
-                vectors.iter().map(|(c, _)| *c).collect();
+                vectors.iter().map(|(r, _)| r.class()).collect();
             assert_eq!(classes, RequestClass::ALL);
-            for (class, hash) in vectors {
+            for (route, hash) in vectors {
                 assert_eq!(
                     hex::encode(
-                        request(class, &cred).client_data_hash().unwrap()
+                        request(route, &cred).client_data_hash().unwrap()
                     ),
                     hash,
-                    "{class:?}"
+                    "{route:?}"
                 );
             }
+        }
+
+        /// End to end from a real payload: a post's `SignedAction` bytes,
+        /// then the write's hash (Python `hashlib`)
+        #[test]
+        fn a_post_end_to_end() {
+            let payload: crate::requests::CreatePostPayload =
+                serde_json::from_value(serde_json::json!({
+                    "community": "general", "title": "t", "body": "b",
+                }))
+                .unwrap();
+            let bytes =
+                super::super::SignedAction::from(&payload).canonical_bytes();
+            assert_eq!(
+                bytes,
+                br#"{"action":"post","community":"general","title":"t","body":"b"}"#
+            );
+            let cred = credential();
+            let req = PosterCliRequest::new(
+                PosterRoute::Post,
+                "subliminal.technology",
+                "/agora/api/social/posts",
+                &bytes,
+                POSTER.parse().unwrap(),
+                &cred,
+                1_761_782_400,
+            )
+            .unwrap();
+            assert_eq!(
+                hex::encode(req.client_data_hash().unwrap()),
+                "4ce2d0b63aa1a38355f50cd6a51afdccb4687a667c53a1aa7f242a7a8d999f02"
+            );
         }
 
         /// Every part binds: changing any one changes the hash
         #[test]
         fn every_part_binds() {
             let cred = credential();
-            let other_cred = PasskeyCredentialId::from(vec![9; 64]);
-            let base = request(RequestClass::Write, &cred);
-            let hash = |r: PosterCliRequest<'_>| r.client_data_hash().unwrap();
+            let other_cred =
+                PasskeyCredentialId::try_from(vec![9; 64]).unwrap();
+            let poster: AgentId = POSTER.parse().unwrap();
+            let make =
+                |route, host, path, body: &'static [u8], poster, cred, ts| {
+                    PosterCliRequest::new(
+                        route, host, path, body, poster, cred, ts,
+                    )
+                    .unwrap()
+                    .client_data_hash()
+                    .unwrap()
+                };
+            let p = "/agora/api/social/posts";
+            let base =
+                make(PosterRoute::Post, "a.org", p, BODY, poster, &cred, 1);
             let changed = [
-                PosterCliRequest {
-                    class: RequestClass::Read,
-                    ..base
-                },
-                PosterCliRequest {
-                    method: "PUT",
-                    ..base
-                },
-                PosterCliRequest {
-                    host: "example.org",
-                    ..base
-                },
-                PosterCliRequest {
-                    path_and_query: "/agora/api/social/posts?x=1",
-                    ..base
-                },
-                PosterCliRequest {
-                    signed_body: b"{}",
-                    ..base
-                },
-                PosterCliRequest {
-                    poster: AgentId::new(),
-                    ..base
-                },
-                PosterCliRequest {
-                    credential: &other_cred,
-                    ..base
-                },
-                PosterCliRequest {
-                    timestamp: 1_761_782_401,
-                    ..base
-                },
+                make(
+                    PosterRoute::Comment,
+                    "a.org",
+                    "/agora/api/social/comments",
+                    BODY,
+                    poster,
+                    &cred,
+                    1,
+                ),
+                make(PosterRoute::Post, "b.org", p, BODY, poster, &cred, 1),
+                make(
+                    PosterRoute::Post,
+                    "a.org",
+                    "/agora/api/social/posts?x=1",
+                    BODY,
+                    poster,
+                    &cred,
+                    1,
+                ),
+                make(PosterRoute::Post, "a.org", p, b"{}", poster, &cred, 1),
+                make(
+                    PosterRoute::Post,
+                    "a.org",
+                    p,
+                    BODY,
+                    AgentId::new(),
+                    &cred,
+                    1,
+                ),
+                make(
+                    PosterRoute::Post,
+                    "a.org",
+                    p,
+                    BODY,
+                    poster,
+                    &other_cred,
+                    1,
+                ),
+                make(PosterRoute::Post, "a.org", p, BODY, poster, &cred, 2),
             ];
-            for r in changed {
-                assert_ne!(hash(r), hash(base), "{r:?}");
+            for h in changed {
+                assert_ne!(h, base);
             }
-            // Case in method and host doesn't
+            // Case in the host doesn't
             assert_eq!(
-                hash(PosterCliRequest {
-                    method: "POST",
-                    host: "subliminal.technology",
-                    ..base
-                }),
-                hash(base)
+                make(PosterRoute::Post, "A.ORG", p, BODY, poster, &cred, 1),
+                base
             );
+            // A path that isn't the route's is refused
+            assert!(matches!(
+                PosterCliRequest::new(
+                    PosterRoute::Post,
+                    "a.org",
+                    "/agora/api/social/comments",
+                    BODY,
+                    poster,
+                    &cred,
+                    1
+                ),
+                Err(PosterCliError::WrongPath { .. })
+            ));
             assert!(
-                PosterCliRequest {
-                    path_and_query: "/a\nb",
-                    ..base
-                }
+                PosterCliRequest::new(
+                    PosterRoute::FriendRequest,
+                    "a.org",
+                    "/agora/api/social/friends/a\nb/request",
+                    BODY,
+                    poster,
+                    &cred,
+                    1
+                )
+                .unwrap()
                 .preimage()
                 .is_err()
             );
         }
 
-        /// The labels on the wire are the preimage's, and the flags each
-        /// class needs are the spec's table
+        /// The table: one entry per route, found by method and path, the
+        /// classes as the spec lists them, and nothing else admitted
         #[test]
-        fn class_labels_and_flags() {
-            for class in RequestClass::ALL {
-                assert_eq!(serde_json::to_value(class).unwrap(), class.label());
+        fn the_route_table() {
+            for route in PosterRoute::ALL {
+                let path = route.pattern().replace("{}", "ada");
                 assert_eq!(
-                    serde_json::from_value::<RequestClass>(
-                        class.label().into()
-                    )
-                    .unwrap(),
-                    class
+                    PosterRoute::find(route.method(), &path),
+                    Some(route)
+                );
+                assert_eq!(
+                    PosterRoute::find(route.method(), &format!("{path}/?x=1")),
+                    Some(route)
+                );
+                // Each route is its own wire name
+                let name = serde_json::to_value(route).unwrap();
+                assert_eq!(
+                    serde_json::from_value::<PosterRoute>(name).unwrap(),
+                    route
                 );
             }
-            let flags: Vec<(bool, bool)> = RequestClass::ALL
-                .iter()
-                .map(|c| (c.needs_presence(), c.needs_verification()))
-                .collect();
+            let class = |c| {
+                PosterRoute::ALL
+                    .into_iter()
+                    .filter(|r| r.class() == c)
+                    .collect::<Vec<_>>()
+            };
             assert_eq!(
-                flags,
-                [(true, true), (false, false), (true, false), (true, false)]
+                class(RequestClass::Open),
+                [PosterRoute::OpenCheckWindow]
             );
+            assert_eq!(
+                class(RequestClass::ReadSession),
+                [PosterRoute::OpenReadSession]
+            );
+            assert_eq!(
+                class(RequestClass::Read),
+                [
+                    PosterRoute::Inbox,
+                    PosterRoute::FriendsList,
+                    PosterRoute::ModerationRecord,
+                    PosterRoute::Export
+                ]
+            );
+            for refused in [
+                "/agora/api/social/encryption_key",
+                "/agora/api/identity/rotate_key",
+                "/agora/api/state/entries",
+                "/agora/events",
+                "/agora/mcp",
+                "/agora/api/social/friends/ada/request/x",
+                "/agora/api/social/friends//request",
+                "/agora/api/social/posts/x",
+            ] {
+                assert_eq!(
+                    PosterRoute::find(HttpMethod::Post, refused),
+                    None,
+                    "{refused}"
+                );
+            }
+            assert_eq!(
+                PosterRoute::find(HttpMethod::Get, "/agora/api/social/posts"),
+                None
+            );
+            assert_eq!(HttpMethod::parse("post"), Some(HttpMethod::Post));
+            assert_eq!(HttpMethod::parse("TRACE"), None);
+        }
+
+        /// The flags each class needs, and the one mapping to refusals
+        #[test]
+        fn admit_maps_flags_to_refusals() {
+            let data = |flags: u8| {
+                let mut d = vec![0; 32];
+                d.push(flags);
+                d.extend(1u32.to_be_bytes());
+                AuthenticatorData::try_from(d).unwrap()
+            };
+            let (none, up, uv, both) = (
+                data(0),
+                data(AuthenticatorData::UP),
+                data(AuthenticatorData::UV),
+                data(AuthenticatorData::UP | AuthenticatorData::UV),
+            );
+            use RefusalCode::*;
+            use RequestClass::*;
+            let cases = [
+                (Open, &none, Err(VerificationNeeded)),
+                (Open, &up, Err(VerificationNeeded)),
+                (Open, &uv, Err(TouchNeeded)),
+                (Open, &both, Ok(())),
+                (Read, &none, Ok(())),
+                (Read, &both, Ok(())),
+                (Write, &none, Err(TouchNeeded)),
+                (Write, &uv, Err(TouchNeeded)),
+                (Write, &up, Ok(())),
+                (ReadSession, &none, Err(TouchNeeded)),
+                (ReadSession, &up, Ok(())),
+            ];
+            for (class, d, want) in cases {
+                assert_eq!(class.admit(d), want, "{class:?} {:#x}", d.flags());
+            }
+            // The counter: zero never advances, and equal doesn't either
+            assert!(!data(0).advances_past(1));
+            let mut zero = vec![0; 33];
+            zero.extend(0u32.to_be_bytes());
+            let zero = AuthenticatorData::try_from(zero).unwrap();
+            assert!(!zero.advances_past(0));
+            assert!(data(0).advances_past(0));
         }
     }
 }
@@ -2310,7 +2731,7 @@ mod agent_name_wire_compat {
                 &vk,
                 &bytes,
                 req.timestamp,
-                &signature(req.signature.as_deref().unwrap()),
+                &req.proof.signature().expect("an agent signs").into(),
             ));
         }
     }
