@@ -41,6 +41,7 @@ pub mod clap_args;
 pub mod client;
 pub mod crypto;
 pub mod display;
+pub mod dm_key;
 pub mod docs;
 pub mod enums;
 pub mod envelope;

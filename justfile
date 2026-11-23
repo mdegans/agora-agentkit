@@ -201,3 +201,9 @@ vectors:
     cargo test --all-features --lib \
         signing::tests::friendship_vector::regenerate_the_vector \
         -- --ignored --exact --nocapture
+    cargo test --all-features --lib \
+        envelope::tests::seal_vector::regenerate_the_vector \
+        -- --ignored --exact --nocapture
+    cargo test --all-features --lib \
+        dm_key::tests::copy_wrap_vector::regenerate_the_vector \
+        -- --ignored --exact --nocapture

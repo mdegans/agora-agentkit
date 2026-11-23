@@ -11,7 +11,8 @@ use sha2::{Digest, Sha256};
 
 use crate::ids::{
     AgentId, MessageId, OAuthClientId, OperatorActionId, OperatorCredentialId,
-    OperatorEmailAddressId, OperatorEnrolmentId, OperatorId, OperatorPasskeyId,
+    OperatorDmCopyKeyId, OperatorDmKeyId, OperatorEmailAddressId,
+    OperatorEnrolmentId, OperatorId, OperatorPasskeyId,
     OperatorPendingChangeId, OperatorRecoveryCaseId,
 };
 
@@ -51,11 +52,14 @@ pub enum TapKind {
     /// A private message from the operator's own operator poster, on the
     /// portal (0.171)
     PortalMessage = 0x13,
+    /// The operator poster's DM keys: made, a copy added or removed, or
+    /// rotated
+    DmKeys = 0x14,
 }
 
 impl TapKind {
     /// Every kind still produced, by tag
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 18] = [
         Self::Send,
         Self::OAuthConsent,
         Self::EnrolmentApproval,
@@ -73,6 +77,7 @@ impl TapKind {
         Self::MoveSend,
         Self::PasskeyAdd,
         Self::PortalMessage,
+        Self::DmKeys,
     ];
 
     pub const fn tag(self) -> u8 {
@@ -91,6 +96,101 @@ impl TapKind {
     pub const fn is_retired(self) -> bool {
         matches!(self, Self::RetiredPasskeyEnrolment)
     }
+}
+
+/// What a 0x14 tap does to the DM keys: its purpose byte
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    serde::Serialize,
+    serde::Deserialize,
+)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum DmKeysPurpose {
+    /// The first generation and the copy key of the passkey that taps
+    Create = 0,
+    /// A copy key, for the passkey that taps
+    AddCopy = 1,
+    /// A new generation, wrapped to every remaining copy key
+    Rotate = 2,
+    /// A copy key removed
+    RemoveCopy = 3,
+}
+
+impl DmKeysPurpose {
+    pub const ALL: [Self; 4] =
+        [Self::Create, Self::AddCopy, Self::Rotate, Self::RemoveCopy];
+
+    pub const fn tag(self) -> u8 {
+        self as u8
+    }
+}
+
+/// What a 0x14 tap names: the id the server drew when the tap started (a new
+/// generation, or a new copy key), or the copy key it removes. A new
+/// generation's public keys are bound too, by their digest
+/// ([`dm_key_public_sha256`]), so a swapped key fails the stored assertion. A
+/// copy key's public key can't be: it comes from the same tap's PRF output.
+/// Which id goes with which purpose is fixed here, so the two can't disagree
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DmKeysSubject {
+    /// The first generation. Its copy key's id is held by the ceremony and
+    /// written in the same transaction, not in the bytes
+    Create {
+        key: OperatorDmKeyId,
+        public_sha256: [u8; 32],
+    },
+    AddCopy(OperatorDmCopyKeyId),
+    /// The new generation
+    Rotate {
+        key: OperatorDmKeyId,
+        public_sha256: [u8; 32],
+    },
+    RemoveCopy(OperatorDmCopyKeyId),
+}
+
+impl DmKeysSubject {
+    pub fn purpose(self) -> DmKeysPurpose {
+        match self {
+            Self::Create { .. } => DmKeysPurpose::Create,
+            Self::AddCopy(_) => DmKeysPurpose::AddCopy,
+            Self::Rotate { .. } => DmKeysPurpose::Rotate,
+            Self::RemoveCopy(_) => DmKeysPurpose::RemoveCopy,
+        }
+    }
+
+    /// The subject id, then the public keys' digest where there is one
+    fn bytes(self, out: &mut Vec<u8>) {
+        match self {
+            Self::Create { key, public_sha256 }
+            | Self::Rotate { key, public_sha256 } => {
+                out.extend(uuid_bytes(key));
+                out.extend(public_sha256);
+            }
+            Self::AddCopy(id) | Self::RemoveCopy(id) => {
+                out.extend(uuid_bytes(id))
+            }
+        }
+    }
+}
+
+/// SHA-256(x25519_public ‖ ed25519_public): a DM key generation's public
+/// keys, as 0x14 binds them
+pub fn dm_key_public_sha256(
+    x25519_public: &[u8; 32],
+    ed25519_public: &[u8; 32],
+) -> [u8; 32] {
+    let mut both = [0u8; 64];
+    both[..32].copy_from_slice(x25519_public);
+    both[32..].copy_from_slice(ed25519_public);
+    sha256(&both)
 }
 
 /// What a suspension names (0x04's target kind byte)
@@ -187,6 +287,14 @@ pub enum Approval {
         action: OperatorActionId,
         message: MessageId,
     },
+    /// 0x14: the operator poster's DM keys (agora
+    /// `docs/design-operator-posting.md`, Track B). The request that carries
+    /// the assertion carries the public material, which the ceremony checks
+    /// against what it drew; the bytes carry no key
+    DmKeys {
+        operator: OperatorId,
+        subject: DmKeysSubject,
+    },
 }
 
 fn uuid_bytes(id: impl Into<uuid::Uuid>) -> [u8; 16] {
@@ -213,6 +321,7 @@ impl Approval {
             Self::MoveSend { .. } => TapKind::MoveSend,
             Self::PasskeyAdd { .. } => TapKind::PasskeyAdd,
             Self::PortalMessage { .. } => TapKind::PortalMessage,
+            Self::DmKeys { .. } => TapKind::DmKeys,
         }
     }
 
@@ -302,6 +411,11 @@ impl Approval {
             Self::PortalMessage { action, message } => {
                 out.extend(uuid_bytes(*action));
                 out.extend(uuid_bytes(*message));
+            }
+            Self::DmKeys { operator, subject } => {
+                out.extend(uuid_bytes(*operator));
+                out.push(subject.purpose().tag());
+                subject.bytes(&mut out);
             }
         }
         out
@@ -433,6 +547,10 @@ mod tests {
                 action: id(A),
                 message: id(B),
             },
+            Approval::DmKeys {
+                operator: id(A),
+                subject: DmKeysSubject::AddCopy(id(B)),
+            },
         ]
     }
 
@@ -443,12 +561,12 @@ mod tests {
             tags,
             [
                 1, 2, 3, 4, 6, 8, 9, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-                0x11, 0x12, 0x13
+                0x11, 0x12, 0x13, 0x14
             ]
         );
         assert_eq!(TapKind::from_tag(0x07), None);
         assert_eq!(TapKind::from_tag(0x00), None);
-        assert_eq!(TapKind::from_tag(0x14), None);
+        assert_eq!(TapKind::from_tag(0x15), None);
         // 0x05 still reads, so stored assertions do, and isn't produced
         let retired = TapKind::from_tag(0x05).unwrap();
         assert!(retired.is_retired() && !TapKind::ALL.contains(&retired));
@@ -488,6 +606,7 @@ mod tests {
                 1 + 16 + 8,
                 1 + 16,
                 1 + 16 + 16,
+                1 + 16 + 1 + 16,
             ]
         );
     }
@@ -571,7 +690,7 @@ mod tests {
     }
 
     /// Computed independently (Python `hashlib`) from the spec's table
-    const VECTORS: [&str; 17] = [
+    const VECTORS: [&str; 18] = [
         "e417deb6abe94bb74037918fb0f749e401b58c3b282b206c96963217826c3435",
         "a4304de3920dfbb53406abda4991fa100f08578a65fd37a361de8364bf438940",
         "b55e306e201216cb476830ef7bada806c0e1f97ae49cca4b50aeb8989d0bddde",
@@ -589,5 +708,93 @@ mod tests {
         "4a187c9157d8c8d42fb3c38380e2d96869c2697d16347ba716a8b96704114ed4",
         "1b8688cf24d1c7db7b53257c3d9b51ffbde4658f67f57486a148f1ebfad9ec8f",
         "2dde0a214a02d679163541709f56c1abd88d2fbe0a1c2ec6b2f621580034eb3e",
+        "e6f3e3e64fcb22577e14248e151b5c3f624b7b86e602d2558f15fecb38e7794f",
     ];
+
+    /// 0x14's bytes: operator id ‖ purpose ‖ subject id, then for a new
+    /// generation SHA-256(x25519 ‖ ed25519); the purpose fixed by the
+    /// subject's kind; each purpose pinned (Python `hashlib`)
+    #[test]
+    fn dm_keys_bytes_and_every_purpose() {
+        let operator: OperatorId = id(A);
+        let public_sha256 = dm_key_public_sha256(&[0x11; 32], &[0x22; 32]);
+        assert_eq!(
+            hex::encode(public_sha256),
+            "5189c77d29fe5d546a045ec46986852785fea5c13ac7da9c115ff5fb6edf817c"
+        );
+        let cases = [
+            (
+                DmKeysSubject::Create {
+                    key: id(B),
+                    public_sha256,
+                },
+                0u8,
+                "c3715dee4a6e01c0269a1d428ffc64e5106c5c67c7cb7d3ccf9bfa83414f8bf3",
+            ),
+            (
+                DmKeysSubject::AddCopy(id(B)),
+                1,
+                "e6f3e3e64fcb22577e14248e151b5c3f624b7b86e602d2558f15fecb38e7794f",
+            ),
+            (
+                DmKeysSubject::Rotate {
+                    key: id(B),
+                    public_sha256,
+                },
+                2,
+                "240803d8d9c670c893a98392f5e9f70a1b34f21b8dff8daf15790f27476523e2",
+            ),
+            (
+                DmKeysSubject::RemoveCopy(id(B)),
+                3,
+                "91d3236a3055585e1d3cd2a9794888f593ebb4947f30705c6bb436ed54e7c0ab",
+            ),
+        ];
+        let purposes: Vec<DmKeysPurpose> =
+            cases.iter().map(|(s, _, _)| s.purpose()).collect();
+        assert_eq!(purposes, DmKeysPurpose::ALL);
+        for (subject, tag, want) in cases {
+            let approval = Approval::DmKeys { operator, subject };
+            let bytes = approval.canonical_bytes();
+            assert_eq!(bytes[0], 0x14);
+            assert_eq!(&bytes[1..17], &uuid_bytes(operator));
+            assert_eq!(bytes[17], tag);
+            assert_eq!(&bytes[18..34], &uuid_bytes(id::<OperatorDmKeyId>(B)));
+            match subject {
+                DmKeysSubject::Create { .. } | DmKeysSubject::Rotate { .. } => {
+                    assert_eq!(&bytes[34..], &public_sha256)
+                }
+                _ => assert_eq!(bytes.len(), 34),
+            }
+            let mut preimage = CONTEXT.to_vec();
+            preimage.extend(NONCE);
+            preimage.extend(bytes);
+            assert_eq!(hex::encode(sha256(&preimage)), want, "{subject:?}");
+        }
+        // Another key under the same id is another challenge
+        let other = Approval::DmKeys {
+            operator,
+            subject: DmKeysSubject::Create {
+                key: id(B),
+                public_sha256: dm_key_public_sha256(&[0x11; 32], &[0x23; 32]),
+            },
+        };
+        let first = Approval::DmKeys {
+            operator,
+            subject: cases[0].0,
+        };
+        assert_ne!(other.challenge(&NONCE), first.challenge(&NONCE));
+        // The purpose names on the wire
+        let names: Vec<String> = DmKeysPurpose::ALL
+            .iter()
+            .map(|p| {
+                serde_json::to_value(p)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(names, ["create", "add_copy", "rotate", "remove_copy"]);
+    }
 }

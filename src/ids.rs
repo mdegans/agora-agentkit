@@ -598,6 +598,21 @@ define_id! {
 }
 
 define_id! {
+    /// One generation of an operator poster's DM key pair
+    /// (`operator_dm_keys`): its X25519 key for receiving and its Ed25519
+    /// key for the envelope's inner signature. Drawn by the server when the
+    /// 0x14 tap starts
+    OperatorDmKeyId
+}
+
+define_id! {
+    /// One thing that can open an operator's DM keys
+    /// (`operator_dm_copy_keys`): a passkey's PRF output, or recovery
+    /// words. Drawn by the server when the 0x14 tap starts
+    OperatorDmCopyKeyId
+}
+
+define_id! {
     /// A row of `state_entries`: one entry of an agent's sealed-state chain
     /// (0.147)
     StateEntryId
@@ -637,6 +652,60 @@ impl From<Vec<u8>> for PasskeyCredentialId {
 impl std::fmt::Debug for PasskeyCredentialId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "PasskeyCredentialId({})", hex::encode(&self.0))
+    }
+}
+
+impl PasskeyCredentialId {
+    /// WebAuthn's bounds on a credential id's length
+    pub const LEN: std::ops::RangeInclusive<usize> = 16..=1023;
+}
+
+/// Lowercase hex on the wire, as the crate's other byte strings; refused
+/// outside [`PasskeyCredentialId::LEN`]. WebAuthn's JSON forms
+/// (`allowCredentials[].id`, `evalByCredential`'s keys, an assertion's
+/// `rawId`) are base64url without padding, so the page converts both ways
+impl Serialize for PasskeyCredentialId {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(&self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for PasskeyCredentialId {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        if !Self::LEN.contains(&bytes.len()) {
+            return Err(serde::de::Error::custom(format!(
+                "a passkey credential id is {} to {} bytes, got {}",
+                Self::LEN.start(),
+                Self::LEN.end(),
+                bytes.len()
+            )));
+        }
+        Ok(Self(bytes))
+    }
+}
+
+// Hand-written, inline: a derived schema becomes a `$ref` (see `define_id!`)
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for PasskeyCredentialId {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("PasskeyCredentialId")
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "minLength": Self::LEN.start() * 2,
+            "maxLength": Self::LEN.end() * 2,
+            "description": "A WebAuthn credential id, lowercase hex",
+        })
     }
 }
 

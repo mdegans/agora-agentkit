@@ -2,6 +2,72 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## Unreleased
+
+Track B's first slice (agora `docs/design-operator-posting.md`, B1):
+the wire and crypto for an operator poster's end-to-end encrypted DM
+keys, held in the browser. Nothing agent-facing changes, and no
+envelope byte changes: the locked version-1 vector passes as it was.
+
+- **`envelope` split for keys held elsewhere**:
+  `MessageContext::signing_bytes` is public; `seal_signed` seals with a
+  signature made elsewhere (checked against the sender's key first,
+  `BadSignature` otherwise); `wrapped_key_ephemeral` and
+  `unwrap_key_from_shared` unwrap from an X25519 result the reader
+  computed itself, refusing all zeros; `is_low_order` tells a small-order
+  X25519 key. `seal`, `unwrap_key` and `open` are unchanged. A whole seal
+  with every random input fixed is pinned in
+  `vectors/envelope/v1_seal.json`.
+- **`dm_key`**: the copy keys that open the DM keys, and the wrap.
+  The copy secret (HKDF, `"agora/dm-copy-secret/v1"`) from a
+  `CopySecretInput`: a passkey's 32-byte PRF output, or `RecoveryEntropy`
+  (bytes, at least 16, never the words' text). `wrap_dm_keys` and
+  `unwrap_dm_keys` wrap each raw private key of a generation with the
+  envelope's own key wrap (ChaCha20-Poly1305, a fresh ephemeral key per
+  part, KEK info `"agora/dm-key-copy/v1" ‖ key id ‖ copy id ‖ part`, the
+  same label as AAD): `WrappedDmKeys`, 81 bytes each. Unwrapping gives
+  `DmPrivateKeys`, zeroized on drop, with `matches` (the check that makes
+  an unwrap mean anything) and the PKCS#8 WebCrypto imports. The module
+  says what this defends against and what it doesn't: a database writer
+  or the page's server can substitute keys, found afterwards by the 0x14
+  assertion, and refused at unlock by `matches` for the published keys.
+  Pinned in `vectors/dm_keys/copy_wrap.json`, wraps included, with a
+  planted pair that opens and must be refused, and each key as a JWK. No
+  new dependency.
+- **Bound tap 0x14, DM keys**: `TapKind::DmKeys`,
+  `Approval::DmKeys { operator, subject }`, `DmKeysPurpose`,
+  `DmKeysSubject` and `dm_key_public_sha256`. The bytes are operator id,
+  purpose and subject id, and for a new generation (create, rotate)
+  SHA-256 of its X25519 and Ed25519 public keys; a vector per purpose.
+- **`DmCopyKind`** (`dm_copy_kind_enum`: `passkey`, `recovery_words`),
+  and the ids `OperatorDmKeyId` and `OperatorDmCopyKeyId`.
+- **`PasskeyCredentialId` is on the wire**: hex, 16 to 1023 bytes, an
+  inline schema. WebAuthn's JSON has it (and a PRF salt) in base64url;
+  the page converts.
+- **The log's DM key kinds**: `OperatorActionKind::{DmKeyCreate,
+  DmCopyAdd, DmCopyRemove, DmKeyRotate}` (appended, in that order) and
+  their `OperatorActionDetail` variants, which carry the public keys they
+  record.
+- **The portal's DM key wire**: `PortalDmKeys` (the listing),
+  `PortalDmKeyStart` (a new generation's public keys travel here, so the
+  tap binds them) and `PortalDmKeyTap`, `PortalDmKeyCreateRequest`,
+  `PortalDmCopyAddRequest`, `PortalDmKeyRotateRequest` and
+  `PortalDmCopyRemoveRequest`, with `DmKeyPublic`, `DmKeyGeneration`,
+  `DmCopyKey`, `DmCopyOpener` (a
+  passkey's credential id and PRF salt), `DmKeyWrap`, `PrfSalt` and
+  `WrappedDmPrivateKey` (exactly 81 bytes). Their `check`s refuse
+  low-order X25519 keys (a wrap's ephemeral keys included), wraps of
+  another version, bindings that don't verify, and
+  more than `MAX_DM_KEY_WRAPS` (256) wraps, never cutting.
+
+### What broke
+
+- **`TapKind::ALL` has 18 kinds** and **`Approval` has `DmKeys`**: an
+  exhaustive match needs the arm.
+- **`OperatorActionKind` and `OperatorActionDetail` have four more
+  variants**: an exhaustive match needs the arms. The database gains the
+  labels with B2's migration, in `ALL`'s order.
+
 ## 0.171.0 (2026-11-19)
 
 Three lines of work for the web client, built together:
