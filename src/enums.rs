@@ -1454,6 +1454,16 @@ pub enum OperatorActionKind {
     /// Messages in the operator poster's inbox marked read, from a portal
     /// session (0.171)
     PortalMarkRead,
+    /// The operator poster's first DM key pair made, by a 0x14 tap
+    DmKeyCreate,
+    /// A copy key that opens the DM keys added, by a 0x14 tap of its own
+    /// passkey
+    DmCopyAdd,
+    /// A copy key removed: by a 0x14 tap, or with its passkey's suspension
+    DmCopyRemove,
+    /// A new generation of the DM key pair replaced the live one, by a 0x14
+    /// tap
+    DmKeyRotate,
     /// A kind this build does not know, from a newer server. Never stored
     /// or sent by the server; exists so an older client still reads the
     /// log (0.160)
@@ -1461,6 +1471,25 @@ pub enum OperatorActionKind {
     #[cfg_attr(feature = "clap", value(skip))]
     #[cfg_attr(feature = "schemars", schemars(skip))]
     Unknown,
+}
+
+/// What opens a copy of an operator poster's DM keys
+/// (`dm_copy_kind_enum`): a copy key is derived from it (agora
+/// `docs/design-operator-posting.md`, Track B)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(
+    feature = "sqlx",
+    derive(sqlx::Type),
+    sqlx(type_name = "dm_copy_kind_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum DmCopyKind {
+    /// A passkey's PRF output, given with user verification
+    Passkey,
+    /// Recovery words, shown once (a later slice; the label exists now)
+    RecoveryWords,
 }
 
 /// What kind of key an operator credential is (`operator_credential_kind_enum`,
@@ -2037,6 +2066,7 @@ impl_display_fromstr!(BlockAction);
 impl_display_fromstr!(MessageEncryption);
 impl_display_fromstr!(MessageKind);
 impl_display_fromstr!(NotificationKind);
+impl_display_fromstr!(DmCopyKind);
 impl_display_fromstr!(OperatorActionKind);
 impl_display_fromstr!(crate::requests::ProfileField);
 impl_display_fromstr!(OperatorCredentialKind);
@@ -2137,9 +2167,11 @@ closed_variants!(OperatorActionKind [
     LogVisibility, GroupChange, CredentialSuspend, CredentialContest,
     OauthConsent, Freeze, Unfreeze, CredentialReinstate, SessionRevoke,
     AgentDelete, AgentRegister, AgentProfileUpdate, PortalPost, PortalComment,
-    PortalMessage, PortalFriendship, PortalMarkRead
+    PortalMessage, PortalFriendship, PortalMarkRead, DmKeyCreate, DmCopyAdd,
+    DmCopyRemove, DmKeyRotate
 ] never_written [Unknown]);
 closed_variants!(OperatorCredentialKind [SoftwareKey, HardwareKey]);
+closed_variants!(DmCopyKind [Passkey, RecoveryWords]);
 closed_variants!(PinPolicy [Never, Once, Always]);
 closed_variants!(TouchPolicy [Never, Always, Cached]);
 closed_variants!(PollMode [Ranked, Approval, Single] never_written [Unknown]);
@@ -2571,8 +2603,9 @@ mod tests {
             ClientPlatform::OperatorPortal.label(),
             "via the operator portal"
         );
+        let all = OperatorActionKind::ALL;
         assert_eq!(
-            OperatorActionKind::ALL[OperatorActionKind::ALL.len() - 5..],
+            all[all.len() - 9..all.len() - 4],
             [
                 OperatorActionKind::PortalPost,
                 OperatorActionKind::PortalComment,
@@ -2608,12 +2641,52 @@ mod tests {
         );
     }
 
+    /// The DM key kinds (Track B) are appended after the portal's, in the
+    /// order the migration adds them; `DmCopyKind` has both labels now
+    #[test]
+    fn dm_key_kinds_are_appended() {
+        let all = OperatorActionKind::ALL;
+        assert_eq!(
+            all[all.len() - 4..],
+            [
+                OperatorActionKind::DmKeyCreate,
+                OperatorActionKind::DmCopyAdd,
+                OperatorActionKind::DmCopyRemove,
+                OperatorActionKind::DmKeyRotate,
+            ]
+        );
+        let labels: Vec<String> =
+            all[all.len() - 4..].iter().map(|k| k.to_string()).collect();
+        assert_eq!(
+            labels,
+            [
+                "dm_key_create",
+                "dm_copy_add",
+                "dm_copy_remove",
+                "dm_key_rotate"
+            ]
+        );
+        assert_eq!(
+            DmCopyKind::ALL,
+            [DmCopyKind::Passkey, DmCopyKind::RecoveryWords]
+        );
+        let labels: Vec<String> =
+            DmCopyKind::ALL.iter().map(|k| k.to_string()).collect();
+        assert_eq!(labels, ["passkey", "recovery_words"]);
+        for k in DmCopyKind::ALL {
+            assert_eq!(k.to_string().parse::<DmCopyKind>().unwrap(), k);
+        }
+        // Closed: no catch-all
+        assert!("hardware_key".parse::<DmCopyKind>().is_err());
+    }
+
     #[cfg(feature = "schemars")]
     #[test]
     fn poster_kind_schema_is_a_plain_inline_enum() {
         use schemars::JsonSchema;
         assert!(<PosterKind as JsonSchema>::inline_schema());
         assert!(<OperatorActionKind as JsonSchema>::inline_schema());
+        assert!(<DmCopyKind as JsonSchema>::inline_schema());
         let value =
             serde_json::to_value(schemars::schema_for!(PosterKind)).unwrap();
         let blob = value.to_string();
