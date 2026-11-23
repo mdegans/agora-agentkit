@@ -49,6 +49,15 @@
 //! - wrap KDF: `KEK = HKDF-SHA256(salt = ephemeral_pub || recipient_pub,
 //!   ikm = X25519(ephemeral, recipient), info = "agora/wrap/v1")`
 //!
+//! # Keys held elsewhere
+//!
+//! A sender or reader whose keys live outside this crate (a browser's
+//! non-extractable WebCrypto keys) supplies its part: the inner signature
+//! over [`MessageContext::signing_bytes`] for [`seal_signed`], or the
+//! X25519 shared secret with [`wrapped_key_ephemeral`] for
+//! [`unwrap_key_from_shared`]. The bytes are the same; pinned in
+//! `vectors/envelope/v1_seal.json`.
+//!
 //! # Key registration
 //!
 //! An agent's X25519 public key is bound to its Ed25519 identity by a
@@ -181,9 +190,10 @@ pub struct MessageContext {
 }
 
 impl MessageContext {
-    /// Canonical bytes the inner signature covers (with the plaintext
-    /// appended by the caller).
-    fn signing_bytes(&self, plaintext: &[u8]) -> Vec<u8> {
+    /// What the inner signature covers: the context, then `plaintext`. Public
+    /// so a signer outside this crate (a browser's WebCrypto key) can sign it
+    /// for [`seal_signed`]
+    pub fn signing_bytes(&self, plaintext: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(
             MSG_CONTEXT.len() + 16 * 3 + 8 + plaintext.len(),
         );
@@ -291,13 +301,82 @@ pub fn seal(
     sender_pub: &EncryptionPublicKey,
     recipient_pub: &EncryptionPublicKey,
 ) -> Result<SealedMessage, EnvelopeError> {
-    let key = MessageKey::generate();
-    let mut xnonce = [0u8; XNONCE_LEN];
-    OsRng.fill_bytes(&mut xnonce);
-
-    // Inner signature over context || plaintext, then encrypt
-    // plaintext || signature under K.
     let signature = sender_signing_key.sign(&ctx.signing_bytes(plaintext));
+    seal_with(
+        ctx,
+        plaintext,
+        &signature,
+        sender_pub,
+        recipient_pub,
+        SealRandomness::draw(),
+    )
+}
+
+/// [`seal`] with the inner signature made elsewhere: by a key this crate
+/// never holds, such as a browser's non-extractable WebCrypto key, over
+/// [`MessageContext::signing_bytes`]. The signature is checked against
+/// `sender_verifying_key` first, so a wrong one is refused here instead of
+/// sealing a message no reader would accept
+pub fn seal_signed(
+    ctx: &MessageContext,
+    plaintext: &[u8],
+    signature: &Signature,
+    sender_verifying_key: &VerifyingKey,
+    sender_pub: &EncryptionPublicKey,
+    recipient_pub: &EncryptionPublicKey,
+) -> Result<SealedMessage, EnvelopeError> {
+    sender_verifying_key
+        .verify_strict(&ctx.signing_bytes(plaintext), signature)
+        .map_err(|_| EnvelopeError::BadSignature)?;
+    seal_with(
+        ctx,
+        plaintext,
+        signature,
+        sender_pub,
+        recipient_pub,
+        SealRandomness::draw(),
+    )
+}
+
+/// Everything random in one [`seal`]: drawn fresh for each, fixed only by
+/// the test vectors
+struct SealRandomness {
+    key: MessageKey,
+    xnonce: [u8; XNONCE_LEN],
+    ephemeral_recipient: EncryptionSecretKey,
+    ephemeral_sender: EncryptionSecretKey,
+}
+
+impl SealRandomness {
+    fn draw() -> Self {
+        let key = MessageKey::generate();
+        let mut xnonce = [0u8; XNONCE_LEN];
+        OsRng.fill_bytes(&mut xnonce);
+        Self {
+            key,
+            xnonce,
+            ephemeral_recipient: EncryptionSecretKey::random_from_rng(OsRng),
+            ephemeral_sender: EncryptionSecretKey::random_from_rng(OsRng),
+        }
+    }
+}
+
+fn seal_with(
+    ctx: &MessageContext,
+    plaintext: &[u8],
+    signature: &Signature,
+    sender_pub: &EncryptionPublicKey,
+    recipient_pub: &EncryptionPublicKey,
+    random: SealRandomness,
+) -> Result<SealedMessage, EnvelopeError> {
+    let SealRandomness {
+        key,
+        xnonce,
+        ephemeral_recipient,
+        ephemeral_sender,
+    } = random;
+
+    // Encrypt plaintext || signature under K.
     let mut blob = Vec::with_capacity(plaintext.len() + SIG_LEN);
     blob.extend_from_slice(plaintext);
     blob.extend_from_slice(&signature.to_bytes());
@@ -322,17 +401,21 @@ pub fn seal(
 
     Ok(SealedMessage {
         ciphertext,
-        wrapped_key_recipient: wrap_key(&key, recipient_pub)?,
-        wrapped_key_sender: wrap_key(&key, sender_pub)?,
+        wrapped_key_recipient: wrap_secret_with(
+            &key.0,
+            recipient_pub,
+            WRAP_INFO,
+            &[],
+            ephemeral_recipient,
+        )?,
+        wrapped_key_sender: wrap_secret_with(
+            &key.0,
+            sender_pub,
+            WRAP_INFO,
+            &[],
+            ephemeral_sender,
+        )?,
     })
-}
-
-/// Wrap `K` to a static X25519 public key (fresh ephemeral per wrap).
-fn wrap_key(
-    key: &MessageKey,
-    to_pub: &EncryptionPublicKey,
-) -> Result<Vec<u8>, EnvelopeError> {
-    wrap_secret(&key.0, to_pub, WRAP_INFO, &[])
 }
 
 /// Unwrap `K` from a wrapped-key blob using one's own static secret.
@@ -345,8 +428,8 @@ pub fn unwrap_key(
     unwrap_secret(wrapped, own_secret, WRAP_INFO, &[]).map(MessageKey)
 }
 
-/// The wrap of [`wrap_key`] under its own HKDF `info` and AEAD `aad`, for
-/// other 32-byte secrets (the sealed-state key). `aad` empty is the
+/// The wrap of `K` in [`seal`] under its own HKDF `info` and AEAD `aad`,
+/// for other 32-byte secrets (the sealed-state key). `aad` empty is the
 /// message wrap, byte for byte.
 pub(crate) fn wrap_secret(
     secret: &[u8; 32],
@@ -354,7 +437,23 @@ pub(crate) fn wrap_secret(
     info: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>, EnvelopeError> {
-    let ephemeral = EncryptionSecretKey::random_from_rng(OsRng);
+    wrap_secret_with(
+        secret,
+        to_pub,
+        info,
+        aad,
+        EncryptionSecretKey::random_from_rng(OsRng),
+    )
+}
+
+/// [`wrap_secret`] under a given ephemeral key
+fn wrap_secret_with(
+    secret: &[u8; 32],
+    to_pub: &EncryptionPublicKey,
+    info: &[u8],
+    aad: &[u8],
+    ephemeral: EncryptionSecretKey,
+) -> Result<Vec<u8>, EnvelopeError> {
     let ephemeral_pub = EncryptionPublicKey::from(&ephemeral);
     let kek = derive_kek(
         ephemeral.diffie_hellman(to_pub),
@@ -391,22 +490,58 @@ pub(crate) fn unwrap_secret(
     info: &[u8],
     aad: &[u8],
 ) -> Result<Zeroizing<[u8; 32]>, EnvelopeError> {
+    let ephemeral_pub = wrapped_key_ephemeral(wrapped)?;
+    // An all-zero result is refused by the KDF, as `was_contributory` would
+    let shared = own_secret.diffie_hellman(&ephemeral_pub);
+    unwrap_secret_from_shared(
+        wrapped,
+        shared.as_bytes(),
+        &EncryptionPublicKey::from(own_secret),
+        info,
+        aad,
+    )
+}
+
+/// The ephemeral X25519 public key a wrapped-key blob carries: what a
+/// reader whose static key lives elsewhere (a browser's non-extractable
+/// WebCrypto key) runs its own ECDH against, for
+/// [`unwrap_key_from_shared`]
+pub fn wrapped_key_ephemeral(
+    wrapped: &[u8],
+) -> Result<EncryptionPublicKey, EnvelopeError> {
     if wrapped.len() != WRAPPED_KEY_LEN {
         return Err(EnvelopeError::Truncated(wrapped.len()));
     }
     if wrapped[0] != ENVELOPE_VERSION {
         return Err(EnvelopeError::Version(wrapped[0]));
     }
-    let ephemeral_pub = EncryptionPublicKey::from(
+    Ok(EncryptionPublicKey::from(
         <[u8; 32]>::try_from(&wrapped[1..1 + PUB_LEN]).expect("length checked"),
-    );
-    let own_pub = EncryptionPublicKey::from(own_secret);
-    let kek = derive_kek(
-        own_secret.diffie_hellman(&ephemeral_pub),
-        &ephemeral_pub,
-        &own_pub,
-        info,
-    )?;
+    ))
+}
+
+/// [`unwrap_key`] for a reader that did the ECDH itself: `shared` is
+/// X25519(own secret, [`wrapped_key_ephemeral`]) and `own_public` the
+/// public half of that secret. An all-zero `shared` (a non-contributory
+/// ephemeral key) is refused, as [`unwrap_key`] refuses it
+pub fn unwrap_key_from_shared(
+    wrapped: &[u8],
+    shared: &[u8; 32],
+    own_public: &EncryptionPublicKey,
+) -> Result<MessageKey, EnvelopeError> {
+    unwrap_secret_from_shared(wrapped, shared, own_public, WRAP_INFO, &[])
+        .map(MessageKey)
+}
+
+fn unwrap_secret_from_shared(
+    wrapped: &[u8],
+    shared: &[u8; 32],
+    own_public: &EncryptionPublicKey,
+    info: &[u8],
+    aad: &[u8],
+) -> Result<Zeroizing<[u8; 32]>, EnvelopeError> {
+    let ephemeral_pub = wrapped_key_ephemeral(wrapped)?;
+    let kek = derive_kek_from_bytes(shared, &ephemeral_pub, own_public, info)?;
 
     let cipher = ChaCha20Poly1305::new(kek.as_ref().into());
     let k = Zeroizing::new(
@@ -437,10 +572,25 @@ fn derive_kek(
     if !shared.was_contributory() {
         return Err(EnvelopeError::NonContributory);
     }
+    derive_kek_from_bytes(shared.as_bytes(), ephemeral_pub, to_pub, info)
+}
+
+/// [`derive_kek`] over the shared secret's bytes, refusing all zeros as
+/// `was_contributory` does
+fn derive_kek_from_bytes(
+    shared: &[u8; 32],
+    ephemeral_pub: &EncryptionPublicKey,
+    to_pub: &EncryptionPublicKey,
+    info: &[u8],
+) -> Result<Zeroizing<[u8; 32]>, EnvelopeError> {
+    use subtle::ConstantTimeEq;
+    if bool::from(shared.ct_eq(&[0u8; 32])) {
+        return Err(EnvelopeError::NonContributory);
+    }
     let mut salt = [0u8; 64];
     salt[..32].copy_from_slice(ephemeral_pub.as_bytes());
     salt[32..].copy_from_slice(to_pub.as_bytes());
-    let hk = Hkdf::<Sha256>::new(Some(&salt), shared.as_bytes());
+    let hk = Hkdf::<Sha256>::new(Some(&salt), shared);
     let mut kek = Zeroizing::new([0u8; 32]);
     hk.expand(info, kek.as_mut())
         .expect("32-byte HKDF output is always valid");
@@ -842,5 +992,230 @@ mod tests {
         );
         let unwrapped = unwrap_key(&wrapped, &own_secret).unwrap();
         assert_eq!(unwrapped.0.as_ref(), &[0xAB; 32]);
+    }
+
+    /// [`seal_signed`] refuses a signature that isn't the sender's over the
+    /// context and plaintext, and seals what [`seal`] seals otherwise
+    #[test]
+    fn seal_signed_checks_the_signature() {
+        let sender = party();
+        let recipient = party();
+        let ctx = fixed_ctx();
+        let vk = sender.signing.verifying_key();
+        let good = sender.signing.sign(&ctx.signing_bytes(b"hi"));
+        let sealed = seal_signed(
+            &ctx,
+            b"hi",
+            &good,
+            &vk,
+            &sender.enc_pub,
+            &recipient.enc_pub,
+        )
+        .unwrap();
+        let k =
+            unwrap_key(&sealed.wrapped_key_recipient, &recipient.enc_secret)
+                .unwrap();
+        assert_eq!(open(&sealed.ciphertext, &k, &ctx, &vk).unwrap(), b"hi");
+
+        let other = sender.signing.sign(&ctx.signing_bytes(b"ho"));
+        let (stranger, _) = crate::crypto::generate_keypair();
+        for (sig, key) in [(&other, &vk), (&good, &stranger.verifying_key())] {
+            assert!(matches!(
+                seal_signed(
+                    &ctx,
+                    b"hi",
+                    sig,
+                    key,
+                    &sender.enc_pub,
+                    &recipient.enc_pub
+                ),
+                Err(EnvelopeError::BadSignature)
+            ));
+        }
+    }
+
+    /// A reader doing its own ECDH gets the same key as [`unwrap_key`]; an
+    /// all-zero shared secret, a wrong one, or a bad blob is refused
+    #[test]
+    fn unwrap_from_shared_matches_unwrap_key() {
+        let sender = party();
+        let recipient = party();
+        let sealed = seal(
+            &fixed_ctx(),
+            b"x",
+            &sender.signing,
+            &sender.enc_pub,
+            &recipient.enc_pub,
+        )
+        .unwrap();
+        let wrapped = &sealed.wrapped_key_recipient;
+        let eph = wrapped_key_ephemeral(wrapped).unwrap();
+        let shared = recipient.enc_secret.diffie_hellman(&eph);
+        let via_shared = unwrap_key_from_shared(
+            wrapped,
+            shared.as_bytes(),
+            &recipient.enc_pub,
+        )
+        .unwrap();
+        let direct = unwrap_key(wrapped, &recipient.enc_secret).unwrap();
+        assert_eq!(via_shared.to_hex(), direct.to_hex());
+
+        assert!(matches!(
+            unwrap_key_from_shared(wrapped, &[0; 32], &recipient.enc_pub),
+            Err(EnvelopeError::NonContributory)
+        ));
+        assert!(matches!(
+            unwrap_key_from_shared(wrapped, &[1; 32], &recipient.enc_pub),
+            Err(EnvelopeError::Decrypt)
+        ));
+        // The salt binds the reader's own public key
+        assert!(matches!(
+            unwrap_key_from_shared(wrapped, shared.as_bytes(), &sender.enc_pub),
+            Err(EnvelopeError::Decrypt)
+        ));
+        assert!(matches!(
+            wrapped_key_ephemeral(&wrapped[1..]),
+            Err(EnvelopeError::Truncated(_))
+        ));
+        let mut v2 = wrapped.clone();
+        v2[0] = 2;
+        assert!(matches!(
+            wrapped_key_ephemeral(&v2),
+            Err(EnvelopeError::Version(2))
+        ));
+    }
+
+    /// `vectors/envelope/v1_seal.json`: one whole version-1 seal with every
+    /// random input fixed, and each part the split exposes (the signed
+    /// bytes, the ephemeral keys, the shared secrets), for a browser's
+    /// WebCrypto half to be checked against
+    mod seal_vector {
+        use super::*;
+        use serde_json::json;
+
+        fn path() -> std::path::PathBuf {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("vectors/envelope/v1_seal.json")
+        }
+
+        fn secret(fill: u8) -> EncryptionSecretKey {
+            EncryptionSecretKey::from([fill; 32])
+        }
+
+        fn render() -> String {
+            let ctx = fixed_ctx();
+            let plaintext = "hello, encrypted agora \u{1F510}".as_bytes();
+            let signing = crate::crypto::signing_key_from_bytes(&[0x51; 32]);
+            let sender_secret = secret(0x52);
+            let recipient_secret = secret(0x53);
+            let sender_pub = EncryptionPublicKey::from(&sender_secret);
+            let recipient_pub = EncryptionPublicKey::from(&recipient_secret);
+            let random = || SealRandomness {
+                key: MessageKey(Zeroizing::new([0x54; 32])),
+                xnonce: [0x55; XNONCE_LEN],
+                ephemeral_recipient: secret(0x56),
+                ephemeral_sender: secret(0x57),
+            };
+
+            let signing_bytes = ctx.signing_bytes(plaintext);
+            let signature = signing.sign(&signing_bytes);
+            let sealed = seal_with(
+                &ctx,
+                plaintext,
+                &signature,
+                &sender_pub,
+                &recipient_pub,
+                random(),
+            )
+            .unwrap();
+
+            // What every reader must get back, through either path
+            let vk = signing.verifying_key();
+            for (wrapped, own) in [
+                (&sealed.wrapped_key_recipient, &recipient_secret),
+                (&sealed.wrapped_key_sender, &sender_secret),
+            ] {
+                let k = unwrap_key(wrapped, own).unwrap();
+                assert_eq!(k.0.as_ref(), &[0x54; 32]);
+                let eph = wrapped_key_ephemeral(wrapped).unwrap();
+                let shared = own.diffie_hellman(&eph);
+                let k = unwrap_key_from_shared(
+                    wrapped,
+                    shared.as_bytes(),
+                    &EncryptionPublicKey::from(own),
+                )
+                .unwrap();
+                assert_eq!(
+                    open(&sealed.ciphertext, &k, &ctx, &vk).unwrap(),
+                    plaintext
+                );
+            }
+
+            let shared = |own: &EncryptionSecretKey, wrapped: &[u8]| {
+                hex::encode(
+                    own.diffie_hellman(
+                        &wrapped_key_ephemeral(wrapped).unwrap(),
+                    )
+                    .as_bytes(),
+                )
+            };
+            let r = random();
+            let vector = json!({
+                "description": "One version-1 envelope (`agentkit::envelope`) with every random input fixed. The inner signature is Ed25519 by the sender over `signing_bytes` = \"agora/msg/v1\" || message_id || sender_id || recipient_id || timestamp_le_i64 || plaintext; the payload is XChaCha20-Poly1305 under `message_key` with `xnonce` and AAD message_id || sender_id || recipient_id, over plaintext || signature; each wrap is version || ephemeral_public || ChaCha20-Poly1305(KEK, zero nonce, message_key), KEK = HKDF-SHA256(salt = ephemeral_public || own_public, ikm = shared, info = \"agora/wrap/v1\"). `shared_*` is X25519(own secret, the wrap's ephemeral public): what a reader holding its key in WebCrypto computes before `unwrap_key_from_shared`. Secrets are raw 32-byte X25519 scalars (unclamped) and the Ed25519 seed. Ids are UUID bytes, big-endian as written.",
+                "context": {
+                    "message_id": ctx.message_id,
+                    "sender_id": ctx.sender_id,
+                    "recipient_id": ctx.recipient_id,
+                    "timestamp": ctx.timestamp,
+                },
+                "plaintext_hex": hex::encode(plaintext),
+                "sender_ed25519_seed": hex::encode(signing.to_bytes()),
+                "sender_ed25519_public": hex::encode(vk.to_bytes()),
+                "sender_x25519_secret": hex::encode(sender_secret.to_bytes()),
+                "sender_x25519_public": hex::encode(sender_pub.as_bytes()),
+                "recipient_x25519_secret": hex::encode(recipient_secret.to_bytes()),
+                "recipient_x25519_public": hex::encode(recipient_pub.as_bytes()),
+                "message_key": hex::encode(r.key.0.as_ref()),
+                "xnonce": hex::encode(r.xnonce),
+                "ephemeral_recipient_secret": hex::encode(r.ephemeral_recipient.to_bytes()),
+                "ephemeral_sender_secret": hex::encode(r.ephemeral_sender.to_bytes()),
+                "signing_bytes": hex::encode(&signing_bytes),
+                "signature": hex::encode(signature.to_bytes()),
+                "ciphertext": hex::encode(&sealed.ciphertext),
+                "wrapped_key_recipient": hex::encode(&sealed.wrapped_key_recipient),
+                "wrapped_key_sender": hex::encode(&sealed.wrapped_key_sender),
+                "shared_recipient": shared(&recipient_secret, &sealed.wrapped_key_recipient),
+                "shared_sender": shared(&sender_secret, &sealed.wrapped_key_sender),
+            });
+            serde_json::to_string_pretty(&vector).unwrap() + "\n"
+        }
+
+        #[test]
+        fn the_vector_is_what_the_generator_writes() {
+            let committed = std::fs::read_to_string(path()).unwrap();
+            assert_eq!(render(), committed, "stale; run `just vectors`");
+        }
+
+        /// The committed vector's wraps are the version-1 format the locked
+        /// wrap vector pins: its KEK, recomputed here from the file alone
+        #[test]
+        fn the_committed_wraps_open_with_the_locked_kdf() {
+            let v: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(path()).unwrap())
+                    .unwrap();
+            let bytes = |k: &str| hex::decode(v[k].as_str().unwrap()).unwrap();
+            let own = EncryptionSecretKey::from(
+                <[u8; 32]>::try_from(bytes("recipient_x25519_secret")).unwrap(),
+            );
+            let k = unwrap_key(&bytes("wrapped_key_recipient"), &own).unwrap();
+            assert_eq!(k.to_hex(), v["message_key"].as_str().unwrap());
+        }
+
+        #[test]
+        #[ignore = "writes vectors/envelope; run it with `just vectors`"]
+        fn regenerate_the_vector() {
+            std::fs::create_dir_all(path().parent().unwrap()).unwrap();
+            std::fs::write(path(), render()).unwrap();
+        }
     }
 }
