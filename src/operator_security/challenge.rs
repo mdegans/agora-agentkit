@@ -134,35 +134,63 @@ impl DmKeysPurpose {
 }
 
 /// What a 0x14 tap names: the id the server drew when the tap started (a new
-/// generation, or a new copy key), or the copy key it removes. Which id goes
-/// with which purpose is fixed here, so the two can't disagree
+/// generation, or a new copy key), or the copy key it removes. A new
+/// generation's public keys are bound too, by their digest
+/// ([`dm_key_public_sha256`]), so a swapped key fails the stored assertion. A
+/// copy key's public key can't be: it comes from the same tap's PRF output.
+/// Which id goes with which purpose is fixed here, so the two can't disagree
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DmKeysSubject {
-    /// The new generation. Its copy key's id is held by the ceremony and
+    /// The first generation. Its copy key's id is held by the ceremony and
     /// written in the same transaction, not in the bytes
-    Create(OperatorDmKeyId),
+    Create {
+        key: OperatorDmKeyId,
+        public_sha256: [u8; 32],
+    },
     AddCopy(OperatorDmCopyKeyId),
     /// The new generation
-    Rotate(OperatorDmKeyId),
+    Rotate {
+        key: OperatorDmKeyId,
+        public_sha256: [u8; 32],
+    },
     RemoveCopy(OperatorDmCopyKeyId),
 }
 
 impl DmKeysSubject {
     pub fn purpose(self) -> DmKeysPurpose {
         match self {
-            Self::Create(_) => DmKeysPurpose::Create,
+            Self::Create { .. } => DmKeysPurpose::Create,
             Self::AddCopy(_) => DmKeysPurpose::AddCopy,
-            Self::Rotate(_) => DmKeysPurpose::Rotate,
+            Self::Rotate { .. } => DmKeysPurpose::Rotate,
             Self::RemoveCopy(_) => DmKeysPurpose::RemoveCopy,
         }
     }
 
-    fn id_bytes(self) -> [u8; 16] {
+    /// The subject id, then the public keys' digest where there is one
+    fn bytes(self, out: &mut Vec<u8>) {
         match self {
-            Self::Create(id) | Self::Rotate(id) => uuid_bytes(id),
-            Self::AddCopy(id) | Self::RemoveCopy(id) => uuid_bytes(id),
+            Self::Create { key, public_sha256 }
+            | Self::Rotate { key, public_sha256 } => {
+                out.extend(uuid_bytes(key));
+                out.extend(public_sha256);
+            }
+            Self::AddCopy(id) | Self::RemoveCopy(id) => {
+                out.extend(uuid_bytes(id))
+            }
         }
     }
+}
+
+/// SHA-256(x25519_public ‖ ed25519_public): a DM key generation's public
+/// keys, as 0x14 binds them
+pub fn dm_key_public_sha256(
+    x25519_public: &[u8; 32],
+    ed25519_public: &[u8; 32],
+) -> [u8; 32] {
+    let mut both = [0u8; 64];
+    both[..32].copy_from_slice(x25519_public);
+    both[32..].copy_from_slice(ed25519_public);
+    sha256(&both)
 }
 
 /// What a suspension names (0x04's target kind byte)
@@ -387,7 +415,7 @@ impl Approval {
             Self::DmKeys { operator, subject } => {
                 out.extend(uuid_bytes(*operator));
                 out.push(subject.purpose().tag());
-                out.extend(subject.id_bytes());
+                subject.bytes(&mut out);
             }
         }
         out
@@ -683,16 +711,25 @@ mod tests {
         "e6f3e3e64fcb22577e14248e151b5c3f624b7b86e602d2558f15fecb38e7794f",
     ];
 
-    /// 0x14's bytes: operator id ‖ purpose ‖ subject id, the purpose fixed
-    /// by the subject's kind; each purpose pinned (Python `hashlib`)
+    /// 0x14's bytes: operator id ‖ purpose ‖ subject id, then for a new
+    /// generation SHA-256(x25519 ‖ ed25519); the purpose fixed by the
+    /// subject's kind; each purpose pinned (Python `hashlib`)
     #[test]
     fn dm_keys_bytes_and_every_purpose() {
         let operator: OperatorId = id(A);
+        let public_sha256 = dm_key_public_sha256(&[0x11; 32], &[0x22; 32]);
+        assert_eq!(
+            hex::encode(public_sha256),
+            "5189c77d29fe5d546a045ec46986852785fea5c13ac7da9c115ff5fb6edf817c"
+        );
         let cases = [
             (
-                DmKeysSubject::Create(id(B)),
+                DmKeysSubject::Create {
+                    key: id(B),
+                    public_sha256,
+                },
                 0u8,
-                "168244fbe25ce30b74a31e18762ceb2cf23a1c14c136315082dc8c1edb6a67f4",
+                "c3715dee4a6e01c0269a1d428ffc64e5106c5c67c7cb7d3ccf9bfa83414f8bf3",
             ),
             (
                 DmKeysSubject::AddCopy(id(B)),
@@ -700,9 +737,12 @@ mod tests {
                 "e6f3e3e64fcb22577e14248e151b5c3f624b7b86e602d2558f15fecb38e7794f",
             ),
             (
-                DmKeysSubject::Rotate(id(B)),
+                DmKeysSubject::Rotate {
+                    key: id(B),
+                    public_sha256,
+                },
                 2,
-                "23b739e9242819160c40f4ccf7c9f77c77df5d069f12258f321ab43d129ffd23",
+                "240803d8d9c670c893a98392f5e9f70a1b34f21b8dff8daf15790f27476523e2",
             ),
             (
                 DmKeysSubject::RemoveCopy(id(B)),
@@ -719,12 +759,31 @@ mod tests {
             assert_eq!(bytes[0], 0x14);
             assert_eq!(&bytes[1..17], &uuid_bytes(operator));
             assert_eq!(bytes[17], tag);
-            assert_eq!(&bytes[18..], &uuid_bytes(id::<OperatorDmKeyId>(B)));
+            assert_eq!(&bytes[18..34], &uuid_bytes(id::<OperatorDmKeyId>(B)));
+            match subject {
+                DmKeysSubject::Create { .. } | DmKeysSubject::Rotate { .. } => {
+                    assert_eq!(&bytes[34..], &public_sha256)
+                }
+                _ => assert_eq!(bytes.len(), 34),
+            }
             let mut preimage = CONTEXT.to_vec();
             preimage.extend(NONCE);
             preimage.extend(bytes);
             assert_eq!(hex::encode(sha256(&preimage)), want, "{subject:?}");
         }
+        // Another key under the same id is another challenge
+        let other = Approval::DmKeys {
+            operator,
+            subject: DmKeysSubject::Create {
+                key: id(B),
+                public_sha256: dm_key_public_sha256(&[0x11; 32], &[0x23; 32]),
+            },
+        };
+        let first = Approval::DmKeys {
+            operator,
+            subject: cases[0].0,
+        };
+        assert_ne!(other.challenge(&NONCE), first.challenge(&NONCE));
         // The purpose names on the wire
         let names: Vec<String> = DmKeysPurpose::ALL
             .iter()
