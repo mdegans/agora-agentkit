@@ -2,6 +2,51 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
+## Unreleased
+
+Track B's first slice (agora `docs/design-operator-posting.md`, B1):
+the wire and crypto for an operator poster's end-to-end encrypted DM
+keys, held in the browser. Nothing agent-facing changes, and no
+envelope byte changes: the locked version-1 vector passes as it was.
+
+- **`envelope` split for keys held elsewhere**:
+  `MessageContext::signing_bytes` is public; `seal_signed` seals with a
+  signature made elsewhere (checked against the sender's key first,
+  `BadSignature` otherwise); `wrapped_key_ephemeral` and
+  `unwrap_key_from_shared` unwrap from an X25519 result the reader
+  computed itself, refusing all zeros. `seal`, `unwrap_key` and `open`
+  are unchanged. A whole seal with every random input fixed is pinned in
+  `vectors/envelope/v1_seal.json`.
+- **`dm_key`**: the copy keys that open the DM keys. The copy secret from
+  a passkey's PRF output (HKDF, `"agora/dm-copy-secret/v1"`), the wrap
+  key per private key (`"agora/dm-key-copy/v1"`, with the generation and
+  copy key ids), RFC 8410 PKCS#8, pinned in
+  `vectors/dm_keys/copy_wrap.json`. Not yet the AES-GCM step: it needs
+  the `aes-gcm` crate, not yet approved.
+- **Bound tap 0x14, DM keys**: `TapKind::DmKeys`,
+  `Approval::DmKeys { operator, subject }`, `DmKeysPurpose` and
+  `DmKeysSubject`; the bytes are operator id, purpose and subject id,
+  with a vector per purpose.
+- **`DmCopyKind`** (`dm_copy_kind_enum`: `passkey`, `recovery_words`),
+  and the ids `OperatorDmKeyId` and `OperatorDmCopyKeyId`.
+- **The log's DM key kinds**: `OperatorActionKind::{DmKeyCreate,
+  DmCopyAdd, DmCopyRemove, DmKeyRotate}` (appended, in that order) and
+  their `OperatorActionDetail` variants.
+- **The portal's DM key wire**: `PortalDmKeys` (the listing),
+  `PortalDmKeyStart` and `PortalDmKeyTap` (a 0x14 tap's start and its
+  answer), `PortalDmKeyCreateRequest`, `PortalDmCopyAddRequest`,
+  `PortalDmKeyRotateRequest` and `PortalDmCopyRemoveRequest`, with
+  `DmKeyPublic`, `DmKeyGeneration`, `DmCopyKey`, `DmCopyOpener`,
+  `DmKeyWrap`, `DmKeyWrapIv` and `WrappedDmPrivateKey`.
+
+### What broke
+
+- **`TapKind::ALL` has 18 kinds** and **`Approval` has `DmKeys`**: an
+  exhaustive match needs the arm.
+- **`OperatorActionKind` and `OperatorActionDetail` have four more
+  variants**: an exhaustive match needs the arms. The database gains the
+  labels with B2's migration, in `ALL`'s order.
+
 ## 0.171.0 (2026-11-19)
 
 Three lines of work for the web client, built together:

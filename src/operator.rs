@@ -9,17 +9,20 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::enums::{MessageKind, PosterKind};
+use crate::enums::{DmCopyKind, MessageKind, PosterKind};
 pub use crate::enums::{OperatorActionKind, OperatorCredentialKind};
+use crate::govlog::{HexLengthError, PublicKeyHex, SignatureHex};
 use crate::ids::{
     AgentGroupId, AgentId, CommentId, MessageId, ModerationActionId,
-    OperatorActionId, OperatorCredentialId, OperatorEnrolmentId, OperatorId,
-    OperatorPasskeyId, OperatorRecoveryCaseId, PostId,
+    OperatorActionId, OperatorCredentialId, OperatorDmCopyKeyId,
+    OperatorDmKeyId, OperatorEnrolmentId, OperatorId, OperatorPasskeyId,
+    OperatorRecoveryCaseId, PostId,
 };
 use crate::limits;
 pub use crate::moderation::ActionAppeal;
 use crate::moderation::{AppealCredits, ModerationActionRecord};
 use crate::names::AgentName;
+use crate::operator_security::challenge::{DmKeysPurpose, DmKeysSubject};
 use crate::operator_security::tap::{Delivery, Reach, TapLevel};
 use crate::operator_signer::{
     AttestationBundle, OperatorPublicKey, SignatureBytes,
@@ -893,6 +896,41 @@ pub enum OperatorActionDetail {
         poster: AgentId,
         messages: Vec<MessageId>,
     },
+    /// The operator poster's first DM key generation, and the copy key of
+    /// the passkey whose 0x14 tap made it
+    DmKeyCreate {
+        poster: AgentId,
+        key: OperatorDmKeyId,
+        copy: OperatorDmCopyKeyId,
+        passkey: OperatorPasskeyId,
+    },
+    /// A copy key added, by a 0x14 tap of its own passkey; every generation
+    /// was wrapped to it
+    DmCopyAdd {
+        copy: OperatorDmCopyKeyId,
+        copy_kind: DmCopyKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        passkey: Option<OperatorPasskeyId>,
+    },
+    /// A copy key removed with its wraps: by a 0x14 tap, or with its
+    /// passkey's suspension (`suspension`, that `credential_suspend` entry).
+    /// `rotation_due` are the live generations it marked due
+    DmCopyRemove {
+        copy: OperatorDmCopyKeyId,
+        copy_kind: DmCopyKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        passkey: Option<OperatorPasskeyId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        suspension: Option<OperatorActionId>,
+        rotation_due: Vec<OperatorDmKeyId>,
+    },
+    /// A new generation replaced the live one, by a 0x14 tap, wrapped to
+    /// every remaining copy key
+    DmKeyRotate {
+        poster: AgentId,
+        key: OperatorDmKeyId,
+        retired: OperatorDmKeyId,
+    },
     /// A kind this build does not know, from a newer server, read without
     /// its fields; exists so an older client still reads the log (0.160)
     #[serde(other)]
@@ -971,6 +1009,10 @@ impl OperatorLogEntry {
             | OperatorActionDetail::PortalMessage { .. }
             | OperatorActionDetail::PortalFriendship { .. }
             | OperatorActionDetail::PortalMarkRead { .. }
+            | OperatorActionDetail::DmKeyCreate { .. }
+            | OperatorActionDetail::DmCopyAdd { .. }
+            | OperatorActionDetail::DmCopyRemove { .. }
+            | OperatorActionDetail::DmKeyRotate { .. }
             | OperatorActionDetail::Unknown => {
                 return None;
             }
@@ -1085,6 +1127,10 @@ impl OperatorActionDetail {
                 OperatorActionKind::PortalFriendship
             }
             Self::PortalMarkRead { .. } => OperatorActionKind::PortalMarkRead,
+            Self::DmKeyCreate { .. } => OperatorActionKind::DmKeyCreate,
+            Self::DmCopyAdd { .. } => OperatorActionKind::DmCopyAdd,
+            Self::DmCopyRemove { .. } => OperatorActionKind::DmCopyRemove,
+            Self::DmKeyRotate { .. } => OperatorActionKind::DmKeyRotate,
             Self::Unknown => OperatorActionKind::Unknown,
         }
     }
@@ -1116,6 +1162,10 @@ impl OperatorActionDetail {
             | Self::PortalMessage { .. }
             | Self::PortalFriendship { .. }
             | Self::PortalMarkRead { .. }
+            | Self::DmKeyCreate { .. }
+            | Self::DmCopyAdd { .. }
+            | Self::DmCopyRemove { .. }
+            | Self::DmKeyRotate { .. }
             | Self::Unknown => None,
         }
     }
@@ -1319,6 +1369,429 @@ pub struct PortalMarkReadResponse {
     /// before the reader's account existed, which was never unread for it
     /// and which the portal's inbox does not list)
     pub not_marked: Vec<MessageId>,
+}
+
+// ---------------------------------------------------------------------------
+// The operator poster's DM keys, on the portal (agora
+// `docs/design-operator-posting.md`, Track B)
+// ---------------------------------------------------------------------------
+
+crate::govlog::hex_bytes!(
+    /// AES-GCM's IV for one (generation, copy key) wrap, hex on the wire
+    DmKeyWrapIv,
+    crate::dm_key::IV_LEN
+);
+
+/// One private key of a generation, wrapped to a copy key: AES-256-GCM
+/// over its PKCS#8, tag appended ([`crate::dm_key`]). Hex on the wire;
+/// [`MIN_WRAPPED_LEN`](crate::dm_key::MIN_WRAPPED_LEN) to
+/// [`MAX_WRAPPED_LEN`](crate::dm_key::MAX_WRAPPED_LEN) bytes, any other
+/// length refused
+#[derive(Clone, PartialEq, Eq)]
+pub struct WrappedDmPrivateKey(Vec<u8>);
+
+impl WrappedDmPrivateKey {
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl TryFrom<Vec<u8>> for WrappedDmPrivateKey {
+    type Error = String;
+
+    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+        use crate::dm_key::{MAX_WRAPPED_LEN, MIN_WRAPPED_LEN};
+        if (MIN_WRAPPED_LEN..=MAX_WRAPPED_LEN).contains(&bytes.len()) {
+            Ok(Self(bytes))
+        } else {
+            Err(format!(
+                "a wrapped DM private key is {MIN_WRAPPED_LEN} to \
+                 {MAX_WRAPPED_LEN} bytes, got {}",
+                bytes.len()
+            ))
+        }
+    }
+}
+
+impl std::fmt::Debug for WrappedDmPrivateKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "WrappedDmPrivateKey({})", hex::encode(&self.0))
+    }
+}
+
+impl Serialize for WrappedDmPrivateKey {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(&self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for WrappedDmPrivateKey {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        Self::try_from(bytes).map_err(serde::de::Error::custom)
+    }
+}
+
+// Hand-written, inline, as every hex newtype's (`govlog::hex_bytes!`)
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for WrappedDmPrivateKey {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("WrappedDmPrivateKey")
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        use crate::dm_key::{MAX_WRAPPED_LEN, MIN_WRAPPED_LEN};
+        schemars::json_schema!({
+            "type": "string",
+            "minLength": MIN_WRAPPED_LEN * 2,
+            "maxLength": MAX_WRAPPED_LEN * 2,
+            "description": "AES-256-GCM over a PKCS#8 private key, tag appended; lowercase hex",
+        })
+    }
+}
+
+/// A generation's public half: the X25519 key agents seal to, the Ed25519
+/// key its messages' inner signatures verify against, and the binding
+/// between them that agents already check
+/// ([`crate::envelope::verify_encryption_key`])
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(deny_unknown_fields)]
+pub struct DmKeyPublic {
+    pub x25519_public: PublicKeyHex,
+    pub ed25519_public: PublicKeyHex,
+    /// By `ed25519_public` over `"agora/enc-key/v1" ‖ x25519_public`
+    pub binding_signature: SignatureHex,
+}
+
+impl DmKeyPublic {
+    /// The binding verifies (strictly), and the Ed25519 key is a valid point
+    pub fn binding_verifies(&self) -> bool {
+        let Ok(vk) = crate::crypto::VerifyingKey::from_bytes(
+            self.ed25519_public.as_bytes(),
+        ) else {
+            return false;
+        };
+        crate::envelope::verify_encryption_key(
+            &vk,
+            &crate::envelope::EncryptionPublicKey::from(
+                *self.x25519_public.as_bytes(),
+            ),
+            &crate::crypto::Signature::from_bytes(
+                self.binding_signature.as_bytes(),
+            ),
+        )
+    }
+}
+
+/// One generation of the poster's DM keys
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct DmKeyGeneration {
+    pub id: OperatorDmKeyId,
+    pub public: DmKeyPublic,
+    pub created_at: DateTime<Utc>,
+    /// When the next generation replaced it; absent on the live one
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retired_at: Option<DateTime<Utc>>,
+    /// When a copy key was removed while it was live: it should be rotated,
+    /// and agents can't seal to the poster until it is
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rotation_due_at: Option<DateTime<Utc>>,
+}
+
+/// What opens a copy key ([`DmCopyKind`], with what each kind names)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DmCopyOpener {
+    /// A passkey's PRF output. Its salt is in [`PortalDmKeys::unlock`]
+    Passkey {
+        passkey: OperatorPasskeyId,
+    },
+    RecoveryWords,
+}
+
+impl DmCopyOpener {
+    pub fn kind(self) -> DmCopyKind {
+        match self {
+            Self::Passkey { .. } => DmCopyKind::Passkey,
+            Self::RecoveryWords => DmCopyKind::RecoveryWords,
+        }
+    }
+}
+
+/// One copy key: something that can open the DM keys
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+pub struct DmCopyKey {
+    pub id: OperatorDmCopyKeyId,
+    pub opener: DmCopyOpener,
+    /// The copy key's X25519 public key, which generations are wrapped to
+    pub x25519_public: PublicKeyHex,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One generation's private keys wrapped to one copy key
+/// ([`crate::dm_key`]): a fresh ephemeral key and IV per row
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(deny_unknown_fields)]
+pub struct DmKeyWrap {
+    pub key: OperatorDmKeyId,
+    pub copy: OperatorDmCopyKeyId,
+    pub ephemeral_public: PublicKeyHex,
+    pub iv: DmKeyWrapIv,
+    pub wrapped_x25519: WrappedDmPrivateKey,
+    pub wrapped_ed25519: WrappedDmPrivateKey,
+}
+
+/// `GET /api/portal/poster/dm-key`: the session's poster's DM keys, what
+/// can open them and every wrap, for the page to unlock with. Public
+/// material and ciphertext only
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct PortalDmKeys {
+    /// Every generation, newest first; the live one has no `retired_at`
+    pub keys: Vec<DmKeyGeneration>,
+    pub copies: Vec<DmCopyKey>,
+    pub wraps: Vec<DmKeyWrap>,
+    /// For unlocking: WebAuthn's `PublicKeyCredentialRequestOptionsJSON`
+    /// without a challenge, which the page draws (nothing is sent back):
+    /// `allowCredentials` for the passkeys with copy keys,
+    /// `userVerification: "required"` and `extensions.prf.evalByCredential`
+    /// with each one's salt. Absent when no passkey has a copy key
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unlock: Option<serde_json::Value>,
+}
+
+/// `POST /api/portal/poster/dm-key/start`: begin a 0x14 tap
+/// ([`Approval::DmKeys`](crate::operator_security::challenge::Approval::DmKeys)).
+/// Answered with a [`PortalDmKeyTap`] of the same purpose
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(tag = "purpose", rename_all = "snake_case", deny_unknown_fields)]
+pub enum PortalDmKeyStart {
+    /// The first generation; any effective passkey of the operator's may
+    /// tap, and its PRF output becomes the first copy key
+    Create {},
+    /// A copy key for `passkey`, which must be the one that taps
+    AddCopy {
+        passkey: OperatorPasskeyId,
+    },
+    /// A new generation, wrapped to every remaining copy key; any effective
+    /// passkey may tap
+    Rotate {},
+    RemoveCopy {
+        copy: OperatorDmCopyKeyId,
+    },
+}
+
+impl PortalDmKeyStart {
+    pub fn purpose(self) -> DmKeysPurpose {
+        match self {
+            Self::Create {} => DmKeysPurpose::Create,
+            Self::AddCopy { .. } => DmKeysPurpose::AddCopy,
+            Self::Rotate {} => DmKeysPurpose::Rotate,
+            Self::RemoveCopy { .. } => DmKeysPurpose::RemoveCopy,
+        }
+    }
+}
+
+/// The answer to a [`PortalDmKeyStart`]: the ids the server drew, and
+/// `tap`, the options for `navigator.credentials.get` (WebAuthn's
+/// `PublicKeyCredentialRequestOptionsJSON`) whose challenge is derived from
+/// kind 0x14 over the operator, the purpose and the subject. For `create`
+/// and `add_copy` its `extensions.prf.evalByCredential` carries a fresh
+/// salt per allowed passkey; the page refuses an answer without a PRF
+/// result or with the UV flag clear
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(tag = "purpose", rename_all = "snake_case")]
+pub enum PortalDmKeyTap {
+    Create {
+        key: OperatorDmKeyId,
+        copy: OperatorDmCopyKeyId,
+        tap: serde_json::Value,
+    },
+    AddCopy {
+        copy: OperatorDmCopyKeyId,
+        tap: serde_json::Value,
+    },
+    Rotate {
+        key: OperatorDmKeyId,
+        tap: serde_json::Value,
+    },
+    RemoveCopy {
+        copy: OperatorDmCopyKeyId,
+        tap: serde_json::Value,
+    },
+}
+
+impl PortalDmKeyTap {
+    /// What the tap's bytes name
+    pub fn subject(&self) -> DmKeysSubject {
+        match self {
+            Self::Create { key, .. } => DmKeysSubject::Create(*key),
+            Self::AddCopy { copy, .. } => DmKeysSubject::AddCopy(*copy),
+            Self::Rotate { key, .. } => DmKeysSubject::Rotate(*key),
+            Self::RemoveCopy { copy, .. } => DmKeysSubject::RemoveCopy(*copy),
+        }
+    }
+
+    pub fn tap(&self) -> &serde_json::Value {
+        match self {
+            Self::Create { tap, .. }
+            | Self::AddCopy { tap, .. }
+            | Self::Rotate { tap, .. }
+            | Self::RemoveCopy { tap, .. } => tap,
+        }
+    }
+}
+
+/// The most wraps one request carries: one per generation (adding a copy)
+/// or per copy key (rotating). More are refused, never cut, so a poster
+/// with more generations than this can't add a copy key until a later
+/// slice lets old generations go
+pub const MAX_DM_KEY_WRAPS: usize = 256;
+
+/// Make the poster's first DM key generation and its first copy key, with
+/// the [`PortalDmKeyTap::Create`] tap's assertion; `wrap` names the ids the
+/// start drew. Answered with [`PortalDmKeys`]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PortalDmKeyCreateRequest {
+    pub action_id: OperatorActionId,
+    pub public: DmKeyPublic,
+    /// The new copy key's public key, derived from the tapping passkey's PRF
+    /// output
+    pub copy_public: PublicKeyHex,
+    pub wrap: DmKeyWrap,
+    /// `PublicKeyCredential.toJSON()` of the tap
+    pub assertion: serde_json::Value,
+}
+
+impl PortalDmKeyCreateRequest {
+    /// Why the request would be refused before its tap is checked, if it
+    /// would be
+    pub fn check(&self) -> Result<(), String> {
+        check_binding(&self.public)
+    }
+}
+
+/// Add a copy key for the passkey that taps, with the
+/// [`PortalDmKeyTap::AddCopy`] tap's assertion: `wraps` holds every
+/// generation wrapped to it, each once. Answered with [`PortalDmKeys`]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PortalDmCopyAddRequest {
+    pub action_id: OperatorActionId,
+    pub copy_public: PublicKeyHex,
+    pub wraps: Vec<DmKeyWrap>,
+    pub assertion: serde_json::Value,
+}
+
+impl PortalDmCopyAddRequest {
+    /// Why the request would be refused before its tap is checked, if it
+    /// would be: no wraps or too many, two of one generation, or wraps to
+    /// more than one copy key. Whether they are *every* generation is the
+    /// server's to check
+    pub fn check(&self) -> Result<(), String> {
+        check_wraps(&self.wraps, |w| w.key, "generation")?;
+        if self.wraps.windows(2).any(|w| w[0].copy != w[1].copy) {
+            return Err("every wrap must be to the one new copy key".to_owned());
+        }
+        Ok(())
+    }
+}
+
+/// Replace the live generation with a new one, with the
+/// [`PortalDmKeyTap::Rotate`] tap's assertion: `wraps` holds the new
+/// generation wrapped to every remaining copy key, each once. Answered with
+/// [`PortalDmKeys`]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PortalDmKeyRotateRequest {
+    pub action_id: OperatorActionId,
+    pub public: DmKeyPublic,
+    pub wraps: Vec<DmKeyWrap>,
+    pub assertion: serde_json::Value,
+}
+
+impl PortalDmKeyRotateRequest {
+    /// Why the request would be refused before its tap is checked, if it
+    /// would be: the binding, no wraps or too many, two to one copy key, or
+    /// wraps of more than one generation. Whether they cover *every*
+    /// remaining copy key is the server's to check
+    pub fn check(&self) -> Result<(), String> {
+        check_binding(&self.public)?;
+        check_wraps(&self.wraps, |w| w.copy, "copy key")?;
+        if self.wraps.windows(2).any(|w| w[0].key != w[1].key) {
+            return Err(
+                "every wrap must be of the one new generation".to_owned()
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Remove the copy key the [`PortalDmKeyTap::RemoveCopy`] tap named, with
+/// its wraps; the live generation is marked due for rotation. Answered with
+/// [`PortalDmKeys`]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PortalDmCopyRemoveRequest {
+    pub action_id: OperatorActionId,
+    pub assertion: serde_json::Value,
+}
+
+fn check_binding(public: &DmKeyPublic) -> Result<(), String> {
+    if public.binding_verifies() {
+        Ok(())
+    } else {
+        Err(
+            "the Ed25519 key's signature over the X25519 key does not verify"
+                .to_owned(),
+        )
+    }
+}
+
+fn check_wraps<K: Eq + std::hash::Hash>(
+    wraps: &[DmKeyWrap],
+    by: impl Fn(&DmKeyWrap) -> K,
+    what: &str,
+) -> Result<(), String> {
+    if wraps.is_empty() {
+        return Err("no wraps".to_owned());
+    }
+    if wraps.len() > MAX_DM_KEY_WRAPS {
+        return Err(format!(
+            "{} wraps, more than the {MAX_DM_KEY_WRAPS} one request carries; \
+             nothing was stored",
+            wraps.len()
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    if wraps.iter().any(|w| !seen.insert(by(w))) {
+        return Err(format!("two wraps for one {what}"));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -1686,6 +2159,293 @@ mod tests {
         assert!(refusal.contains("Nothing was marked"), "{refusal}");
     }
 
+    /// The DM key details (Track B) are tagged by their kinds, reach no
+    /// agent's view and carry no recipient count
+    #[test]
+    fn dm_key_details() {
+        let poster = AgentId::new();
+        for detail in [
+            OperatorActionDetail::DmKeyCreate {
+                poster,
+                key: OperatorDmKeyId::new(),
+                copy: OperatorDmCopyKeyId::new(),
+                passkey: OperatorPasskeyId::new(),
+            },
+            OperatorActionDetail::DmCopyAdd {
+                copy: OperatorDmCopyKeyId::new(),
+                copy_kind: DmCopyKind::Passkey,
+                passkey: Some(OperatorPasskeyId::new()),
+            },
+            OperatorActionDetail::DmCopyRemove {
+                copy: OperatorDmCopyKeyId::new(),
+                copy_kind: DmCopyKind::Passkey,
+                passkey: Some(OperatorPasskeyId::new()),
+                suspension: Some(OperatorActionId::new()),
+                rotation_due: vec![OperatorDmKeyId::new()],
+            },
+            OperatorActionDetail::DmKeyRotate {
+                poster,
+                key: OperatorDmKeyId::new(),
+                retired: OperatorDmKeyId::new(),
+            },
+        ] {
+            let json = serde_json::to_value(&detail).unwrap();
+            assert_eq!(json["kind"], detail.kind().to_string());
+            assert_eq!(
+                serde_json::from_value::<OperatorActionDetail>(json).unwrap(),
+                detail
+            );
+            assert_eq!(detail.recipient_count(), None);
+            let entry = OperatorLogEntry {
+                id: OperatorActionId::new(),
+                credential: None,
+                detail,
+                created_at: Utc::now(),
+            };
+            assert_eq!(entry.for_agent(&[]), None);
+        }
+    }
+
+    fn dm_public(seed: u8) -> DmKeyPublic {
+        let signing = crate::crypto::signing_key_from_bytes(&[seed; 32]);
+        let x = crate::envelope::EncryptionPublicKey::from(
+            &crate::envelope::EncryptionSecretKey::from([seed ^ 0xff; 32]),
+        );
+        DmKeyPublic {
+            x25519_public: PublicKeyHex::from(*x.as_bytes()),
+            ed25519_public: PublicKeyHex::from(
+                signing.verifying_key().to_bytes(),
+            ),
+            binding_signature: SignatureHex::from(
+                crate::envelope::sign_encryption_key(&signing, &x).to_bytes(),
+            ),
+        }
+    }
+
+    fn dm_wrap(key: OperatorDmKeyId, copy: OperatorDmCopyKeyId) -> DmKeyWrap {
+        let wrapped = || {
+            WrappedDmPrivateKey::try_from(vec![
+                0xab;
+                crate::dm_key::MIN_WRAPPED_LEN
+            ])
+            .unwrap()
+        };
+        DmKeyWrap {
+            key,
+            copy,
+            ephemeral_public: PublicKeyHex::from([1; 32]),
+            iv: DmKeyWrapIv::from([2; crate::dm_key::IV_LEN]),
+            wrapped_x25519: wrapped(),
+            wrapped_ed25519: wrapped(),
+        }
+    }
+
+    /// The DM key routes' wire: the start and its answer tagged by the
+    /// 0x14 purpose's own names, the subject fixed by the answer's ids,
+    /// unknown fields refused, wrapped keys of the wrong length refused
+    #[test]
+    fn portal_dm_key_wire() {
+        let passkey = OperatorPasskeyId::new();
+        let copy = OperatorDmCopyKeyId::new();
+        let key = OperatorDmKeyId::new();
+        let starts = [
+            PortalDmKeyStart::Create {},
+            PortalDmKeyStart::AddCopy { passkey },
+            PortalDmKeyStart::Rotate {},
+            PortalDmKeyStart::RemoveCopy { copy },
+        ];
+        let tap = serde_json::json!({"challenge": "x"});
+        let taps = [
+            PortalDmKeyTap::Create {
+                key,
+                copy,
+                tap: tap.clone(),
+            },
+            PortalDmKeyTap::AddCopy {
+                copy,
+                tap: tap.clone(),
+            },
+            PortalDmKeyTap::Rotate {
+                key,
+                tap: tap.clone(),
+            },
+            PortalDmKeyTap::RemoveCopy {
+                copy,
+                tap: tap.clone(),
+            },
+        ];
+        for ((start, answer), purpose) in
+            starts.iter().zip(&taps).zip(DmKeysPurpose::ALL)
+        {
+            let name = serde_json::to_value(purpose).unwrap();
+            let json = serde_json::to_value(start).unwrap();
+            assert_eq!(json["purpose"], name);
+            assert_eq!(start.purpose(), purpose);
+            assert_eq!(
+                serde_json::from_value::<PortalDmKeyStart>(json).unwrap(),
+                *start
+            );
+            let json = serde_json::to_value(answer).unwrap();
+            assert_eq!(json["purpose"], name);
+            assert_eq!(answer.subject().purpose(), purpose);
+            assert_eq!(answer.tap(), &tap);
+            assert_eq!(
+                &serde_json::from_value::<PortalDmKeyTap>(json).unwrap(),
+                answer
+            );
+        }
+        assert_eq!(taps[0].subject(), DmKeysSubject::Create(key));
+        assert_eq!(taps[3].subject(), DmKeysSubject::RemoveCopy(copy));
+        for bad in [
+            serde_json::json!({"purpose": "create", "x": 1}),
+            serde_json::json!({"purpose": "add_copy"}),
+            serde_json::json!({"purpose": "replace"}),
+        ] {
+            assert!(
+                serde_json::from_value::<PortalDmKeyStart>(bad.clone())
+                    .is_err(),
+                "{bad}"
+            );
+        }
+
+        // A wrapped key: hex, refused outside its lengths
+        let wrap = dm_wrap(key, copy);
+        let json = serde_json::to_value(&wrap).unwrap();
+        assert_eq!(
+            serde_json::from_value::<DmKeyWrap>(json.clone()).unwrap(),
+            wrap
+        );
+        for len in [
+            crate::dm_key::MIN_WRAPPED_LEN - 1,
+            crate::dm_key::MAX_WRAPPED_LEN + 1,
+        ] {
+            let mut bad = json.clone();
+            bad["wrapped_x25519"] = hex::encode(vec![0; len]).into();
+            let err = serde_json::from_value::<DmKeyWrap>(bad)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(&format!("got {len}")), "{err}");
+        }
+        let mut bad = json;
+        bad["iv"] = "00".into();
+        assert!(serde_json::from_value::<DmKeyWrap>(bad).is_err());
+
+        // A copy key's opener carries its kind
+        let opener = DmCopyOpener::Passkey { passkey };
+        assert_eq!(
+            serde_json::to_value(opener).unwrap(),
+            serde_json::json!({"kind": "passkey", "passkey": passkey})
+        );
+        assert_eq!(opener.kind(), DmCopyKind::Passkey);
+        assert_eq!(
+            serde_json::to_value(DmCopyOpener::RecoveryWords).unwrap(),
+            serde_json::json!({"kind": "recovery_words"})
+        );
+        assert_eq!(
+            DmCopyOpener::RecoveryWords.kind(),
+            DmCopyKind::RecoveryWords
+        );
+    }
+
+    /// What the DM key requests refuse before their taps: a binding that
+    /// doesn't verify, no wraps, too many (refused, never cut), two for one
+    /// target, or wraps that disagree on the one they share
+    #[test]
+    fn portal_dm_key_checks() {
+        let assertion = serde_json::json!({"id": "abc"});
+        let public = dm_public(5);
+        assert!(public.binding_verifies());
+        let mut swapped = public.clone();
+        swapped.x25519_public = dm_public(6).x25519_public;
+        assert!(!swapped.binding_verifies());
+        let mut off_curve = public.clone();
+        off_curve.ed25519_public = PublicKeyHex::from([0xff; 32]);
+        assert!(!off_curve.binding_verifies());
+
+        let key = OperatorDmKeyId::new();
+        let copy = OperatorDmCopyKeyId::new();
+        let create = PortalDmKeyCreateRequest {
+            action_id: OperatorActionId::new(),
+            public: public.clone(),
+            copy_public: PublicKeyHex::from([3; 32]),
+            wrap: dm_wrap(key, copy),
+            assertion: assertion.clone(),
+        };
+        assert_eq!(create.check(), Ok(()));
+        let json = serde_json::to_value(&create).unwrap();
+        assert_eq!(
+            serde_json::from_value::<PortalDmKeyCreateRequest>(json.clone())
+                .unwrap(),
+            create
+        );
+        let mut extra = json;
+        extra["x"] = 1.into();
+        assert!(
+            serde_json::from_value::<PortalDmKeyCreateRequest>(extra).is_err()
+        );
+        let bad = PortalDmKeyCreateRequest {
+            public: swapped.clone(),
+            ..create
+        };
+        assert!(bad.check().unwrap_err().contains("does not verify"));
+
+        let keys: Vec<OperatorDmKeyId> =
+            (0..3).map(|_| OperatorDmKeyId::new()).collect();
+        let mut add = PortalDmCopyAddRequest {
+            action_id: OperatorActionId::new(),
+            copy_public: PublicKeyHex::from([3; 32]),
+            wraps: keys.iter().map(|k| dm_wrap(*k, copy)).collect(),
+            assertion: assertion.clone(),
+        };
+        assert_eq!(add.check(), Ok(()));
+        add.wraps.push(dm_wrap(keys[0], copy));
+        assert!(add.check().unwrap_err().contains("two wraps"));
+        add.wraps.pop();
+        add.wraps
+            .push(dm_wrap(OperatorDmKeyId::new(), OperatorDmCopyKeyId::new()));
+        assert!(add.check().unwrap_err().contains("one new copy key"));
+        add.wraps.clear();
+        assert_eq!(add.check(), Err("no wraps".to_owned()));
+        add.wraps = (0..=MAX_DM_KEY_WRAPS)
+            .map(|_| dm_wrap(OperatorDmKeyId::new(), copy))
+            .collect();
+        let refusal = add.check().unwrap_err();
+        assert!(refusal.contains("257 wraps"), "{refusal}");
+        assert!(refusal.contains("nothing was stored"), "{refusal}");
+
+        let copies: Vec<OperatorDmCopyKeyId> =
+            (0..3).map(|_| OperatorDmCopyKeyId::new()).collect();
+        let mut rotate = PortalDmKeyRotateRequest {
+            action_id: OperatorActionId::new(),
+            public,
+            wraps: copies.iter().map(|c| dm_wrap(key, *c)).collect(),
+            assertion: assertion.clone(),
+        };
+        assert_eq!(rotate.check(), Ok(()));
+        rotate
+            .wraps
+            .push(dm_wrap(OperatorDmKeyId::new(), OperatorDmCopyKeyId::new()));
+        assert!(rotate.check().unwrap_err().contains("one new generation"));
+        rotate.wraps.pop();
+        rotate.wraps.push(dm_wrap(key, copies[1]));
+        assert!(
+            rotate
+                .check()
+                .unwrap_err()
+                .contains("two wraps for one copy key")
+        );
+        rotate.wraps.pop();
+        rotate.public = swapped;
+        assert!(rotate.check().is_err());
+
+        let remove = serde_json::json!({
+            "action_id": OperatorActionId::new(), "assertion": assertion,
+        });
+        let req: PortalDmCopyRemoveRequest =
+            serde_json::from_value(remove.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&req).unwrap(), remove);
+    }
+
     /// The operator's agent list tells its operator poster apart; an
     /// agent's entry is unchanged on the wire (0.160)
     #[test]
@@ -1720,6 +2480,13 @@ mod tests {
             crate::responses::inline_schema_for::<PortalMarkReadRequest>(),
             crate::responses::inline_schema_for::<PortalMarkReadResponse>(),
             crate::responses::inline_schema_for::<OperatorLogEntry>(),
+            crate::responses::inline_schema_for::<PortalDmKeys>(),
+            crate::responses::inline_schema_for::<PortalDmKeyStart>(),
+            crate::responses::inline_schema_for::<PortalDmKeyTap>(),
+            crate::responses::inline_schema_for::<PortalDmKeyCreateRequest>(),
+            crate::responses::inline_schema_for::<PortalDmCopyAddRequest>(),
+            crate::responses::inline_schema_for::<PortalDmKeyRotateRequest>(),
+            crate::responses::inline_schema_for::<PortalDmCopyRemoveRequest>(),
         ] {
             let text = schema.to_string();
             assert!(!text.contains("$ref"), "{text}");
