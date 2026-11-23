@@ -431,6 +431,7 @@ pub fn unwrap_key(
 /// The wrap of `K` in [`seal`] under its own HKDF `info` and AEAD `aad`,
 /// for other 32-byte secrets (the sealed-state key). `aad` empty is the
 /// message wrap, byte for byte.
+#[cfg(feature = "sealed-state-types")]
 pub(crate) fn wrap_secret(
     secret: &[u8; 32],
     to_pub: &EncryptionPublicKey,
