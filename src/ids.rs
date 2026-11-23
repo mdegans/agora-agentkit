@@ -613,6 +613,13 @@ define_id! {
 }
 
 define_id! {
+    /// A check window (`operator_check_windows`): opened by a passkey check,
+    /// tied to that passkey and the client's network (agora
+    /// `docs/design-operator-posting.md`, *One rule for the web and the CLI*)
+    OperatorCheckWindowId
+}
+
+define_id! {
     /// A row of `state_entries`: one entry of an agent's sealed-state chain
     /// (0.147)
     StateEntryId
@@ -629,85 +636,120 @@ define_id! {
     SealedStateDeletionId
 }
 
-/// A WebAuthn credential id: the authenticator's identifier for one
-/// credential, 16 to 1023 bytes, unique across the site
-/// (`operator_passkeys.credential_id`) (0.74)
-#[derive(Clone, PartialEq, Eq, Hash)]
-#[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
-#[cfg_attr(feature = "sqlx", sqlx(transparent))]
-pub struct PasskeyCredentialId(Vec<u8>);
-
-impl PasskeyCredentialId {
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
+/// A byte string outside the lengths its type allows
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("{type_name} is {min} to {max} bytes, got {got}")]
+pub struct ByteLengthError {
+    pub type_name: &'static str,
+    pub min: usize,
+    pub max: usize,
+    pub got: usize,
 }
 
-impl From<Vec<u8>> for PasskeyCredentialId {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-}
+/// A variable-length byte string, hex on the wire, whose length must be in
+/// `$len`: refused outside it, never cut. Written lowercase; either case is
+/// read, as the crate's other hex types (`govlog::hex_bytes!`) read it
+macro_rules! ranged_hex_bytes {
+    ($(#[$meta:meta])* $name:ident, $len:expr, $what:literal) => {
+        $(#[$meta])*
+        #[derive(Clone, PartialEq, Eq, Hash)]
+        pub struct $name(Vec<u8>);
 
-impl std::fmt::Debug for PasskeyCredentialId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "PasskeyCredentialId({})", hex::encode(&self.0))
-    }
-}
+        impl $name {
+            /// The lengths it may have, in bytes
+            pub const LEN: std::ops::RangeInclusive<usize> = $len;
 
-impl PasskeyCredentialId {
-    /// WebAuthn's bounds on a credential id's length
-    pub const LEN: std::ops::RangeInclusive<usize> = 16..=1023;
-}
-
-/// Lowercase hex on the wire, as the crate's other byte strings; refused
-/// outside [`PasskeyCredentialId::LEN`]. WebAuthn's JSON forms
-/// (`allowCredentials[].id`, `evalByCredential`'s keys, an assertion's
-/// `rawId`) are base64url without padding, so the page converts both ways
-impl Serialize for PasskeyCredentialId {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&hex::encode(&self.0))
-    }
-}
-
-impl<'de> Deserialize<'de> for PasskeyCredentialId {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        d: D,
-    ) -> Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
-        if !Self::LEN.contains(&bytes.len()) {
-            return Err(serde::de::Error::custom(format!(
-                "a passkey credential id is {} to {} bytes, got {}",
-                Self::LEN.start(),
-                Self::LEN.end(),
-                bytes.len()
-            )));
+            pub fn as_bytes(&self) -> &[u8] {
+                &self.0
+            }
         }
-        Ok(Self(bytes))
-    }
+
+        impl TryFrom<Vec<u8>> for $name {
+            type Error = $crate::ids::ByteLengthError;
+
+            fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
+                if Self::LEN.contains(&bytes.len()) {
+                    Ok(Self(bytes))
+                } else {
+                    Err($crate::ids::ByteLengthError {
+                        type_name: stringify!($name),
+                        min: *Self::LEN.start(),
+                        max: *Self::LEN.end(),
+                        got: bytes.len(),
+                    })
+                }
+            }
+        }
+
+        impl std::fmt::Debug for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}({})", stringify!($name), hex::encode(&self.0))
+            }
+        }
+
+        impl serde::Serialize for $name {
+            fn serialize<S: serde::Serializer>(
+                &self,
+                s: S,
+            ) -> Result<S::Ok, S::Error> {
+                s.serialize_str(&hex::encode(&self.0))
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(
+                d: D,
+            ) -> Result<Self, D::Error> {
+                let s = <String as serde::Deserialize>::deserialize(d)?;
+                let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+                Self::try_from(bytes).map_err(serde::de::Error::custom)
+            }
+        }
+
+        // Hand-written, inline: a derived schema becomes a `$ref` (see
+        // `define_id!`)
+        #[cfg(feature = "schemars")]
+        impl schemars::JsonSchema for $name {
+            fn inline_schema() -> bool {
+                true
+            }
+
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                std::borrow::Cow::Borrowed(stringify!($name))
+            }
+
+            fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                schemars::json_schema!({
+                    "type": "string",
+                    "minLength": Self::LEN.start() * 2,
+                    "maxLength": Self::LEN.end() * 2,
+                    "description": format!(
+                        "{}: {} to {} bytes in hex, written lowercase (either case is read)",
+                        $what,
+                        Self::LEN.start(),
+                        Self::LEN.end()
+                    ),
+                })
+            }
+        }
+    };
 }
 
-// Hand-written, inline: a derived schema becomes a `$ref` (see `define_id!`)
-#[cfg(feature = "schemars")]
-impl schemars::JsonSchema for PasskeyCredentialId {
-    fn inline_schema() -> bool {
-        true
-    }
+pub(crate) use ranged_hex_bytes;
 
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("PasskeyCredentialId")
-    }
-
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        schemars::json_schema!({
-            "type": "string",
-            "minLength": Self::LEN.start() * 2,
-            "maxLength": Self::LEN.end() * 2,
-            "description": "A WebAuthn credential id, lowercase hex",
-        })
-    }
-}
+ranged_hex_bytes!(
+    /// A WebAuthn credential id: the authenticator's identifier for one
+    /// credential, 16 to 1023 bytes (WebAuthn's bounds), unique across the
+    /// site (`operator_passkeys.credential_id`) (0.74). WebAuthn's JSON
+    /// forms (`allowCredentials[].id`, `evalByCredential`'s keys, an
+    /// assertion's `rawId`) are base64url without padding, so the page
+    /// converts both ways
+    #[cfg_attr(feature = "sqlx", derive(sqlx::Type))]
+    #[cfg_attr(feature = "sqlx", sqlx(transparent))]
+    PasskeyCredentialId,
+    16..=1023,
+    "A WebAuthn credential id"
+);
 
 /// An operator's WebAuthn user handle (`operators.webauthn_user_handle`):
 /// random bytes chosen at the first enrolment, which authenticators store
@@ -3380,9 +3422,23 @@ mod tests {
     fn byte_ids_debug() {
         let handle = WebAuthnUserHandle::from(vec![7; 64]);
         assert_eq!(format!("{handle:?}"), "WebAuthnUserHandle(..)");
-        let credential = PasskeyCredentialId::from(vec![0xab; 2]);
-        assert_eq!(format!("{credential:?}"), "PasskeyCredentialId(abab)");
-        assert_eq!(credential.as_bytes(), &[0xab, 0xab]);
+        let credential = PasskeyCredentialId::try_from(vec![0xab; 16]).unwrap();
+        assert_eq!(
+            format!("{credential:?}"),
+            format!("PasskeyCredentialId({})", "ab".repeat(16))
+        );
+        assert_eq!(credential.as_bytes(), &[0xab; 16]);
+        // Outside WebAuthn's bounds, refused, never cut
+        assert_eq!(
+            PasskeyCredentialId::try_from(vec![0xab; 15]).unwrap_err(),
+            ByteLengthError {
+                type_name: "PasskeyCredentialId",
+                min: 16,
+                max: 1023,
+                got: 15
+            }
+        );
+        assert!(PasskeyCredentialId::try_from(vec![0; 1024]).is_err());
     }
 
     #[test]

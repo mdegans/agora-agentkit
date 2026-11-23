@@ -10,9 +10,9 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::ids::{
-    AgentId, MessageId, OAuthClientId, OperatorActionId, OperatorCredentialId,
-    OperatorDmCopyKeyId, OperatorDmKeyId, OperatorEmailAddressId,
-    OperatorEnrolmentId, OperatorId, OperatorPasskeyId,
+    AgentId, MessageId, OAuthClientId, OperatorActionId, OperatorCheckWindowId,
+    OperatorCredentialId, OperatorDmCopyKeyId, OperatorDmKeyId,
+    OperatorEmailAddressId, OperatorEnrolmentId, OperatorId, OperatorPasskeyId,
     OperatorPendingChangeId, OperatorRecoveryCaseId,
 };
 
@@ -55,11 +55,16 @@ pub enum TapKind {
     /// The operator poster's DM keys: made, a copy added or removed, or
     /// rotated
     DmKeys = 0x14,
+    /// Opening a check window on the web (agora
+    /// `docs/design-operator-posting.md`, *One rule for the web and the
+    /// CLI*). Built for the web only: the command line opens one with its
+    /// own assertion (`signing::poster_cli`), never with this tap
+    OpenWindow = 0x15,
 }
 
 impl TapKind {
     /// Every kind still produced, by tag
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Send,
         Self::OAuthConsent,
         Self::EnrolmentApproval,
@@ -78,6 +83,7 @@ impl TapKind {
         Self::PasskeyAdd,
         Self::PortalMessage,
         Self::DmKeys,
+        Self::OpenWindow,
     ];
 
     pub const fn tag(self) -> u8 {
@@ -295,6 +301,21 @@ pub enum Approval {
         operator: OperatorId,
         subject: DmKeysSubject,
     },
+    /// 0x15: a check window on the web, for the passkey that taps: the
+    /// operator, and the window's id, which the server draws when the tap
+    /// starts (as 0x14 binds the generation id it draws). The ceremony is
+    /// keyed by the session and consumed when the tap finishes. The bytes
+    /// bind no network: the start's [`ClientNet`] is kept in the ceremony's
+    /// state, and a tap from another is refused with `network_changed`. A
+    /// digest of an IPv4 address can be reversed by trying them all, so it
+    /// stays out of anything stored. No surface byte either, since only the
+    /// web taps
+    ///
+    /// [`ClientNet`]: super::ClientNet
+    OpenWindow {
+        operator: OperatorId,
+        window: OperatorCheckWindowId,
+    },
 }
 
 fn uuid_bytes(id: impl Into<uuid::Uuid>) -> [u8; 16] {
@@ -322,6 +343,7 @@ impl Approval {
             Self::PasskeyAdd { .. } => TapKind::PasskeyAdd,
             Self::PortalMessage { .. } => TapKind::PortalMessage,
             Self::DmKeys { .. } => TapKind::DmKeys,
+            Self::OpenWindow { .. } => TapKind::OpenWindow,
         }
     }
 
@@ -416,6 +438,10 @@ impl Approval {
                 out.extend(uuid_bytes(*operator));
                 out.push(subject.purpose().tag());
                 subject.bytes(&mut out);
+            }
+            Self::OpenWindow { operator, window } => {
+                out.extend(uuid_bytes(*operator));
+                out.extend(uuid_bytes(*window));
             }
         }
         out
@@ -551,6 +577,10 @@ mod tests {
                 operator: id(A),
                 subject: DmKeysSubject::AddCopy(id(B)),
             },
+            Approval::OpenWindow {
+                operator: id(A),
+                window: id(B),
+            },
         ]
     }
 
@@ -561,12 +591,12 @@ mod tests {
             tags,
             [
                 1, 2, 3, 4, 6, 8, 9, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-                0x11, 0x12, 0x13, 0x14
+                0x11, 0x12, 0x13, 0x14, 0x15
             ]
         );
         assert_eq!(TapKind::from_tag(0x07), None);
         assert_eq!(TapKind::from_tag(0x00), None);
-        assert_eq!(TapKind::from_tag(0x15), None);
+        assert_eq!(TapKind::from_tag(0x16), None);
         // 0x05 still reads, so stored assertions do, and isn't produced
         let retired = TapKind::from_tag(0x05).unwrap();
         assert!(retired.is_retired() && !TapKind::ALL.contains(&retired));
@@ -607,6 +637,7 @@ mod tests {
                 1 + 16,
                 1 + 16 + 16,
                 1 + 16 + 1 + 16,
+                1 + 16 + 16,
             ]
         );
     }
@@ -690,7 +721,7 @@ mod tests {
     }
 
     /// Computed independently (Python `hashlib`) from the spec's table
-    const VECTORS: [&str; 18] = [
+    const VECTORS: [&str; 19] = [
         "e417deb6abe94bb74037918fb0f749e401b58c3b282b206c96963217826c3435",
         "a4304de3920dfbb53406abda4991fa100f08578a65fd37a361de8364bf438940",
         "b55e306e201216cb476830ef7bada806c0e1f97ae49cca4b50aeb8989d0bddde",
@@ -709,6 +740,7 @@ mod tests {
         "1b8688cf24d1c7db7b53257c3d9b51ffbde4658f67f57486a148f1ebfad9ec8f",
         "2dde0a214a02d679163541709f56c1abd88d2fbe0a1c2ec6b2f621580034eb3e",
         "e6f3e3e64fcb22577e14248e151b5c3f624b7b86e602d2558f15fecb38e7794f",
+        "6a924fcc4deef0ccac1bac0ee1ee65a860ff91b6979df54efbe829febc7edbea",
     ];
 
     /// 0x14's bytes: operator id ‖ purpose ‖ subject id, then for a new
@@ -796,5 +828,31 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["create", "add_copy", "rotate", "remove_copy"]);
+    }
+
+    /// 0x15's bytes: the operator id and the window id the start drew,
+    /// pinned (Python `hashlib`)
+    #[test]
+    fn open_window_bytes() {
+        let operator: OperatorId = id(A);
+        let window: OperatorCheckWindowId = id(B);
+        let approval = Approval::OpenWindow { operator, window };
+        let bytes = approval.canonical_bytes();
+        assert_eq!(bytes[0], 0x15);
+        assert_eq!(&bytes[1..17], &uuid_bytes(operator));
+        assert_eq!(&bytes[17..], &uuid_bytes(window));
+        let mut preimage = CONTEXT.to_vec();
+        preimage.extend(NONCE);
+        preimage.extend(bytes);
+        assert_eq!(
+            hex::encode(sha256(&preimage)),
+            "6a924fcc4deef0ccac1bac0ee1ee65a860ff91b6979df54efbe829febc7edbea"
+        );
+        // Another window is another challenge
+        let other = Approval::OpenWindow {
+            operator,
+            window: OperatorCheckWindowId::new(),
+        };
+        assert_ne!(approval.challenge(&NONCE), other.challenge(&NONCE));
     }
 }

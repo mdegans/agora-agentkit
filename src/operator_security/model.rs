@@ -10,6 +10,7 @@ use super::tap::{
     Delivery, FactorKind, PasskeyClass, Reach, TapLevel, WindowMessage,
     bulk_hold_floor,
 };
+use super::window::Tier;
 use crate::ids::{
     AgentId, OAuthClientId, OperatorActionId, OperatorCredentialId,
     OperatorEmailAddressId, OperatorEnrolmentId, OperatorFreezeLinkId,
@@ -928,6 +929,11 @@ impl AccountState {
             .any(|f| f.state.is_active() && f.kind.is_software_key())
     }
 
+    /// The account's [`Tier`], by `count`
+    pub fn tier(&self) -> Tier {
+        Tier::of(self.count)
+    }
+
     /// `min5(A)`
     pub fn min5(&self) -> bool {
         self.contact_ok() && self.devices() >= 2 && self.no_soft()
@@ -940,8 +946,8 @@ impl AccountState {
 
     /// `restricted(A)`: each flag gates its own part of the minimum
     pub fn restricted(&self) -> bool {
-        let above5 = self.count > 5;
-        let above50 = self.count > 50;
+        let above5 = self.tier() > Tier::UpTo5;
+        let above50 = self.tier() > Tier::UpTo50;
         (above5 && self.flags.tier && !self.no_soft())
             || (above5
                 && self.flags.minimum

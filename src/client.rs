@@ -28,7 +28,7 @@ use crate::requests::{
     GetCouncilMeetingsInput, GetDashboardInput, GetDashboardRequest,
     GetFeedInput, GetFriendsInput, GetGovernanceLogInput, GetInboxInput,
     GetMyModerationRecordInput, GetProposalsInput, ManageBlockInput,
-    ManageFriendshipInput, NoParams, RegisterEncryptionKeyPayload,
+    ManageFriendshipInput, NoParams, Proof, RegisterEncryptionKeyPayload,
     RegisterEncryptionKeyRequest, ReportMessageBody, ReportMessageInput,
     RequestContactPayload, RequestContactRequest, SearchInput,
     SendMessageInput, SendMessagePayload, SendMessageRequest, SignedRequest,
@@ -551,7 +551,7 @@ impl Client {
         let body = SendMessageRequest {
             agent_id,
             payload,
-            signature: sign_hex(key, &bytes, timestamp),
+            proof: sign_proof(key, &bytes, timestamp),
             timestamp,
         };
         let url = self.url("api/social/messages")?;
@@ -639,7 +639,7 @@ impl Client {
         let body = SendMessageRequest {
             agent_id,
             payload,
-            signature: sign_hex(key, &bytes, timestamp),
+            proof: sign_proof(key, &bytes, timestamp),
             timestamp,
         };
         let url = self.url("api/social/messages")?;
@@ -688,7 +688,7 @@ impl Client {
         let body = RegisterEncryptionKeyRequest {
             agent_id,
             payload,
-            signature: sign_hex(key, &bytes, timestamp),
+            proof: sign_proof(key, &bytes, timestamp),
             timestamp,
         };
         let url = self.url("api/social/encryption_key")?;
@@ -1944,9 +1944,15 @@ fn signed<P>(
     SignedRequest {
         agent_id,
         payload,
-        signature: sign_hex(key, &action.canonical_bytes(), timestamp),
+        proof: sign_proof(key, &action.canonical_bytes(), timestamp),
         timestamp,
     }
+}
+
+/// An agent's [`Proof`] over `payload` bytes with `timestamp` (see
+/// [`crypto::sign`])
+fn sign_proof(key: &SigningKey, payload: &[u8], timestamp: i64) -> Proof {
+    Proof::Signature(crypto::sign(key, payload, timestamp).into())
 }
 
 /// Sign `payload` bytes with `timestamp` (see [`crypto::sign`]), hex-encoded
@@ -2212,14 +2218,15 @@ mod tests {
         let body = GetDashboardRequest {
             agent_id: AgentId::new(),
             payload: GetDashboardInput::default(),
-            signature: sign_hex(&key, &bytes, timestamp),
+            proof: sign_proof(&key, &bytes, timestamp),
             timestamp,
         };
         let json = serde_json::to_value(&body).unwrap();
         let back: GetDashboardRequest = serde_json::from_value(json).unwrap();
-        let sig: [u8; 64] =
-            hex::decode(&back.signature).unwrap().try_into().unwrap();
-        let sig = ed25519_dalek::Signature::from_bytes(&sig);
+        let crate::requests::Proof::Signature(sig) = &back.proof else {
+            panic!("an agent signs");
+        };
+        let sig = ed25519_dalek::Signature::from(sig);
         assert!(verify(&verifying, &bytes, back.timestamp, &sig));
     }
 
