@@ -128,9 +128,9 @@ pub const CLOCK_SKEW: Duration = Duration::seconds(30);
 ///
 /// Some addresses share a network that isn't one. IPv6 loopback (`::1`),
 /// unspecified (`::`) and the deprecated IPv4-compatible addresses
-/// (`::a.b.c.d`) all fall in `::/64`; [`Self::is_routable`] says no to them
-/// and to IPv4 loopback and `0.0.0.0/8`, and the server refuses to open a
-/// window from one in production. A translator in front of the proxy (NAT64,
+/// (`::a.b.c.d`) all fall in `::/64`; [`Self::is_routable`] says no to them,
+/// to IPv4 loopback and `0.0.0.0/8`, and to link-local addresses, and the
+/// server refuses to open a window from one in production. A translator in front of the proxy (NAT64,
 /// Teredo, a carrier-grade NAT) puts many clients on one network, which a
 /// window can't tell apart: the passkey and the cookie are what tie it to a
 /// device
@@ -166,12 +166,24 @@ impl ClientNet {
         Self::of(ip) == *self
     }
 
-    /// Not loopback, unspecified, or (IPv6) anything in `::/64`: a network a
-    /// real client could be on
+    /// A network a real client could reach the proxy from: not loopback
+    /// (`127.0.0.0/8`), unspecified or `0.0.0.0/8`, link-local
+    /// (`169.254.0.0/16`, `fe80::/10`), nor anything in `::/64`. It is not
+    /// "public": private ranges (`10/8`, `172.16/12`, `192.168/16`,
+    /// `fc00::/7`) pass, since a client on the same LAN as the server is
+    /// real. It knows nothing of the server's own trusted proxies: W2 must
+    /// also refuse to open a window from an address its trusted-proxy set
+    /// (`AGORA_TRUSTED_PROXIES`) contains, since that means the client's
+    /// own address was lost on the way
     pub fn is_routable(&self) -> bool {
         match self {
-            Self::V4(v4) => !v4.is_loopback() && v4.octets()[0] != 0,
-            Self::V6(prefix) => *prefix != [0; 8],
+            Self::V4(v4) => {
+                !v4.is_loopback() && !v4.is_link_local() && v4.octets()[0] != 0
+            }
+            Self::V6(prefix) => {
+                *prefix != [0; 8]
+                    && !(prefix[0] == 0xfe && prefix[1] & 0xc0 == 0x80)
+            }
         }
     }
 
@@ -304,7 +316,12 @@ impl CheckWindow {
 
     /// Whether a request from `ip` at `now` may use it. `Ok` carries the
     /// tier to store as `strictest`; `Err` why it ends. A lapse is reported
-    /// before a change of network, since it happened first
+    /// before a change of network, since it happened first.
+    ///
+    /// The returned tier must be stored on every admitted check, not only
+    /// with the throttled `last_used_at` write, and written as the greater
+    /// of the stored and the new value (`GREATEST`; the Postgres enum sorts
+    /// as `Tier` does), so concurrent checks can't lower it
     pub fn check(
         &self,
         tier: Tier,
@@ -458,10 +475,22 @@ mod tests {
             "127.0.0.1",
             "127.8.9.10",
             "0.0.0.0",
+            "169.254.1.2",
+            "fe80::1",
+            "febf::1",
         ] {
             assert!(!ClientNet::of(ip(not)).is_routable(), "{not}");
         }
-        for real in ["203.0.113.7", "2001:db8:1:2::1", "::ffff:203.0.113.7"] {
+        // Not "public": private ranges pass
+        for real in [
+            "203.0.113.7",
+            "2001:db8:1:2::1",
+            "::ffff:203.0.113.7",
+            "192.168.1.2",
+            "10.0.0.1",
+            "fd00::1",
+            "fec0::1",
+        ] {
             assert!(ClientNet::of(ip(real)).is_routable(), "{real}");
         }
     }

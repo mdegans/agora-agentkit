@@ -10,9 +10,9 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
 use crate::ids::{
-    AgentId, MessageId, OAuthClientId, OperatorActionId, OperatorCredentialId,
-    OperatorDmCopyKeyId, OperatorDmKeyId, OperatorEmailAddressId,
-    OperatorEnrolmentId, OperatorId, OperatorPasskeyId,
+    AgentId, MessageId, OAuthClientId, OperatorActionId, OperatorCheckWindowId,
+    OperatorCredentialId, OperatorDmCopyKeyId, OperatorDmKeyId,
+    OperatorEmailAddressId, OperatorEnrolmentId, OperatorId, OperatorPasskeyId,
     OperatorPendingChangeId, OperatorRecoveryCaseId,
 };
 
@@ -301,15 +301,21 @@ pub enum Approval {
         operator: OperatorId,
         subject: DmKeysSubject,
     },
-    /// 0x15: a check window on the web, for the passkey that taps. The
-    /// bytes bind no network: the start's [`ClientNet`] is kept in the
-    /// ceremony's state, and a tap from another is refused with
-    /// `network_changed`. A digest of an IPv4 address can be reversed by
-    /// trying them all, so it stays out of anything stored. No surface byte
-    /// either, since only the web taps
+    /// 0x15: a check window on the web, for the passkey that taps: the
+    /// operator, and the window's id, which the server draws when the tap
+    /// starts (as 0x14 binds the generation id it draws). The ceremony is
+    /// keyed by the session and consumed when the tap finishes. The bytes
+    /// bind no network: the start's [`ClientNet`] is kept in the ceremony's
+    /// state, and a tap from another is refused with `network_changed`. A
+    /// digest of an IPv4 address can be reversed by trying them all, so it
+    /// stays out of anything stored. No surface byte either, since only the
+    /// web taps
     ///
     /// [`ClientNet`]: super::ClientNet
-    OpenWindow { operator: OperatorId },
+    OpenWindow {
+        operator: OperatorId,
+        window: OperatorCheckWindowId,
+    },
 }
 
 fn uuid_bytes(id: impl Into<uuid::Uuid>) -> [u8; 16] {
@@ -433,7 +439,10 @@ impl Approval {
                 out.push(subject.purpose().tag());
                 subject.bytes(&mut out);
             }
-            Self::OpenWindow { operator } => out.extend(uuid_bytes(*operator)),
+            Self::OpenWindow { operator, window } => {
+                out.extend(uuid_bytes(*operator));
+                out.extend(uuid_bytes(*window));
+            }
         }
         out
     }
@@ -568,7 +577,10 @@ mod tests {
                 operator: id(A),
                 subject: DmKeysSubject::AddCopy(id(B)),
             },
-            Approval::OpenWindow { operator: id(A) },
+            Approval::OpenWindow {
+                operator: id(A),
+                window: id(B),
+            },
         ]
     }
 
@@ -625,7 +637,7 @@ mod tests {
                 1 + 16,
                 1 + 16 + 16,
                 1 + 16 + 1 + 16,
-                1 + 16,
+                1 + 16 + 16,
             ]
         );
     }
@@ -728,7 +740,7 @@ mod tests {
         "1b8688cf24d1c7db7b53257c3d9b51ffbde4658f67f57486a148f1ebfad9ec8f",
         "2dde0a214a02d679163541709f56c1abd88d2fbe0a1c2ec6b2f621580034eb3e",
         "e6f3e3e64fcb22577e14248e151b5c3f624b7b86e602d2558f15fecb38e7794f",
-        "1bf09b5288d961499e5824b60fb4539b0f23da7723a6ddab2c78ed2031efd7f8",
+        "6a924fcc4deef0ccac1bac0ee1ee65a860ff91b6979df54efbe829febc7edbea",
     ];
 
     /// 0x14's bytes: operator id ‖ purpose ‖ subject id, then for a new
@@ -818,25 +830,29 @@ mod tests {
         assert_eq!(names, ["create", "add_copy", "rotate", "remove_copy"]);
     }
 
-    /// 0x15's bytes: the operator id alone, pinned (Python `hashlib`); not
-    /// 0x12's, though both name only the operator
+    /// 0x15's bytes: the operator id and the window id the start drew,
+    /// pinned (Python `hashlib`)
     #[test]
     fn open_window_bytes() {
         let operator: OperatorId = id(A);
-        let approval = Approval::OpenWindow { operator };
+        let window: OperatorCheckWindowId = id(B);
+        let approval = Approval::OpenWindow { operator, window };
         let bytes = approval.canonical_bytes();
         assert_eq!(bytes[0], 0x15);
-        assert_eq!(&bytes[1..], &uuid_bytes(operator));
+        assert_eq!(&bytes[1..17], &uuid_bytes(operator));
+        assert_eq!(&bytes[17..], &uuid_bytes(window));
         let mut preimage = CONTEXT.to_vec();
         preimage.extend(NONCE);
         preimage.extend(bytes);
         assert_eq!(
             hex::encode(sha256(&preimage)),
-            "1bf09b5288d961499e5824b60fb4539b0f23da7723a6ddab2c78ed2031efd7f8"
+            "6a924fcc4deef0ccac1bac0ee1ee65a860ff91b6979df54efbe829febc7edbea"
         );
-        assert_ne!(
-            approval.challenge(&NONCE),
-            Approval::PasskeyAdd { operator }.challenge(&NONCE)
-        );
+        // Another window is another challenge
+        let other = Approval::OpenWindow {
+            operator,
+            window: OperatorCheckWindowId::new(),
+        };
+        assert_ne!(approval.challenge(&NONCE), other.challenge(&NONCE));
     }
 }

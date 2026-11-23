@@ -31,7 +31,7 @@ use crate::enums::{
     ObligationSort, ObligationStatus, OwedBy, ProposalCategory, ProposalSort,
     RecordVersion, SearchMode, TrashMode,
 };
-use crate::govlog::{Sha256Hex, SignatureHex};
+use crate::govlog::{HexLengthError, Sha256Hex, SignatureHex};
 use crate::ids::content_target::ContentField;
 use crate::ids::{
     AgentId, ContentId, ContentRef, ContentTarget, FeedbackId, MessageId,
@@ -715,7 +715,8 @@ impl AuthenticatorData {
     /// The counter is above the one stored for the credential. Zero never
     /// advances, so an authenticator that doesn't count (WebAuthn's "zero
     /// means unsupported") can't sign from the command line: with no server
-    /// challenge, there is no other replay defence
+    /// challenge, there is no other replay defence. At `u32::MAX` a
+    /// credential can never advance again: it is locked out, failing closed
     pub fn advances_past(&self, stored: u32) -> bool {
         self.sign_count() > stored
     }
@@ -727,6 +728,16 @@ crate::ids::ranged_hex_bytes!(
     PasskeySignature,
     8..=72,
     "A passkey's ES256 (DER) or EdDSA signature"
+);
+
+crate::govlog::hex_bytes!(
+    /// 16 random bytes the `agora` CLI draws for each request and puts in
+    /// its preimage, so neither the preimage's hash nor the signature can be
+    /// confirmed by guessing the rest of the request (a friend's name, a
+    /// vote's target). Exactly 16 bytes; kept in the stored log record and
+    /// never published
+    RequestNonce,
+    16
 );
 
 /// An operator poster's request, signed by its operator's passkey on a
@@ -743,6 +754,8 @@ crate::ids::ranged_hex_bytes!(
 #[serde(deny_unknown_fields)]
 pub struct PasskeyAssertion {
     pub credential_id: PasskeyCredentialId,
+    /// Required: part of what the passkey signed
+    pub request_nonce: RequestNonce,
     pub authenticator_data: AuthenticatorData,
     pub signature: PasskeySignature,
 }
@@ -863,8 +876,40 @@ impl PathEnvelope {
     const FIELDS: &'static [&'static str] = &["signature", "timestamp"];
 }
 
+/// A JSON object whose keys are each given once: a body that repeats one
+/// (`"signature"` twice, or a payload field) is refused rather than read as
+/// its last copy. The top level only, where the envelope and the payload
+/// are split
+struct UniqueKeys;
+
+impl<'de> serde::de::Visitor<'de> for UniqueKeys {
+    type Value = serde_json::Map<String, serde_json::Value>;
+
+    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.write_str("a JSON object")
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> Result<Self::Value, A::Error> {
+        let mut out = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if out.contains_key(&key) {
+                return Err(serde::de::Error::custom(format!(
+                    "the field `{key}` is given twice"
+                )));
+            }
+            let value = map.next_value()?;
+            out.insert(key, value);
+        }
+        Ok(out)
+    }
+}
+
 /// Read a flat body as `payload` plus the envelope `E`, whose fields are
-/// `fields`; an unknown field is an error naming it
+/// `fields`; an unknown field is an error naming it, and a repeated one is
+/// refused
 fn split_body<'de, D, P, E>(d: D, fields: &[&str]) -> Result<(P, E), D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -873,8 +918,7 @@ where
 {
     use serde::de::Error;
 
-    let mut object =
-        serde_json::Map::<String, serde_json::Value>::deserialize(d)?;
+    let mut object = d.deserialize_map(UniqueKeys)?;
     let envelope = take_fields(&mut object, fields);
     // Each half with its field's path: read from a `Value` here, the
     // body's own path stops at this function (0.117.2)
@@ -3571,6 +3615,7 @@ mod tests {
                 (1..=64).collect::<Vec<u8>>(),
             )
             .unwrap(),
+            request_nonce: RequestNonce::from([0x5a; 16]),
             authenticator_data: AuthenticatorData::try_from(data).unwrap(),
             signature: PasskeySignature::try_from(vec![0x30; 70]).unwrap(),
         }
@@ -3599,6 +3644,7 @@ mod tests {
             a,
             serde_json::json!({
                 "credential_id": hex::encode((1..=64).collect::<Vec<u8>>()),
+                "request_nonce": "5a".repeat(16),
                 "authenticator_data": format!("{}0500000007", "ab".repeat(32)),
                 "signature": "30".repeat(70),
             })
@@ -3641,12 +3687,31 @@ mod tests {
                 .to_string();
             assert!(err.contains("exactly one"), "{bad}: {err}");
         }
+        // A key given twice is refused, not read as its last copy
+        let twice = format!(
+            r#"{{"agent_id":"{agent}","community":"general","title":"t","body":"b","signature":"{sig}","signature":"{}","timestamp":1}}"#,
+            "cd".repeat(64)
+        );
+        let err = serde_json::from_str::<CreatePostRequest>(&twice)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`signature` is given twice"), "{err}");
+        let twice = format!(
+            r#"{{"agent_id":"{agent}","community":"general","title":"t","title":"u","body":"b","signature":"{sig}","timestamp":1}}"#
+        );
+        assert!(serde_json::from_str::<CreatePostRequest>(&twice).is_err());
     }
 
     /// The envelope takes `signature` and `assertion` out of a body before
     /// the payload is read, so no payload may have a field of either name.
     /// Every `SignedRequest` payload in the crate is listed, and the list is
-    /// checked against the source
+    /// checked against the source.
+    ///
+    /// It checks the schemas' property names, which are the serde names: a
+    /// `#[serde(alias)]` isn't in a schema, so an alias of either name would
+    /// slip past it. Scanning this crate's own files is the whole set
+    /// because every signed body type is defined here (one copy of
+    /// everything): the server and the clients only use them
     #[cfg(feature = "schemars")]
     #[test]
     fn no_payload_has_a_proof_field() {
@@ -3764,10 +3829,21 @@ mod tests {
             serde_json::to_value(&upper).unwrap()["signature"],
             "3a".repeat(70)
         );
-        // The credential id is required: a key may hold several
-        let mut json = serde_json::to_value(&a).unwrap();
-        json.as_object_mut().unwrap().remove("credential_id");
-        assert!(serde_json::from_value::<PasskeyAssertion>(json).is_err());
+        // The credential id is required (a key may hold several), and so is
+        // the nonce, of exactly 16 bytes
+        for field in ["credential_id", "request_nonce"] {
+            let mut json = serde_json::to_value(&a).unwrap();
+            json.as_object_mut().unwrap().remove(field);
+            assert!(
+                serde_json::from_value::<PasskeyAssertion>(json).is_err(),
+                "{field}"
+            );
+        }
+        for nonce in ["5a".repeat(15), "5a".repeat(17), String::new()] {
+            let mut json = serde_json::to_value(&a).unwrap();
+            json["request_nonce"] = nonce.into();
+            assert!(serde_json::from_value::<PasskeyAssertion>(json).is_err());
+        }
         let mut json = serde_json::to_value(&a).unwrap();
         json["extra"] = 1.into();
         assert!(serde_json::from_value::<PasskeyAssertion>(json).is_err());
