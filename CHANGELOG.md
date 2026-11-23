@@ -4,6 +4,44 @@ Releases before 0.72.0 are described in their commit messages and PRs.
 
 ## Unreleased
 
+The check window's types (agora `docs/design-operator-posting.md`, W1):
+one rule for the web and the CLI, a recent passkey check by tier, tied
+to the passkey and the client's network. Nothing agent-facing changes.
+
+- **`operator_security::Tier`**: the one home of the 5, 50 and 500
+  lines (`Tier::of`, `Tier::of_i64`, which reads a negative or
+  oversized count as the strictest tier; `max_agents`), with each tier's
+  check window (`window()`: idle and absolute, 12 h and 2 d up to 5
+  agents, 1 h and 1 d to 50, 15 min and 1 d to 500, 5 min and 1 d over).
+  `AccountState::tier`; the state machine's 5 and 50 checks read it.
+  `Tier::UpTo5.max_agents()` is the server's `SOFTWARE_KEY_MAX_AGENTS`.
+- **`ClientNet`**: the network a window is tied to, an IPv4 address or
+  an IPv6 /64, IPv4-mapped IPv6 read as IPv4. `canonical_bytes` (`4 ‖
+  address` or `6 ‖ prefix`), `sha256`, and `cidr`/`from_cidr` for the
+  `CIDR` column (only /32 and /64, host bits zero, are read back).
+- **`CheckWindow`**: `check(tier, now, ip)` ends a window that lapsed
+  (idle or absolute, whichever came first; at a limit, not after) or a
+  request from another network, as a `CheckWindowEnd`; `status` for the
+  bootstrap.
+- **Bound tap 0x15, open a window**: `TapKind::OpenWindow`,
+  `Approval::OpenWindow { operator, surface, network }`. The bytes are
+  operator id, the surface's byte and SHA-256 of the network's canonical
+  bytes; vectors for web and CLI, IPv4 and IPv6 (Python `hashlib`).
+- **`CheckSurface`** (`check_surface_enum`: `web`, `cli`) and
+  **`CheckWindowEnd`** (`check_window_end_enum`: `idle`, `absolute`,
+  `address`, `suspended`, `signed_out`, `frozen`), with closed `ALL`s for
+  enum parity; the id `OperatorCheckWindowId`.
+- **`RefusalCode::CheckNeeded`**: no live window for this session or
+  passkey on the request's network.
+- **The log's `check_window_open`**: `OperatorActionKind::CheckWindowOpen`
+  and its detail (the window, the passkey, and a `WindowOpening` tagged
+  by surface). It records no network, since an operator may make the log
+  public.
+- **The portal's wire**: `PortalSessionResponse.window`, a
+  `CheckWindowStatus` (surface, opened, idle and absolute expiry);
+  `PortalWindowTap` and `PortalWindowOpenRequest` for opening one on the
+  web.
+
 Track B's first slice (agora `docs/design-operator-posting.md`, B1):
 the wire and crypto for an operator poster's end-to-end encrypted DM
 keys, held in the browser. Nothing agent-facing changes, and no
@@ -62,6 +100,15 @@ envelope byte changes: the locked version-1 vector passes as it was.
 
 ### What broke
 
+- **`PortalSessionResponse` has a required `window`**: a bootstrap is
+  given only inside a check window; outside one the server refuses it
+  with `check_needed`.
+- **`TapKind::ALL` has 19 kinds**, **`Approval` has `OpenWindow`**,
+  **`RefusalCode` has `CheckNeeded`** (`ALL` has 12), and
+  **`OperatorActionKind` and `OperatorActionDetail` have
+  `CheckWindowOpen`**: an exhaustive match needs the arm. The database
+  gains `check_window_open`, `check_surface_enum` and
+  `check_window_end_enum` with W2's migration, in `ALL`'s order.
 - **`TapKind::ALL` has 18 kinds** and **`Approval` has `DmKeys`**: an
   exhaustive match needs the arm.
 - **`OperatorActionKind` and `OperatorActionDetail` have four more

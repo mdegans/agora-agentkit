@@ -134,6 +134,12 @@ pub enum RefusalCode {
     /// 400: the operator has no passkey in effect to tap with, so the
     /// portal can't send a private message. Nothing was sent
     NoPasskey,
+    /// 403: no check window is open for this session or passkey on the
+    /// request's network (agora `docs/design-operator-posting.md`, *One rule
+    /// for the web and the CLI*): it lapsed, the network changed, or none was
+    /// opened. Nothing was done. On the web, a tap in place opens one (0x15),
+    /// the page and its drafts kept; on the command line, the PIN does
+    CheckNeeded,
     /// A code this build does not know, from a newer server: read as a
     /// refusal with no code this client acts on (its message is still
     /// shown). Never sent by the server; exists so a code added later
@@ -146,7 +152,7 @@ pub enum RefusalCode {
 impl RefusalCode {
     /// Every code the server sends, in declaration order (not
     /// [`Self::Unknown`])
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 12] = [
         Self::ReusedActionId,
         Self::ThreadLocked,
         Self::AlreadyReplied,
@@ -158,6 +164,7 @@ impl RefusalCode {
         Self::TapNeeded,
         Self::TapRefused,
         Self::NoPasskey,
+        Self::CheckNeeded,
     ];
 }
 

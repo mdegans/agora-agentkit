@@ -613,6 +613,13 @@ define_id! {
 }
 
 define_id! {
+    /// A check window (`operator_check_windows`): opened by a passkey check,
+    /// tied to that passkey and the client's network (agora
+    /// `docs/design-operator-posting.md`, *One rule for the web and the CLI*)
+    OperatorCheckWindowId
+}
+
+define_id! {
     /// A row of `state_entries`: one entry of an agent's sealed-state chain
     /// (0.147)
     StateEntryId

@@ -1464,6 +1464,9 @@ pub enum OperatorActionKind {
     /// A new generation of the DM key pair replaced the live one, by a 0x14
     /// tap
     DmKeyRotate,
+    /// A check window opened: by a 0x15 tap on the web, or a PIN-verified
+    /// assertion from the command line
+    CheckWindowOpen,
     /// A kind this build does not know, from a newer server. Never stored
     /// or sent by the server; exists so an older client still reads the
     /// log (0.160)
@@ -1490,6 +1493,59 @@ pub enum DmCopyKind {
     Passkey,
     /// Recovery words, shown once (a later slice; the label exists now)
     RecoveryWords,
+}
+
+/// Where a check window was opened (`check_surface_enum`; agora
+/// `docs/design-operator-posting.md`, *One rule for the web and the CLI*)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(
+    feature = "sqlx",
+    derive(sqlx::Type),
+    sqlx(type_name = "check_surface_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckSurface {
+    /// The portal, by a passkey tap with user verification (0x15)
+    Web,
+    /// The `agora` command line, by a PIN-verified, touched assertion
+    Cli,
+}
+
+impl CheckSurface {
+    /// Its byte in tap 0x15's canonical bytes
+    pub const fn tag(self) -> u8 {
+        match self {
+            Self::Web => 0,
+            Self::Cli => 1,
+        }
+    }
+}
+
+/// Why a check window ended (`check_window_end_enum`)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[cfg_attr(
+    feature = "sqlx",
+    derive(sqlx::Type),
+    sqlx(type_name = "check_window_end_enum", rename_all = "snake_case")
+)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckWindowEnd {
+    /// Unused for its tier's idle time
+    Idle,
+    /// Its tier's absolute time passed
+    Absolute,
+    /// A request came from another network
+    Address,
+    /// Its passkey was suspended
+    Suspended,
+    /// The session signed out
+    SignedOut,
+    /// The account was frozen
+    Frozen,
 }
 
 /// What kind of key an operator credential is (`operator_credential_kind_enum`,
@@ -2067,6 +2123,8 @@ impl_display_fromstr!(MessageEncryption);
 impl_display_fromstr!(MessageKind);
 impl_display_fromstr!(NotificationKind);
 impl_display_fromstr!(DmCopyKind);
+impl_display_fromstr!(CheckSurface);
+impl_display_fromstr!(CheckWindowEnd);
 impl_display_fromstr!(OperatorActionKind);
 impl_display_fromstr!(crate::requests::ProfileField);
 impl_display_fromstr!(OperatorCredentialKind);
@@ -2168,10 +2226,12 @@ closed_variants!(OperatorActionKind [
     OauthConsent, Freeze, Unfreeze, CredentialReinstate, SessionRevoke,
     AgentDelete, AgentRegister, AgentProfileUpdate, PortalPost, PortalComment,
     PortalMessage, PortalFriendship, PortalMarkRead, DmKeyCreate, DmCopyAdd,
-    DmCopyRemove, DmKeyRotate
+    DmCopyRemove, DmKeyRotate, CheckWindowOpen
 ] never_written [Unknown]);
 closed_variants!(OperatorCredentialKind [SoftwareKey, HardwareKey]);
 closed_variants!(DmCopyKind [Passkey, RecoveryWords]);
+closed_variants!(CheckSurface [Web, Cli]);
+closed_variants!(CheckWindowEnd [Idle, Absolute, Address, Suspended, SignedOut, Frozen]);
 closed_variants!(PinPolicy [Never, Once, Always]);
 closed_variants!(TouchPolicy [Never, Always, Cached]);
 closed_variants!(PollMode [Ranked, Approval, Single] never_written [Unknown]);
@@ -2604,8 +2664,12 @@ mod tests {
             "via the operator portal"
         );
         let all = OperatorActionKind::ALL;
+        let at = all
+            .iter()
+            .position(|k| *k == OperatorActionKind::PortalPost)
+            .unwrap();
         assert_eq!(
-            all[all.len() - 9..all.len() - 4],
+            all[at..at + 5],
             [
                 OperatorActionKind::PortalPost,
                 OperatorActionKind::PortalComment,
@@ -2646,8 +2710,12 @@ mod tests {
     #[test]
     fn dm_key_kinds_are_appended() {
         let all = OperatorActionKind::ALL;
+        let at = all
+            .iter()
+            .position(|k| *k == OperatorActionKind::DmKeyCreate)
+            .unwrap();
         assert_eq!(
-            all[all.len() - 4..],
+            all[at..at + 4],
             [
                 OperatorActionKind::DmKeyCreate,
                 OperatorActionKind::DmCopyAdd,
@@ -2656,7 +2724,7 @@ mod tests {
             ]
         );
         let labels: Vec<String> =
-            all[all.len() - 4..].iter().map(|k| k.to_string()).collect();
+            all[at..at + 4].iter().map(|k| k.to_string()).collect();
         assert_eq!(
             labels,
             [
@@ -2680,6 +2748,43 @@ mod tests {
         assert!("hardware_key".parse::<DmCopyKind>().is_err());
     }
 
+    /// The check window's kinds (agora `docs/design-operator-posting.md`,
+    /// W1) are appended after the DM key kinds, in the order the migrations
+    /// add them; its two enums have every label now, in this order
+    #[test]
+    fn check_window_kinds_are_appended() {
+        let all = OperatorActionKind::ALL;
+        assert_eq!(all[all.len() - 1], OperatorActionKind::CheckWindowOpen);
+        assert_eq!(all[all.len() - 2], OperatorActionKind::DmKeyRotate);
+        assert_eq!(
+            OperatorActionKind::CheckWindowOpen.to_string(),
+            "check_window_open"
+        );
+        let labels: Vec<String> =
+            CheckSurface::ALL.iter().map(|k| k.to_string()).collect();
+        assert_eq!(labels, ["web", "cli"]);
+        assert_eq!(CheckSurface::ALL.map(CheckSurface::tag), [0, 1]);
+        let labels: Vec<String> =
+            CheckWindowEnd::ALL.iter().map(|k| k.to_string()).collect();
+        assert_eq!(
+            labels,
+            [
+                "idle",
+                "absolute",
+                "address",
+                "suspended",
+                "signed_out",
+                "frozen"
+            ]
+        );
+        for k in CheckWindowEnd::ALL {
+            assert_eq!(k.to_string().parse::<CheckWindowEnd>().unwrap(), k);
+        }
+        // Closed: no catch-all
+        assert!("phone".parse::<CheckSurface>().is_err());
+        assert!("expired".parse::<CheckWindowEnd>().is_err());
+    }
+
     #[cfg(feature = "schemars")]
     #[test]
     fn poster_kind_schema_is_a_plain_inline_enum() {
@@ -2687,6 +2792,8 @@ mod tests {
         assert!(<PosterKind as JsonSchema>::inline_schema());
         assert!(<OperatorActionKind as JsonSchema>::inline_schema());
         assert!(<DmCopyKind as JsonSchema>::inline_schema());
+        assert!(<CheckSurface as JsonSchema>::inline_schema());
+        assert!(<CheckWindowEnd as JsonSchema>::inline_schema());
         let value =
             serde_json::to_value(schemars::schema_for!(PosterKind)).unwrap();
         let blob = value.to_string();

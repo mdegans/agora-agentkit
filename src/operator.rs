@@ -9,14 +9,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::enums::{DmCopyKind, MessageKind, PosterKind};
+use crate::enums::{CheckSurface, DmCopyKind, MessageKind, PosterKind};
 pub use crate::enums::{OperatorActionKind, OperatorCredentialKind};
 use crate::govlog::{HexLengthError, PublicKeyHex, SignatureHex};
 use crate::ids::{
     AgentGroupId, AgentId, CommentId, MessageId, ModerationActionId,
-    OperatorActionId, OperatorCredentialId, OperatorDmCopyKeyId,
-    OperatorDmKeyId, OperatorEnrolmentId, OperatorId, OperatorPasskeyId,
-    OperatorRecoveryCaseId, PasskeyCredentialId, PostId,
+    OperatorActionId, OperatorCheckWindowId, OperatorCredentialId,
+    OperatorDmCopyKeyId, OperatorDmKeyId, OperatorEnrolmentId, OperatorId,
+    OperatorPasskeyId, OperatorRecoveryCaseId, PasskeyCredentialId, PostId,
 };
 use crate::limits;
 pub use crate::moderation::ActionAppeal;
@@ -936,11 +936,39 @@ pub enum OperatorActionDetail {
         public: DmKeyPublic,
         retired: OperatorDmKeyId,
     },
+    /// A check window opened, for `passkey`. The network it is tied to is
+    /// not recorded here: the log can be made public, and an address is
+    /// the operator's own
+    CheckWindowOpen {
+        window: OperatorCheckWindowId,
+        passkey: OperatorPasskeyId,
+        opening: WindowOpening,
+    },
     /// A kind this build does not know, from a newer server, read without
     /// its fields; exists so an older client still reads the log (0.160)
     #[serde(other)]
     #[cfg_attr(feature = "schemars", schemars(skip))]
     Unknown,
+}
+
+/// How a [`OperatorActionDetail::CheckWindowOpen`] was opened, tagged by
+/// its [`CheckSurface`]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(tag = "surface", rename_all = "snake_case")]
+pub enum WindowOpening {
+    /// By a 0x15 tap, whose assertion is stored with the entry as every
+    /// tap's is
+    Web,
+}
+
+impl WindowOpening {
+    pub fn surface(&self) -> CheckSurface {
+        match self {
+            Self::Web => CheckSurface::Web,
+        }
+    }
 }
 
 /// A change to the operator's settings, as the log records it
@@ -1018,6 +1046,7 @@ impl OperatorLogEntry {
             | OperatorActionDetail::DmCopyAdd { .. }
             | OperatorActionDetail::DmCopyRemove { .. }
             | OperatorActionDetail::DmKeyRotate { .. }
+            | OperatorActionDetail::CheckWindowOpen { .. }
             | OperatorActionDetail::Unknown => {
                 return None;
             }
@@ -1136,6 +1165,7 @@ impl OperatorActionDetail {
             Self::DmCopyAdd { .. } => OperatorActionKind::DmCopyAdd,
             Self::DmCopyRemove { .. } => OperatorActionKind::DmCopyRemove,
             Self::DmKeyRotate { .. } => OperatorActionKind::DmKeyRotate,
+            Self::CheckWindowOpen { .. } => OperatorActionKind::CheckWindowOpen,
             Self::Unknown => OperatorActionKind::Unknown,
         }
     }
@@ -1171,6 +1201,7 @@ impl OperatorActionDetail {
             | Self::DmCopyAdd { .. }
             | Self::DmCopyRemove { .. }
             | Self::DmKeyRotate { .. }
+            | Self::CheckWindowOpen { .. }
             | Self::Unknown => None,
         }
     }
@@ -1230,6 +1261,57 @@ pub struct PortalSessionResponse {
     /// write. A suspended operator still gets the bootstrap (it reads)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspension: Option<Box<crate::responses::BanInfoResponse>>,
+    /// The session's check window. Outside one the bootstrap, like every
+    /// other portal route, is refused with
+    /// [`RefusalCode::CheckNeeded`](crate::errors::RefusalCode::CheckNeeded)
+    pub window: CheckWindowStatus,
+}
+
+/// An open check window (agora `docs/design-operator-posting.md`, *One
+/// rule for the web and the CLI*), by its operator's tier now. A count that
+/// crosses a tier's line moves both times earlier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(deny_unknown_fields)]
+pub struct CheckWindowStatus {
+    pub surface: CheckSurface,
+    pub opened_at: DateTime<Utc>,
+    /// When it ends unless used before then
+    pub idle_expires_at: DateTime<Utc>,
+    /// When it ends however it is used
+    pub expires_at: DateTime<Utc>,
+}
+
+impl CheckWindowStatus {
+    /// When it ends if unused from now on: the earlier of the two
+    pub fn ends_at(&self) -> DateTime<Utc> {
+        self.idle_expires_at.min(self.expires_at)
+    }
+}
+
+/// The answer to the start of a check window's opening on the web: what
+/// the tap needs. The request names nothing: the operator, the surface and
+/// the network are the session's and the request's
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct PortalWindowTap {
+    /// The options for `navigator.credentials.get` (WebAuthn's
+    /// `PublicKeyCredentialRequestOptionsJSON`): a passkey tap, user
+    /// verification required, whose challenge is derived from kind 0x15
+    /// (`Approval::OpenWindow`)
+    pub tap: serde_json::Value,
+}
+
+/// A check window opened on the web, with the browser's answer to a
+/// [`PortalWindowTap`]. Answered with a [`CheckWindowStatus`]; refused,
+/// opening nothing, from a network other than the start's
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct PortalWindowOpenRequest {
+    /// `PublicKeyCredential.toJSON()` of `navigator.credentials.get`
+    pub assertion: serde_json::Value,
 }
 
 impl PortalSessionResponse {
@@ -2053,6 +2135,67 @@ mod tests {
         );
     }
 
+    /// The check window's wire (agora `docs/design-operator-posting.md`,
+    /// W1): its status, the web's opening, and its log entry, which names no
+    /// network and which no agent sees
+    #[test]
+    fn check_window_wire() {
+        let status = crate::fixtures::portal_session(false).window;
+        assert_eq!(status.ends_at(), status.idle_expires_at);
+        let late = CheckWindowStatus {
+            idle_expires_at: status.expires_at + chrono::Duration::hours(1),
+            ..status
+        };
+        assert_eq!(late.ends_at(), status.expires_at);
+        let mut extra = serde_json::to_value(status).unwrap();
+        extra["network"] = "203.0.113.7/32".into();
+        assert!(serde_json::from_value::<CheckWindowStatus>(extra).is_err());
+
+        let tap = serde_json::json!({"tap": {"challenge": "abc"}});
+        let back: PortalWindowTap =
+            serde_json::from_value(tap.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&back).unwrap(), tap);
+        let open = serde_json::json!({"assertion": {"id": "abc"}});
+        let req: PortalWindowOpenRequest =
+            serde_json::from_value(open.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&req).unwrap(), open);
+        for bad in [
+            serde_json::json!({}),
+            serde_json::json!({"assertion": {}, "network": "203.0.113.7"}),
+        ] {
+            assert!(
+                serde_json::from_value::<PortalWindowOpenRequest>(bad).is_err()
+            );
+        }
+
+        let entry = OperatorLogEntry {
+            id: OperatorActionId::new(),
+            credential: None,
+            detail: OperatorActionDetail::CheckWindowOpen {
+                window: crate::ids::OperatorCheckWindowId::new(),
+                passkey: OperatorPasskeyId::new(),
+                opening: WindowOpening::Web,
+            },
+            created_at: status.opened_at,
+        };
+        let json = serde_json::to_value(&entry.detail).unwrap();
+        assert_eq!(json["kind"], "check_window_open");
+        assert_eq!(json["opening"], serde_json::json!({"surface": "web"}));
+        assert_eq!(
+            serde_json::from_value::<OperatorActionDetail>(json).unwrap(),
+            entry.detail
+        );
+        assert_eq!(entry.detail.kind(), OperatorActionKind::CheckWindowOpen);
+        assert_eq!(entry.detail.recipient_count(), None);
+        assert_eq!(entry.for_agent(&[]), None);
+        // The opening's tag is its surface's label
+        let opening = WindowOpening::Web;
+        assert_eq!(
+            serde_json::to_value(&opening).unwrap()["surface"],
+            opening.surface().to_string()
+        );
+    }
+
     /// The portal's wire: the session bootstrap, its token hidden from
     /// `Debug`, and the write bodies, nested so unknown fields are refused
     /// at either level (0.160)
@@ -2066,9 +2209,25 @@ mod tests {
             csrf_token: CsrfToken("tok-123".into()),
             poster: None,
             suspension: None,
+            window: crate::fixtures::portal_session(false).window,
         };
         let json = serde_json::to_value(&session).unwrap();
         assert_eq!(json["csrf_token"], "tok-123");
+        assert_eq!(
+            json["window"],
+            serde_json::json!({
+                "surface": "web",
+                "opened_at": "2025-10-30T00:00:00Z",
+                "idle_expires_at": "2025-10-30T12:00:00Z",
+                "expires_at": "2025-11-01T00:00:00Z",
+            })
+        );
+        // Required: a bootstrap is only given inside a window
+        let mut without = json.clone();
+        without.as_object_mut().unwrap().remove("window");
+        assert!(
+            serde_json::from_value::<PortalSessionResponse>(without).is_err()
+        );
         assert!(json.get("poster").is_none(), "{json}");
         assert!(json.get("suspension").is_none(), "{json}");
         assert_eq!(
@@ -3225,6 +3384,9 @@ mod tests {
             EnrolmentStatusResponse,
             UpdateAgentProfileRequest,
             UpdateAgentProfileResponse,
+            CheckWindowStatus,
+            PortalWindowTap,
+            PortalWindowOpenRequest,
         );
     }
 

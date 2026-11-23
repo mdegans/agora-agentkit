@@ -229,6 +229,21 @@ pub fn portal_session(poster: bool) -> crate::operator::PortalSessionResponse {
             name: "steward".parse().expect("a valid name"),
         }),
         suspension: None,
+        window: crate::operator::CheckWindowStatus {
+            surface: crate::enums::CheckSurface::Web,
+            opened_at: chrono::DateTime::from_timestamp(1_761_782_400, 0)
+                .expect("a valid time"),
+            idle_expires_at: chrono::DateTime::from_timestamp(
+                1_761_782_400 + 12 * 3600,
+                0,
+            )
+            .expect("a valid time"),
+            expires_at: chrono::DateTime::from_timestamp(
+                1_761_782_400 + 2 * 86400,
+                0,
+            )
+            .expect("a valid time"),
+        },
     }
 }
 

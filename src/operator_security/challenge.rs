@@ -9,6 +9,9 @@
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 
+use super::window::ClientNet;
+use crate::enums::CheckSurface;
+
 use crate::ids::{
     AgentId, MessageId, OAuthClientId, OperatorActionId, OperatorCredentialId,
     OperatorDmCopyKeyId, OperatorDmKeyId, OperatorEmailAddressId,
@@ -55,11 +58,14 @@ pub enum TapKind {
     /// The operator poster's DM keys: made, a copy added or removed, or
     /// rotated
     DmKeys = 0x14,
+    /// Opening a check window on the web (agora
+    /// `docs/design-operator-posting.md`, *One rule for the web and the CLI*)
+    OpenWindow = 0x15,
 }
 
 impl TapKind {
     /// Every kind still produced, by tag
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Send,
         Self::OAuthConsent,
         Self::EnrolmentApproval,
@@ -78,6 +84,7 @@ impl TapKind {
         Self::PasskeyAdd,
         Self::PortalMessage,
         Self::DmKeys,
+        Self::OpenWindow,
     ];
 
     pub const fn tag(self) -> u8 {
@@ -295,6 +302,13 @@ pub enum Approval {
         operator: OperatorId,
         subject: DmKeysSubject,
     },
+    /// 0x15: a check window, for the passkey that taps, on `surface`, from
+    /// `network` (its SHA-256 in the bytes)
+    OpenWindow {
+        operator: OperatorId,
+        surface: CheckSurface,
+        network: ClientNet,
+    },
 }
 
 fn uuid_bytes(id: impl Into<uuid::Uuid>) -> [u8; 16] {
@@ -322,6 +336,7 @@ impl Approval {
             Self::PasskeyAdd { .. } => TapKind::PasskeyAdd,
             Self::PortalMessage { .. } => TapKind::PortalMessage,
             Self::DmKeys { .. } => TapKind::DmKeys,
+            Self::OpenWindow { .. } => TapKind::OpenWindow,
         }
     }
 
@@ -416,6 +431,15 @@ impl Approval {
                 out.extend(uuid_bytes(*operator));
                 out.push(subject.purpose().tag());
                 subject.bytes(&mut out);
+            }
+            Self::OpenWindow {
+                operator,
+                surface,
+                network,
+            } => {
+                out.extend(uuid_bytes(*operator));
+                out.push(surface.tag());
+                out.extend(network.sha256());
             }
         }
         out
@@ -551,6 +575,11 @@ mod tests {
                 operator: id(A),
                 subject: DmKeysSubject::AddCopy(id(B)),
             },
+            Approval::OpenWindow {
+                operator: id(A),
+                surface: CheckSurface::Web,
+                network: ClientNet::V4([203, 0, 113, 7].into()),
+            },
         ]
     }
 
@@ -561,12 +590,12 @@ mod tests {
             tags,
             [
                 1, 2, 3, 4, 6, 8, 9, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-                0x11, 0x12, 0x13, 0x14
+                0x11, 0x12, 0x13, 0x14, 0x15
             ]
         );
         assert_eq!(TapKind::from_tag(0x07), None);
         assert_eq!(TapKind::from_tag(0x00), None);
-        assert_eq!(TapKind::from_tag(0x15), None);
+        assert_eq!(TapKind::from_tag(0x16), None);
         // 0x05 still reads, so stored assertions do, and isn't produced
         let retired = TapKind::from_tag(0x05).unwrap();
         assert!(retired.is_retired() && !TapKind::ALL.contains(&retired));
@@ -607,6 +636,7 @@ mod tests {
                 1 + 16,
                 1 + 16 + 16,
                 1 + 16 + 1 + 16,
+                1 + 16 + 1 + 32,
             ]
         );
     }
@@ -690,7 +720,7 @@ mod tests {
     }
 
     /// Computed independently (Python `hashlib`) from the spec's table
-    const VECTORS: [&str; 18] = [
+    const VECTORS: [&str; 19] = [
         "e417deb6abe94bb74037918fb0f749e401b58c3b282b206c96963217826c3435",
         "a4304de3920dfbb53406abda4991fa100f08578a65fd37a361de8364bf438940",
         "b55e306e201216cb476830ef7bada806c0e1f97ae49cca4b50aeb8989d0bddde",
@@ -709,6 +739,7 @@ mod tests {
         "1b8688cf24d1c7db7b53257c3d9b51ffbde4658f67f57486a148f1ebfad9ec8f",
         "2dde0a214a02d679163541709f56c1abd88d2fbe0a1c2ec6b2f621580034eb3e",
         "e6f3e3e64fcb22577e14248e151b5c3f624b7b86e602d2558f15fecb38e7794f",
+        "bc21f8f4fc66146b7179c2011a8f0a39f152285f33939ba7980121df7c672ac8",
     ];
 
     /// 0x14's bytes: operator id ‖ purpose ‖ subject id, then for a new
@@ -796,5 +827,66 @@ mod tests {
             })
             .collect();
         assert_eq!(names, ["create", "add_copy", "rotate", "remove_copy"]);
+    }
+
+    /// 0x15's bytes: operator id ‖ surface ‖ SHA-256 of the normalised
+    /// network; each surface and family pinned (Python `hashlib`)
+    #[test]
+    fn open_window_bytes() {
+        let operator: OperatorId = id(A);
+        let v4 = ClientNet::of("203.0.113.7".parse().unwrap());
+        let v6 = ClientNet::of("2001:db8:1:2::1".parse().unwrap());
+        let cases = [
+            (
+                CheckSurface::Web,
+                v4,
+                "bc21f8f4fc66146b7179c2011a8f0a39f152285f33939ba7980121df7c672ac8",
+            ),
+            (
+                CheckSurface::Cli,
+                v4,
+                "586b578f41e61381ad34b3b0a352a0341e8777d0b4dcca91648cb18e25f96ec8",
+            ),
+            (
+                CheckSurface::Web,
+                v6,
+                "ab80dd4a20ab13ed8f64d4d442d9b4b477e64e656da6ed45264b270845504e77",
+            ),
+        ];
+        for (surface, network, want) in cases {
+            let approval = Approval::OpenWindow {
+                operator,
+                surface,
+                network,
+            };
+            let bytes = approval.canonical_bytes();
+            assert_eq!(bytes.len(), 50);
+            assert_eq!(bytes[0], 0x15);
+            assert_eq!(&bytes[1..17], &uuid_bytes(operator));
+            assert_eq!(bytes[17], surface.tag());
+            assert_eq!(&bytes[18..], &network.sha256());
+            let mut preimage = CONTEXT.to_vec();
+            preimage.extend(NONCE);
+            preimage.extend(bytes);
+            assert_eq!(hex::encode(sha256(&preimage)), want, "{surface:?}");
+        }
+        // The same /64 is the same challenge; another network is another
+        let at = |ip: &str| Approval::OpenWindow {
+            operator,
+            surface: CheckSurface::Web,
+            network: ClientNet::of(ip.parse().unwrap()),
+        };
+        assert_eq!(
+            at("2001:db8:1:2::1").challenge(&NONCE),
+            at("2001:db8:1:2:ffff::9").challenge(&NONCE)
+        );
+        assert_ne!(
+            at("2001:db8:1:2::1").challenge(&NONCE),
+            at("2001:db8:1:3::1").challenge(&NONCE)
+        );
+        assert_eq!(
+            at("::ffff:203.0.113.7").challenge(&NONCE),
+            at("203.0.113.7").challenge(&NONCE)
+        );
     }
 }

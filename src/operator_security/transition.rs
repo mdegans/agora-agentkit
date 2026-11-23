@@ -14,6 +14,7 @@ use super::tap::{
     TapLevel, UNTAPPED_REACH, When, bulk_hold_floor, covered, covered_reach,
     plan_send, reach, required_hold,
 };
+use super::window::Tier;
 use crate::enums::OperatorActionKind;
 use crate::ids::{
     AgentId, OAuthClientId, OperatorActionId, OperatorCredentialId,
@@ -620,7 +621,7 @@ impl<I: IdSource> Tx<'_, I> {
     fn tier_one(&self, by: Authority, class: ModeClass) -> R {
         let soft = matches!(by, Authority::Signed(c)
             if self.s.factor(FactorId::Credential(c)).is_some_and(|f| f.kind.is_software_key()));
-        let enforced = self.s.count > 5 && self.s.flags.tier;
+        let enforced = self.s.tier() > Tier::UpTo5 && self.s.flags.tier;
         guard(
             // A contest is a suspended factor's only request: it restores
             // nothing, and refusing it would leave the factor no way to dispute
@@ -1251,7 +1252,7 @@ impl<I: IdSource> Tx<'_, I> {
                 guard(e.state == EnrolmentState::Started, Refusal::WrongState)?;
                 guard(
                     !(e.kind.is_software_key()
-                        && self.s.count > 5
+                        && self.s.tier() > Tier::UpTo5
                         && self.s.flags.tier),
                     Refusal::TierOne,
                 )?;
@@ -1447,7 +1448,7 @@ impl<I: IdSource> Tx<'_, I> {
                     && (pending.change.new_address().is_none()
                         || pending.address_verified)
                     && self.domains_ok_after(&pending.change)
-                    && !(removal && self.s.count > 5);
+                    && !(removal && self.s.tier() > Tier::UpTo5);
                 if !ok {
                     self.s
                         .changes
@@ -1934,8 +1935,15 @@ impl<I: IdSource> Tx<'_, I> {
     /// §4.3: an add that leaves `count` above a threshold meets its
     /// minimum, whatever the flags
     fn minimum_for(&self, count: u32) -> R {
-        guard(count <= 5 || self.s.min5(), Refusal::Minimum(5))?;
-        guard(count <= 50 || self.s.min50(), Refusal::Minimum(50))
+        let tier = Tier::of(count);
+        guard(
+            tier <= Tier::UpTo5 || self.s.min5(),
+            Refusal::Minimum(Tier::UpTo5.max_agents()),
+        )?;
+        guard(
+            tier <= Tier::UpTo50 || self.s.min50(),
+            Refusal::Minimum(Tier::UpTo50.max_agents()),
+        )
     }
 
     fn change_request(
@@ -1972,7 +1980,7 @@ impl<I: IdSource> Tx<'_, I> {
                     Refusal::WrongState,
                 )?;
                 guard(
-                    new.is_some() || self.s.count <= 5,
+                    new.is_some() || self.s.tier() <= Tier::UpTo5,
                     Refusal::ContactRequired,
                 )?;
             }
