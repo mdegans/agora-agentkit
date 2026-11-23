@@ -14,30 +14,44 @@ envelope byte changes: the locked version-1 vector passes as it was.
   signature made elsewhere (checked against the sender's key first,
   `BadSignature` otherwise); `wrapped_key_ephemeral` and
   `unwrap_key_from_shared` unwrap from an X25519 result the reader
-  computed itself, refusing all zeros. `seal`, `unwrap_key` and `open`
-  are unchanged. A whole seal with every random input fixed is pinned in
+  computed itself, refusing all zeros; `is_low_order` tells a small-order
+  X25519 key. `seal`, `unwrap_key` and `open` are unchanged. A whole seal
+  with every random input fixed is pinned in
   `vectors/envelope/v1_seal.json`.
-- **`dm_key`**: the copy keys that open the DM keys. The copy secret from
-  a passkey's PRF output (HKDF, `"agora/dm-copy-secret/v1"`), the wrap
-  key per private key (`"agora/dm-key-copy/v1"`, with the generation and
-  copy key ids), RFC 8410 PKCS#8, pinned in
-  `vectors/dm_keys/copy_wrap.json`. Not yet the AES-GCM step: it needs
-  the `aes-gcm` crate, not yet approved.
+- **`dm_key`**: the copy keys that open the DM keys. The copy secret
+  (HKDF, `"agora/dm-copy-secret/v1"`) from a `CopySecretInput`: a
+  passkey's 32-byte PRF output, or `RecoveryEntropy` (bytes, at least 16,
+  never the words' text); the wrap key per private key (the envelope's
+  KEK under `"agora/dm-key-copy/v1"`, with the generation and copy key
+  ids); a copy key's endorsement by the DM Ed25519 key
+  (`"agora/dm-copy/v1"`, `endorse_copy`, `verify_copy_endorsement`);
+  RFC 8410 PKCS#8. Pinned in `vectors/dm_keys/copy_wrap.json`, with each
+  key as a JWK. Not yet the AEAD step that wraps: AES-256-GCM or the
+  envelope's ChaCha20-Poly1305 is still being chosen. The module says
+  why an unwrap must be checked against the generation's public keys.
 - **Bound tap 0x14, DM keys**: `TapKind::DmKeys`,
-  `Approval::DmKeys { operator, subject }`, `DmKeysPurpose` and
-  `DmKeysSubject`; the bytes are operator id, purpose and subject id,
-  with a vector per purpose.
+  `Approval::DmKeys { operator, subject }`, `DmKeysPurpose`,
+  `DmKeysSubject` and `dm_key_public_sha256`. The bytes are operator id,
+  purpose and subject id, and for a new generation (create, rotate)
+  SHA-256 of its X25519 and Ed25519 public keys; a vector per purpose.
 - **`DmCopyKind`** (`dm_copy_kind_enum`: `passkey`, `recovery_words`),
   and the ids `OperatorDmKeyId` and `OperatorDmCopyKeyId`.
+- **`PasskeyCredentialId` is on the wire**: hex, 16 to 1023 bytes, an
+  inline schema.
 - **The log's DM key kinds**: `OperatorActionKind::{DmKeyCreate,
   DmCopyAdd, DmCopyRemove, DmKeyRotate}` (appended, in that order) and
-  their `OperatorActionDetail` variants.
+  their `OperatorActionDetail` variants, which carry the public keys and
+  endorsements they record.
 - **The portal's DM key wire**: `PortalDmKeys` (the listing),
-  `PortalDmKeyStart` and `PortalDmKeyTap` (a 0x14 tap's start and its
-  answer), `PortalDmKeyCreateRequest`, `PortalDmCopyAddRequest`,
-  `PortalDmKeyRotateRequest` and `PortalDmCopyRemoveRequest`, with
-  `DmKeyPublic`, `DmKeyGeneration`, `DmCopyKey`, `DmCopyOpener`,
-  `DmKeyWrap`, `DmKeyWrapIv` and `WrappedDmPrivateKey`.
+  `PortalDmKeyStart` (a new generation's public keys travel here, so the
+  tap binds them) and `PortalDmKeyTap`, `PortalDmKeyCreateRequest`,
+  `PortalDmCopyAddRequest`, `PortalDmKeyRotateRequest` and
+  `PortalDmCopyRemoveRequest`, with `DmKeyPublic`, `DmKeyGeneration`,
+  `DmCopyKey` (endorsed, and by which generation), `DmCopyOpener` (a
+  passkey's credential id and PRF salt), `DmKeyWrap`, `DmKeyWrapIv`,
+  `PrfSalt` and `WrappedDmPrivateKey`. Their `check`s refuse low-order
+  X25519 keys, bindings and endorsements that don't verify, and more
+  than `MAX_DM_KEY_WRAPS` (256) wraps, never cutting.
 
 ### What broke
 

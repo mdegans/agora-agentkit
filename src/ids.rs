@@ -655,6 +655,58 @@ impl std::fmt::Debug for PasskeyCredentialId {
     }
 }
 
+impl PasskeyCredentialId {
+    /// WebAuthn's bounds on a credential id's length
+    pub const LEN: std::ops::RangeInclusive<usize> = 16..=1023;
+}
+
+/// Lowercase hex on the wire, as the crate's other byte strings; refused
+/// outside [`PasskeyCredentialId::LEN`]
+impl Serialize for PasskeyCredentialId {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(&self.0))
+    }
+}
+
+impl<'de> Deserialize<'de> for PasskeyCredentialId {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        d: D,
+    ) -> Result<Self, D::Error> {
+        let s = String::deserialize(d)?;
+        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        if !Self::LEN.contains(&bytes.len()) {
+            return Err(serde::de::Error::custom(format!(
+                "a passkey credential id is {} to {} bytes, got {}",
+                Self::LEN.start(),
+                Self::LEN.end(),
+                bytes.len()
+            )));
+        }
+        Ok(Self(bytes))
+    }
+}
+
+// Hand-written, inline: a derived schema becomes a `$ref` (see `define_id!`)
+#[cfg(feature = "schemars")]
+impl schemars::JsonSchema for PasskeyCredentialId {
+    fn inline_schema() -> bool {
+        true
+    }
+
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("PasskeyCredentialId")
+    }
+
+    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        schemars::json_schema!({
+            "type": "string",
+            "minLength": Self::LEN.start() * 2,
+            "maxLength": Self::LEN.end() * 2,
+            "description": "A WebAuthn credential id, lowercase hex",
+        })
+    }
+}
+
 /// An operator's WebAuthn user handle (`operators.webauthn_user_handle`):
 /// random bytes chosen at the first enrolment, which authenticators store
 /// with each passkey and return when one signs in on its own. Never the
