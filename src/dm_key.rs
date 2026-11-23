@@ -25,8 +25,6 @@
 //!                             info = "agora/dm-key-copy/v1" ‖ label[part])
 //!   wrapped     = 0x01 ‖ ephemeral public (32) ‖ ChaCha20-Poly1305(KEK, zero nonce,
 //!                             aad = label[part], the raw 32-byte private key)      81 bytes
-//! endorsement   = Ed25519 by the live generation's DM key over
-//!                 "agora/dm-copy/v1" ‖ copy key id ‖ copy public
 //! ```
 //!
 //! The zero nonce is the envelope's reasoning: each KEK comes from a fresh
@@ -59,10 +57,28 @@
 //! 0x14 tap ([`DmKeysSubject`](crate::operator_security::challenge::DmKeysSubject))
 //! and by the binding signature.
 //!
-//! The endorsement does the same for copy keys: whoever adds or rotates
-//! checks that each copy public it wraps to was endorsed by a DM key it
-//! trusts ([`verify_copy_endorsement`]), so a copy key planted in the table
-//! gets no wrap.
+//! # What this defends against, and what it doesn't
+//!
+//! - **An honest-but-curious server, or a stolen read-only copy of the
+//!   database, cannot read the DM keys.** It holds public keys, PRF salts
+//!   and wraps; opening a wrap takes a copy secret, which comes from a
+//!   passkey's PRF output (or recovery words) and never reaches it.
+//! - **Someone who can write the tables, or serve the page, can substitute
+//!   keys.** They can list a copy key of their own, so the next rotation or
+//!   add wraps to it; plant a generation of their own; or serve code that
+//!   takes the keys at unlock. Nothing here stops that. A database writer is
+//!   treated like a malicious server (Steward, 2026-11-23). What remains:
+//!   - the stored 0x14 assertion binds each generation's public keys
+//!     ([`DmKeysSubject`](crate::operator_security::challenge::DmKeysSubject)),
+//!     so a substituted generation can be found afterwards, by audit;
+//!   - [`DmPrivateKeys::matches`]: a wrap that opens to the *published* keys
+//!     cannot be made without those keys, so a planted wrap is refused at
+//!     unlock.
+//!
+//!   An endorsement of copy keys by the DM key was tried and dropped: a
+//!   writer could insert a generation of its own to endorse with, so it had
+//!   no anchor. Making it real needs chained generations and per-device
+//!   pinning, a later design for agents and posters alike.
 //!
 //! # PKCS#8
 //!
@@ -70,13 +86,12 @@
 //! RFC 8410's 48-byte form. PKCS#8 is never wrapped or stored; it is only
 //! what this crate hands WebCrypto's `importKey`.
 
-use ed25519_dalek::Signer;
 use hkdf::Hkdf;
 use rand::rngs::OsRng;
 use sha2::Sha256;
 use zeroize::Zeroizing;
 
-use crate::crypto::{Signature, SigningKey, VerifyingKey};
+use crate::crypto::{SigningKey, VerifyingKey};
 pub use crate::envelope::WRAPPED_KEY_LEN;
 use crate::envelope::{EncryptionPublicKey, EncryptionSecretKey};
 use crate::ids::{OperatorDmCopyKeyId, OperatorDmKeyId};
@@ -85,8 +100,6 @@ use crate::ids::{OperatorDmCopyKeyId, OperatorDmKeyId};
 pub const COPY_SECRET_INFO: &[u8] = b"agora/dm-copy-secret/v1";
 /// HKDF `info` prefix of a wrap's KEK
 pub const COPY_WRAP_INFO: &[u8] = b"agora/dm-key-copy/v1";
-/// What a copy key's endorsement covers first
-pub const COPY_ENDORSEMENT_CONTEXT: &[u8] = b"agora/dm-copy/v1";
 /// The fewest bytes of recovery entropy a copy secret is derived from: 128
 /// bits
 pub const MIN_RECOVERY_ENTROPY_LEN: usize = 16;
@@ -380,39 +393,6 @@ pub fn unwrap_dm_keys(
     })
 }
 
-/// What a copy key's endorsement covers
-pub fn copy_endorsement_bytes(
-    copy: OperatorDmCopyKeyId,
-    copy_public: &EncryptionPublicKey,
-) -> Vec<u8> {
-    let mut out = COPY_ENDORSEMENT_CONTEXT.to_vec();
-    out.extend_from_slice(copy.as_uuid().as_bytes());
-    out.extend_from_slice(copy_public.as_bytes());
-    out
-}
-
-/// A DM Ed25519 key endorses a copy key: whoever holds the DM keys put it
-/// there
-pub fn endorse_copy(
-    dm_key: &SigningKey,
-    copy: OperatorDmCopyKeyId,
-    copy_public: &EncryptionPublicKey,
-) -> Signature {
-    dm_key.sign(&copy_endorsement_bytes(copy, copy_public))
-}
-
-/// The endorsement verifies (strictly) against a DM Ed25519 key
-pub fn verify_copy_endorsement(
-    dm_key: &VerifyingKey,
-    copy: OperatorDmCopyKeyId,
-    copy_public: &EncryptionPublicKey,
-    endorsement: &Signature,
-) -> bool {
-    dm_key
-        .verify_strict(&copy_endorsement_bytes(copy, copy_public), endorsement)
-        .is_ok()
-}
-
 /// RFC 8410 PKCS#8 of an X25519 private key
 pub fn x25519_pkcs8(
     secret: &EncryptionSecretKey,
@@ -460,7 +440,7 @@ fn from_pkcs8(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use uuid::Uuid;
 
@@ -613,35 +593,6 @@ mod tests {
         assert_ne!(words.to_bytes(), a.to_bytes());
     }
 
-    /// An endorsement verifies for its copy id and public key and DM key
-    /// only
-    #[test]
-    fn endorsement_binds_id_key_and_endorser() {
-        let (_, copy) = ids();
-        let dm = crate::crypto::signing_key_from_bytes(&[5; 32]);
-        let public =
-            EncryptionPublicKey::from(&EncryptionSecretKey::from([6; 32]));
-        let sig = endorse_copy(&dm, copy, &public);
-        let vk = dm.verifying_key();
-        assert!(verify_copy_endorsement(&vk, copy, &public, &sig));
-        assert!(!verify_copy_endorsement(
-            &vk,
-            OperatorDmCopyKeyId::new(),
-            &public,
-            &sig
-        ));
-        let other =
-            EncryptionPublicKey::from(&EncryptionSecretKey::from([7; 32]));
-        assert!(!verify_copy_endorsement(&vk, copy, &other, &sig));
-        let stranger = crate::crypto::signing_key_from_bytes(&[8; 32]);
-        assert!(!verify_copy_endorsement(
-            &stranger.verifying_key(),
-            copy,
-            &public,
-            &sig
-        ));
-    }
-
     /// PKCS#8 round-trips; the other curve's, or a longer form, is refused
     #[test]
     fn pkcs8_round_trips_and_refuses_the_other_curve() {
@@ -669,34 +620,69 @@ mod tests {
         assert!(x25519_from_pkcs8(&longer).is_err());
     }
 
+    /// RFC 4648 §5 base64url without padding, as JWK and WebAuthn write it.
+    /// For tests and the vector only: the crate has no base64 dependency
+    pub(crate) fn b64url(bytes: &[u8]) -> String {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in bytes.chunks(3) {
+            let n = chunk
+                .iter()
+                .enumerate()
+                .fold(0u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+            for i in 0..=chunk.len() {
+                out.push(char::from(
+                    ALPHABET[((n >> (18 - 6 * i)) & 63) as usize],
+                ));
+            }
+        }
+        out
+    }
+
+    /// The inverse of [`b64url`], for tests: `None` on a character outside
+    /// the alphabet or an impossible length
+    pub(crate) fn from_b64url(text: &str) -> Option<Vec<u8>> {
+        const ALPHABET: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        if text.len() % 4 == 1 {
+            return None;
+        }
+        let mut out = Vec::new();
+        for chunk in text.as_bytes().chunks(4) {
+            let mut n = 0u32;
+            for (i, c) in chunk.iter().enumerate() {
+                let v = ALPHABET.iter().position(|a| a == c)? as u32;
+                n |= v << (18 - 6 * i);
+            }
+            for i in 0..chunk.len() - 1 {
+                out.push((n >> (16 - 8 * i)) as u8);
+            }
+        }
+        Some(out)
+    }
+
     /// `vectors/dm_keys/copy_wrap.json`: one generation wrapped to one
-    /// passkey's copy key with fixed ephemeral keys, every step, the copy
-    /// key's endorsement, and each key as a JWK
+    /// passkey's copy key with fixed ephemeral keys, every step, a planted
+    /// pair that opens and must be refused, and each key as a JWK
     mod copy_wrap_vector {
         use super::*;
         use serde_json::json;
 
+        #[test]
+        fn b64url_round_trips() {
+            for len in 0..40 {
+                let bytes: Vec<u8> =
+                    (0..len).map(|i| (i * 37 + 5) as u8).collect();
+                assert_eq!(from_b64url(&b64url(&bytes)), Some(bytes));
+            }
+            assert_eq!(from_b64url("Zm9v!"), None);
+            assert_eq!(from_b64url("Z"), None);
+        }
+
         fn path() -> std::path::PathBuf {
             std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("vectors/dm_keys/copy_wrap.json")
-        }
-
-        /// RFC 4648 §5 base64url without padding, as JWK writes it. Here,
-        /// for the vector only: the crate has no base64 dependency
-        fn b64url(bytes: &[u8]) -> String {
-            const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-            let mut out = String::new();
-            for chunk in bytes.chunks(3) {
-                let n = chunk.iter().enumerate().fold(0u32, |n, (i, b)| {
-                    n | (u32::from(*b) << (16 - 8 * i))
-                });
-                for i in 0..=chunk.len() {
-                    out.push(char::from(
-                        ALPHABET[((n >> (18 - 6 * i)) & 63) as usize],
-                    ));
-                }
-            }
-            out
         }
 
         #[test]
@@ -736,13 +722,6 @@ mod tests {
                 keys.ed25519(),
                 &dm_x25519_public,
             );
-            let endorsement = endorse_copy(keys.ed25519(), copy, &copy_public);
-            assert!(verify_copy_endorsement(
-                &dm_ed25519_public,
-                copy,
-                &copy_public,
-                &endorsement
-            ));
             let ephemeral = |fill| EncryptionSecretKey::from([fill; 32]);
             let wrapped = wrap_dm_keys_with(
                 &keys,
@@ -755,6 +734,22 @@ mod tests {
             let opened =
                 unwrap_dm_keys(&wrapped, &copy_secret, key, copy).unwrap();
             assert!(opened.matches(&dm_x25519_public, &dm_ed25519_public));
+            // The negative case: wrapped correctly, opens, and must be refused
+            let planted_keys = DmPrivateKeys::new(
+                EncryptionSecretKey::from([0x66; 32]),
+                crate::crypto::signing_key_from_bytes(&[0x67; 32]),
+            );
+            let planted = wrap_dm_keys_with(
+                &planted_keys,
+                &copy_public,
+                key,
+                copy,
+                [ephemeral(0x68), ephemeral(0x69)],
+            )
+            .unwrap();
+            let opened =
+                unwrap_dm_keys(&planted, &copy_secret, key, copy).unwrap();
+            assert!(!opened.matches(&dm_x25519_public, &dm_ed25519_public));
 
             let part = |part, fill, blob: &[u8; WRAPPED_KEY_LEN]| {
                 let eph = ephemeral(fill);
@@ -778,7 +773,7 @@ mod tests {
                 })
             };
             let vector = json!({
-                "description": "One DM key generation wrapped to one copy key (`agentkit::dm_key`; agora docs/design-operator-posting.md, Track B). copy_secret = HKDF-SHA256(salt none, ikm prf_output, info \"agora/dm-copy-secret/v1\" || copy_id), an X25519 scalar (raw, unclamped). Per part (\"x25519\": the DM X25519 secret; \"ed25519\": the DM Ed25519 seed), with its own ephemeral key: label = key_id || copy_id || part; shared = X25519(ephemeral_secret, copy_public) = X25519(copy_secret, ephemeral_public); kek = HKDF-SHA256(salt ephemeral_public || copy_public, ikm shared, info \"agora/dm-key-copy/v1\" || label); wrapped = 0x01 || ephemeral_public || ChaCha20-Poly1305(kek, 12 zero bytes nonce, aad label, the raw 32-byte private key), 81 bytes: the envelope's key wrap. binding_signature is Ed25519 by the DM Ed25519 key over \"agora/enc-key/v1\" || dm_x25519_public, as an agent's encryption key is bound. copy_endorsement is Ed25519 by the DM Ed25519 key over \"agora/dm-copy/v1\" || copy_id || copy_public. `pkcs8` is what the browser imports into WebCrypto after opening a wrap; `jwk` gives each private key as an OKP JWK (d and x base64url, unpadded). Ids are UUID bytes, big-endian as written.",
+                "description": "One DM key generation wrapped to one copy key (`agentkit::dm_key`; agora docs/design-operator-posting.md, Track B). copy_secret = HKDF-SHA256(salt none, ikm prf_output, info \"agora/dm-copy-secret/v1\" || copy_id), an X25519 scalar (raw, unclamped). Per part (\"x25519\": the DM X25519 secret; \"ed25519\": the DM Ed25519 seed), with its own ephemeral key: label = key_id || copy_id || part; shared = X25519(ephemeral_secret, copy_public) = X25519(copy_secret, ephemeral_public); kek = HKDF-SHA256(salt ephemeral_public || copy_public, ikm shared, info \"agora/dm-key-copy/v1\" || label); wrapped = 0x01 || ephemeral_public || ChaCha20-Poly1305(kek, 12 zero bytes nonce, aad label, the raw 32-byte private key), 81 bytes: the envelope's key wrap. binding_signature is Ed25519 by the DM Ed25519 key over \"agora/enc-key/v1\" || dm_x25519_public, as an agent's encryption key is bound. `planted` is a negative case: another key pair wrapped correctly to the same copy key; it unwraps, and must then be refused because its keys don't match dm_x25519_public and dm_ed25519_public. `pkcs8` is what the browser imports into WebCrypto after opening a wrap; `jwk` gives each private key as an OKP JWK (d and x base64url, unpadded). Ids are UUID bytes, big-endian as written.",
                 "prf_output": hex::encode(prf_output),
                 "key_id": key,
                 "copy_id": copy,
@@ -789,10 +784,18 @@ mod tests {
                 "dm_ed25519_seed": hex::encode(keys.ed25519().to_bytes()),
                 "dm_ed25519_public": hex::encode(dm_ed25519_public.to_bytes()),
                 "binding_signature": hex::encode(binding.to_bytes()),
-                "copy_endorsement": hex::encode(endorsement.to_bytes()),
                 "wraps": {
                     "x25519": part(DmKeyPart::X25519, 0x64, &wrapped.x25519),
                     "ed25519": part(DmKeyPart::Ed25519, 0x65, &wrapped.ed25519),
+                },
+                "planted": {
+                    "x25519_secret": hex::encode(planted_keys.x25519().to_bytes()),
+                    "ed25519_seed": hex::encode(planted_keys.ed25519().to_bytes()),
+                    "x25519_public": hex::encode(EncryptionPublicKey::from(planted_keys.x25519()).as_bytes()),
+                    "ed25519_public": hex::encode(planted_keys.ed25519().verifying_key().to_bytes()),
+                    "wrapped_x25519": hex::encode(planted.x25519),
+                    "wrapped_ed25519": hex::encode(planted.ed25519),
+                    "expect": "unwraps; refused, its keys are not dm_x25519_public and dm_ed25519_public",
                 },
                 "pkcs8": {
                     "x25519": hex::encode(*keys.x25519_pkcs8()),

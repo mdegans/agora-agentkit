@@ -661,7 +661,9 @@ impl PasskeyCredentialId {
 }
 
 /// Lowercase hex on the wire, as the crate's other byte strings; refused
-/// outside [`PasskeyCredentialId::LEN`]
+/// outside [`PasskeyCredentialId::LEN`]. WebAuthn's JSON forms
+/// (`allowCredentials[].id`, `evalByCredential`'s keys, an assertion's
+/// `rawId`) are base64url without padding, so the page converts both ways
 impl Serialize for PasskeyCredentialId {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&hex::encode(&self.0))

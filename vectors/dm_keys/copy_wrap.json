@@ -1,10 +1,9 @@
 {
   "binding_signature": "c023f4b11e86039d4c1005d6c9466ecfa56f9c5c61dcc0f2a4c4084e0e5b9c991ba437e14ae1e688d25d84f7216749a537311a5f9922883c2ea40be0940f8308",
-  "copy_endorsement": "8b2924eb8b61873254d7efef17e8d10c66dc70be24be283fe2be97c3271dedd15407dad0dbd36bef2c0e597ff26a717a5eecaa189a9609e804269b400be78a0a",
   "copy_id": "c0b17e2a-9d3c-4b5e-8f60-1a2b3c4d5e6f",
   "copy_public": "ef2a6aaa75547baa60c4c061ad8addfc90126122155c8d417dd6e69bf9399f5b",
   "copy_secret": "0639748086a415fc45f9883f48bd548089150dc7bcb75b6c8cd765998711e9be",
-  "description": "One DM key generation wrapped to one copy key (`agentkit::dm_key`; agora docs/design-operator-posting.md, Track B). copy_secret = HKDF-SHA256(salt none, ikm prf_output, info \"agora/dm-copy-secret/v1\" || copy_id), an X25519 scalar (raw, unclamped). Per part (\"x25519\": the DM X25519 secret; \"ed25519\": the DM Ed25519 seed), with its own ephemeral key: label = key_id || copy_id || part; shared = X25519(ephemeral_secret, copy_public) = X25519(copy_secret, ephemeral_public); kek = HKDF-SHA256(salt ephemeral_public || copy_public, ikm shared, info \"agora/dm-key-copy/v1\" || label); wrapped = 0x01 || ephemeral_public || ChaCha20-Poly1305(kek, 12 zero bytes nonce, aad label, the raw 32-byte private key), 81 bytes: the envelope's key wrap. binding_signature is Ed25519 by the DM Ed25519 key over \"agora/enc-key/v1\" || dm_x25519_public, as an agent's encryption key is bound. copy_endorsement is Ed25519 by the DM Ed25519 key over \"agora/dm-copy/v1\" || copy_id || copy_public. `pkcs8` is what the browser imports into WebCrypto after opening a wrap; `jwk` gives each private key as an OKP JWK (d and x base64url, unpadded). Ids are UUID bytes, big-endian as written.",
+  "description": "One DM key generation wrapped to one copy key (`agentkit::dm_key`; agora docs/design-operator-posting.md, Track B). copy_secret = HKDF-SHA256(salt none, ikm prf_output, info \"agora/dm-copy-secret/v1\" || copy_id), an X25519 scalar (raw, unclamped). Per part (\"x25519\": the DM X25519 secret; \"ed25519\": the DM Ed25519 seed), with its own ephemeral key: label = key_id || copy_id || part; shared = X25519(ephemeral_secret, copy_public) = X25519(copy_secret, ephemeral_public); kek = HKDF-SHA256(salt ephemeral_public || copy_public, ikm shared, info \"agora/dm-key-copy/v1\" || label); wrapped = 0x01 || ephemeral_public || ChaCha20-Poly1305(kek, 12 zero bytes nonce, aad label, the raw 32-byte private key), 81 bytes: the envelope's key wrap. binding_signature is Ed25519 by the DM Ed25519 key over \"agora/enc-key/v1\" || dm_x25519_public, as an agent's encryption key is bound. `planted` is a negative case: another key pair wrapped correctly to the same copy key; it unwraps, and must then be refused because its keys don't match dm_x25519_public and dm_ed25519_public. `pkcs8` is what the browser imports into WebCrypto after opening a wrap; `jwk` gives each private key as an OKP JWK (d and x base64url, unpadded). Ids are UUID bytes, big-endian as written.",
   "dm_ed25519_public": "a7f6dfaf8f38b89ba8ce649b594f91e4d01fdc57f9c9493df43b5e50a9987367",
   "dm_ed25519_seed": "6363636363636363636363636363636363636363636363636363636363636363",
   "dm_x25519_public": "4a4f8ccde198d66e99b4c014418a3223ce256c98900ae4a6811fd10f7eb84c2c",
@@ -33,6 +32,15 @@
   "pkcs8": {
     "ed25519": "302e020100300506032b6570042204206363636363636363636363636363636363636363636363636363636363636363",
     "x25519": "302e020100300506032b656e042204206262626262626262626262626262626262626262626262626262626262626262"
+  },
+  "planted": {
+    "ed25519_public": "12a41592c8b7c17d4059e7b29b61e8ff96c7415f2f803348f2f017e05b9ea1da",
+    "ed25519_seed": "6767676767676767676767676767676767676767676767676767676767676767",
+    "expect": "unwraps; refused, its keys are not dm_x25519_public and dm_ed25519_public",
+    "wrapped_ed25519": "011b1b8caa8136a07b19cdc42dbff58c341de0087d8feaecf29eec0ed4fd0c3355fe6f696ca236c1607040714b2295fb5bd86e8b3acc4a05003cbc1132690ee0ad62ffdc404a466d7e01434b4f67d41e75",
+    "wrapped_x25519": "01da785d9aa3cdc88c2401760535ad5f436dc83a542e294faaf07fb2253b009416afb12c2d2e082cd55a40bd54ce5f01b96e130b710cafe743339a1828fb4e2b5f4e58839cdcbba3f6ebb6bfb5a4595746",
+    "x25519_public": "219e4d800da968d2a5fcb009c784f4746c7138edb9ee4844b739e830b05cf424",
+    "x25519_secret": "6666666666666666666666666666666666666666666666666666666666666666"
   },
   "prf_output": "6161616161616161616161616161616161616161616161616161616161616161",
   "wraps": {

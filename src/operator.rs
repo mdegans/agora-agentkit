@@ -897,27 +897,24 @@ pub enum OperatorActionDetail {
         messages: Vec<MessageId>,
     },
     /// The operator poster's first DM key generation, and the copy key of
-    /// the passkey whose 0x14 tap made it, endorsed by the generation. The
-    /// public keys are here so the entry stands on its own
+    /// the passkey whose 0x14 tap made it. The public keys are here so the
+    /// entry stands on its own
     DmKeyCreate {
         poster: AgentId,
         key: OperatorDmKeyId,
         public: DmKeyPublic,
         copy: OperatorDmCopyKeyId,
         copy_public: PublicKeyHex,
-        copy_endorsement: SignatureHex,
         passkey: OperatorPasskeyId,
     },
-    /// A copy key added, by a 0x14 tap of its own passkey, endorsed by the
-    /// live generation `endorsed_by`; every generation was wrapped to it
+    /// A copy key added, by a 0x14 tap of its own passkey; every generation
+    /// was wrapped to it
     DmCopyAdd {
         copy: OperatorDmCopyKeyId,
         copy_kind: DmCopyKind,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         passkey: Option<OperatorPasskeyId>,
         copy_public: PublicKeyHex,
-        endorsement: SignatureHex,
-        endorsed_by: OperatorDmKeyId,
     },
     /// A copy key removed with its wraps: by a 0x14 tap, or with its
     /// passkey's suspension (`suspension`, that `credential_suspend` entry).
@@ -1386,8 +1383,10 @@ pub struct PortalMarkReadResponse {
 
 crate::govlog::hex_bytes!(
     /// The PRF input a passkey's copy key is derived with (its
-    /// `evalByCredential` salt), hex on the wire. The server draws it when
-    /// the copy key is made
+    /// `evalByCredential` salt). The server draws it when the copy key is
+    /// made. Hex on the wire, as the crate's other byte strings; WebAuthn's
+    /// JSON (`evalByCredential`'s keys and values) is base64url, so the page
+    /// converts
     PrfSalt,
     32
 );
@@ -1463,26 +1462,6 @@ impl DmKeyPublic {
         }
     }
 
-    /// The copy key's endorsement verifies against this generation's
-    /// Ed25519 key ([`crate::dm_key::verify_copy_endorsement`])
-    pub fn endorses(
-        &self,
-        copy: OperatorDmCopyKeyId,
-        copy_public: &PublicKeyHex,
-        endorsement: &SignatureHex,
-    ) -> bool {
-        self.ed25519().is_some_and(|vk| {
-            crate::dm_key::verify_copy_endorsement(
-                &vk,
-                copy,
-                &crate::envelope::EncryptionPublicKey::from(
-                    *copy_public.as_bytes(),
-                ),
-                &crate::crypto::Signature::from_bytes(endorsement.as_bytes()),
-            )
-        })
-    }
-
     fn x25519(&self) -> crate::envelope::EncryptionPublicKey {
         crate::envelope::EncryptionPublicKey::from(
             *self.x25519_public.as_bytes(),
@@ -1547,25 +1526,7 @@ pub struct DmCopyKey {
     pub opener: DmCopyOpener,
     /// The copy key's X25519 public key, which generations are wrapped to
     pub x25519_public: PublicKeyHex,
-    /// By `endorsed_by`'s Ed25519 key over `"agora/dm-copy/v1" ‖ id ‖
-    /// x25519_public` ([`crate::dm_key::endorse_copy`]): the generation live
-    /// when the copy key was added
-    pub endorsement: SignatureHex,
-    pub endorsed_by: OperatorDmKeyId,
     pub created_at: DateTime<Utc>,
-}
-
-impl DmCopyKey {
-    /// Its endorsement verifies against `by`, the generation it names. Check
-    /// before wrapping a generation to it
-    pub fn endorsement_verifies(&self, by: &DmKeyGeneration) -> bool {
-        by.id == self.endorsed_by
-            && by.public.endorses(
-                self.id,
-                &self.x25519_public,
-                &self.endorsement,
-            )
-    }
 }
 
 /// One generation's private keys wrapped to one copy key
@@ -1735,8 +1696,7 @@ pub const MAX_DM_KEY_WRAPS: usize = 256;
 
 /// Make the poster's first DM key generation (the one its
 /// [`PortalDmKeyStart::Create`] named) and its first copy key, with the
-/// tap's assertion. The new generation endorses its own first copy key.
-/// `wrap` names the ids the start drew. Answered with [`PortalDmKeys`]
+/// tap's assertion. `wrap` names the ids the start drew. Answered with [`PortalDmKeys`]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -1745,8 +1705,6 @@ pub struct PortalDmKeyCreateRequest {
     /// The new copy key's public key, derived from the tapping passkey's PRF
     /// output
     pub copy_public: PublicKeyHex,
-    /// By the new generation's Ed25519 key ([`crate::dm_key::endorse_copy`])
-    pub copy_endorsement: SignatureHex,
     pub wrap: DmKeyWrap,
     /// `PublicKeyCredential.toJSON()` of the tap
     pub assertion: serde_json::Value,
@@ -1754,24 +1712,17 @@ pub struct PortalDmKeyCreateRequest {
 
 impl PortalDmKeyCreateRequest {
     /// Why the request would be refused before its tap is checked, if it
-    /// would be, given the generation its start named: a low-order copy or
-    /// ephemeral key, or an endorsement that doesn't verify. That the wrap's
-    /// ids are the ones drawn is the server's to check
-    pub fn check(&self, public: &DmKeyPublic) -> Result<(), String> {
+    /// would be: a low-order copy or ephemeral key, or a wrap of another
+    /// version. That the wrap's ids are the ones drawn is the server's to
+    /// check
+    pub fn check(&self) -> Result<(), String> {
         check_x25519("copy_public", &self.copy_public)?;
-        check_wrap(&self.wrap)?;
-        check_endorsement(
-            public,
-            self.wrap.copy,
-            &self.copy_public,
-            &self.copy_endorsement,
-        )
+        check_wrap(&self.wrap)
     }
 }
 
 /// Add a copy key for the passkey that taps, with the
-/// [`PortalDmKeyTap::AddCopy`] tap's assertion, endorsed by the live
-/// generation: `wraps` holds every generation wrapped to it, each once.
+/// [`PortalDmKeyTap::AddCopy`] tap's assertion: `wraps` holds every generation wrapped to it, each once.
 /// Answered with [`PortalDmKeys`]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -1779,38 +1730,28 @@ impl PortalDmKeyCreateRequest {
 pub struct PortalDmCopyAddRequest {
     pub action_id: OperatorActionId,
     pub copy_public: PublicKeyHex,
-    /// By the live generation's Ed25519 key
-    pub endorsement: SignatureHex,
     pub wraps: Vec<DmKeyWrap>,
     pub assertion: serde_json::Value,
 }
 
 impl PortalDmCopyAddRequest {
     /// Why the request would be refused before its tap is checked, if it
-    /// would be, given the live generation: a low-order copy or ephemeral
-    /// key, an endorsement that doesn't verify, no wraps or too many, two of
-    /// one generation, or wraps to more than one copy key. Whether they are
-    /// *every* generation is the server's to check
-    pub fn check(&self, live: &DmKeyPublic) -> Result<(), String> {
+    /// would be: a low-order copy or ephemeral key, no wraps or too many, two
+    /// of one generation, or wraps to more than one copy key. Whether they
+    /// are *every* generation is the server's to check
+    pub fn check(&self) -> Result<(), String> {
         check_x25519("copy_public", &self.copy_public)?;
         check_wraps(&self.wraps, |w| w.key, "generation")?;
         if self.wraps.windows(2).any(|w| w[0].copy != w[1].copy) {
             return Err("every wrap must be to the one new copy key".to_owned());
         }
-        check_endorsement(
-            live,
-            self.wraps[0].copy,
-            &self.copy_public,
-            &self.endorsement,
-        )
+        Ok(())
     }
 }
 
 /// Replace the live generation with the one the
 /// [`PortalDmKeyStart::Rotate`] named, with the tap's assertion: `wraps`
-/// holds it wrapped to every remaining copy key, each once, each copy key's
-/// endorsement checked first ([`DmCopyKey::endorsement_verifies`]).
-/// Answered with [`PortalDmKeys`]
+/// holds it wrapped to every remaining copy key, each once. Answered with [`PortalDmKeys`]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -1824,8 +1765,7 @@ impl PortalDmKeyRotateRequest {
     /// Why the request would be refused before its tap is checked, if it
     /// would be: a low-order ephemeral key, no wraps or too many, two to one
     /// copy key, or wraps of more than one generation. Whether they cover
-    /// *every* remaining copy key, and that each is endorsed, is the
-    /// server's to check
+    /// *every* remaining copy key is the server's to check
     pub fn check(&self) -> Result<(), String> {
         check_wraps(&self.wraps, |w| w.copy, "copy key")?;
         if self.wraps.windows(2).any(|w| w[0].key != w[1].key) {
@@ -1855,22 +1795,6 @@ fn check_x25519(field: &str, key: &PublicKeyHex) -> Result<(), String> {
         Err(format!("{field} is a low-order X25519 key"))
     } else {
         Ok(())
-    }
-}
-
-fn check_endorsement(
-    by: &DmKeyPublic,
-    copy: OperatorDmCopyKeyId,
-    copy_public: &PublicKeyHex,
-    endorsement: &SignatureHex,
-) -> Result<(), String> {
-    if by.endorses(copy, copy_public, endorsement) {
-        Ok(())
-    } else {
-        Err(
-            "the copy key's endorsement does not verify against the DM key"
-                .to_owned(),
-        )
     }
 }
 
@@ -2305,21 +2229,6 @@ mod tests {
         )
     }
 
-    fn endorse(
-        by: &crate::crypto::SigningKey,
-        copy: OperatorDmCopyKeyId,
-        public: &PublicKeyHex,
-    ) -> SignatureHex {
-        SignatureHex::from(
-            crate::dm_key::endorse_copy(
-                by,
-                copy,
-                &crate::envelope::EncryptionPublicKey::from(*public.as_bytes()),
-            )
-            .to_bytes(),
-        )
-    }
-
     /// A wrapped key's shape: version 1, an ephemeral key, filler
     fn blob(ephemeral: &PublicKeyHex) -> WrappedDmPrivateKey {
         let mut bytes = vec![0xab; crate::envelope::WRAPPED_KEY_LEN];
@@ -2352,7 +2261,7 @@ mod tests {
     #[test]
     fn dm_key_details() {
         let poster = AgentId::new();
-        let (signing, public) = dm_generation(5);
+        let (_, public) = dm_generation(5);
         let copy = OperatorDmCopyKeyId::new();
         let copy_public = x25519_public(6);
         for detail in [
@@ -2362,7 +2271,6 @@ mod tests {
                 public,
                 copy,
                 copy_public,
-                copy_endorsement: endorse(&signing, copy, &copy_public),
                 passkey: OperatorPasskeyId::new(),
             },
             OperatorActionDetail::DmCopyAdd {
@@ -2370,8 +2278,6 @@ mod tests {
                 copy_kind: DmCopyKind::Passkey,
                 passkey: Some(OperatorPasskeyId::new()),
                 copy_public,
-                endorsement: endorse(&signing, copy, &copy_public),
-                endorsed_by: OperatorDmKeyId::new(),
             },
             OperatorActionDetail::DmCopyRemove {
                 copy,
@@ -2575,6 +2481,30 @@ mod tests {
         );
     }
 
+    /// A credential id and a PRF salt are hex here and base64url in
+    /// WebAuthn's JSON: one conversion pinned both ways
+    #[test]
+    fn hex_on_the_wire_base64url_in_webauthn() {
+        use crate::dm_key::tests::{b64url, from_b64url};
+        let credential: PasskeyCredentialId = serde_json::from_value(
+            "00112233445566778899aabbccddeeff0102fbff".into(),
+        )
+        .unwrap();
+        let webauthn = "ABEiM0RVZneImaq7zN3u_wEC-_8";
+        assert_eq!(b64url(credential.as_bytes()), webauthn);
+        assert_eq!(
+            PasskeyCredentialId::from(from_b64url(webauthn).unwrap()),
+            credential
+        );
+        let salt = PrfSalt::from([0xfb; 32]);
+        let webauthn = b64url(salt.as_bytes());
+        assert_eq!(webauthn, "-_v7".repeat(10) + "-_s");
+        assert_eq!(
+            PrfSalt::try_from(from_b64url(&webauthn).unwrap()).unwrap(),
+            salt
+        );
+    }
+
     /// A real wrap passes the checks, crosses the wire and opens
     #[test]
     fn a_real_wrap_crosses_the_wire() {
@@ -2615,15 +2545,14 @@ mod tests {
     }
 
     /// What the DM key requests refuse before their taps: a binding that
-    /// doesn't verify, a low-order X25519 key anywhere, an endorsement by
-    /// another key, no wraps, too many (refused, never cut; exactly the most
+    /// doesn't verify, a low-order X25519 key anywhere, no wraps, too many (refused, never cut; exactly the most
     /// is accepted), two for one target, or wraps that disagree on the one
     /// they share
     #[test]
     fn portal_dm_key_checks() {
         let assertion = serde_json::json!({"id": "abc"});
         let (signing, public) = dm_generation(5);
-        let (stranger, other_public) = dm_generation(6);
+        let (_, other_public) = dm_generation(6);
         assert_eq!(public.check(), Ok(()));
         let mut swapped = public;
         swapped.x25519_public = other_public.x25519_public;
@@ -2664,18 +2593,17 @@ mod tests {
             )
         ));
 
-        // Create: the generation endorses its first copy key
+        // Create
         let key = OperatorDmKeyId::new();
         let copy = OperatorDmCopyKeyId::new();
         let copy_public = x25519_public(0x32);
         let create = PortalDmKeyCreateRequest {
             action_id: OperatorActionId::new(),
             copy_public,
-            copy_endorsement: endorse(&signing, copy, &copy_public),
             wrap: dm_wrap(key, copy),
             assertion: assertion.clone(),
         };
-        assert_eq!(create.check(&public), Ok(()));
+        assert_eq!(create.check(), Ok(()));
         let json = serde_json::to_value(&create).unwrap();
         assert_eq!(
             serde_json::from_value::<PortalDmKeyCreateRequest>(json.clone())
@@ -2687,27 +2615,15 @@ mod tests {
         assert!(
             serde_json::from_value::<PortalDmKeyCreateRequest>(extra).is_err()
         );
-        assert!(
-            create
-                .check(&other_public)
-                .unwrap_err()
-                .contains("endorsement")
-        );
-        let by_stranger = PortalDmKeyCreateRequest {
-            copy_endorsement: endorse(&stranger, copy, &copy_public),
-            ..create.clone()
-        };
-        assert!(by_stranger.check(&public).is_err());
         let low_copy = PortalDmKeyCreateRequest {
             copy_public: low_order[1],
-            copy_endorsement: endorse(&signing, copy, &low_order[1]),
             ..create.clone()
         };
-        assert!(low_copy.check(&public).unwrap_err().contains("copy_public"));
+        assert!(low_copy.check().unwrap_err().contains("copy_public"));
         let mut low_ephemeral = create.clone();
         low_ephemeral.wrap.wrapped_ed25519 = blob(&low_order[4]);
         assert_eq!(
-            low_ephemeral.check(&public),
+            low_ephemeral.check(),
             Err("wrapped_ed25519's ephemeral key is low order".to_owned())
         );
         let mut not_v1 = create.clone();
@@ -2715,37 +2631,35 @@ mod tests {
         bytes[0] = 2;
         not_v1.wrap.wrapped_x25519 =
             WrappedDmPrivateKey::try_from(bytes).unwrap();
-        assert!(not_v1.check(&public).unwrap_err().contains("version-1"));
+        assert!(not_v1.check().unwrap_err().contains("version-1"));
 
-        // Add a copy: endorsed by the live generation, one wrap per generation
+        // Add a copy: one wrap per generation
         let keys: Vec<OperatorDmKeyId> =
             (0..3).map(|_| OperatorDmKeyId::new()).collect();
         let mut add = PortalDmCopyAddRequest {
             action_id: OperatorActionId::new(),
             copy_public,
-            endorsement: endorse(&signing, copy, &copy_public),
             wraps: keys.iter().map(|k| dm_wrap(*k, copy)).collect(),
             assertion: assertion.clone(),
         };
-        assert_eq!(add.check(&public), Ok(()));
-        assert!(add.check(&other_public).is_err());
+        assert_eq!(add.check(), Ok(()));
         add.wraps[1].wrapped_x25519 = blob(&low_order[0]);
-        assert!(add.check(&public).unwrap_err().contains("low order"));
+        assert!(add.check().unwrap_err().contains("low order"));
         add.wraps[1] = dm_wrap(keys[1], copy);
         add.wraps.push(dm_wrap(keys[0], copy));
-        assert!(add.check(&public).unwrap_err().contains("two wraps"));
+        assert!(add.check().unwrap_err().contains("two wraps"));
         add.wraps.pop();
         add.wraps
             .push(dm_wrap(OperatorDmKeyId::new(), OperatorDmCopyKeyId::new()));
-        assert!(add.check(&public).unwrap_err().contains("one new copy key"));
+        assert!(add.check().unwrap_err().contains("one new copy key"));
         add.wraps.clear();
-        assert_eq!(add.check(&public), Err("no wraps".to_owned()));
+        assert_eq!(add.check(), Err("no wraps".to_owned()));
         add.wraps = (0..MAX_DM_KEY_WRAPS)
             .map(|_| dm_wrap(OperatorDmKeyId::new(), copy))
             .collect();
-        assert_eq!(add.check(&public), Ok(()));
+        assert_eq!(add.check(), Ok(()));
         add.wraps.push(dm_wrap(OperatorDmKeyId::new(), copy));
-        let refusal = add.check(&public).unwrap_err();
+        let refusal = add.check().unwrap_err();
         assert!(refusal.contains("257 wraps"), "{refusal}");
         assert!(refusal.contains("nothing was stored"), "{refusal}");
 
@@ -2773,34 +2687,6 @@ mod tests {
         rotate.wraps.pop();
         rotate.wraps[0].wrapped_x25519 = blob(&low_order[2]);
         assert!(rotate.check().is_err());
-
-        // A listed copy key's endorsement, against the generation it names
-        let generation = DmKeyGeneration {
-            id: key,
-            public,
-            created_at: Utc::now(),
-            retired_at: None,
-            rotation_due_at: None,
-        };
-        let listed = DmCopyKey {
-            id: copy,
-            opener: DmCopyOpener::RecoveryWords,
-            x25519_public: copy_public,
-            endorsement: endorse(&signing, copy, &copy_public),
-            endorsed_by: key,
-            created_at: Utc::now(),
-        };
-        assert!(listed.endorsement_verifies(&generation));
-        let elsewhere = DmKeyGeneration {
-            id: OperatorDmKeyId::new(),
-            ..generation.clone()
-        };
-        assert!(!listed.endorsement_verifies(&elsewhere));
-        let planted = DmCopyKey {
-            endorsement: endorse(&stranger, copy, &copy_public),
-            ..listed
-        };
-        assert!(!planted.endorsement_verifies(&generation));
 
         let remove = serde_json::json!({
             "action_id": OperatorActionId::new(), "assertion": assertion,

@@ -27,11 +27,13 @@ envelope byte changes: the locked version-1 vector passes as it was.
   part, KEK info `"agora/dm-key-copy/v1" ‖ key id ‖ copy id ‖ part`, the
   same label as AAD): `WrappedDmKeys`, 81 bytes each. Unwrapping gives
   `DmPrivateKeys`, zeroized on drop, with `matches` (the check that makes
-  an unwrap mean anything) and the PKCS#8 WebCrypto imports. A copy key's
-  endorsement by the DM Ed25519 key (`"agora/dm-copy/v1"`,
-  `endorse_copy`, `verify_copy_endorsement`). Pinned in
-  `vectors/dm_keys/copy_wrap.json`, wraps included, with each key as a
-  JWK. No new dependency.
+  an unwrap mean anything) and the PKCS#8 WebCrypto imports. The module
+  says what this defends against and what it doesn't: a database writer
+  or the page's server can substitute keys, found afterwards by the 0x14
+  assertion, and refused at unlock by `matches` for the published keys.
+  Pinned in `vectors/dm_keys/copy_wrap.json`, wraps included, with a
+  planted pair that opens and must be refused, and each key as a JWK. No
+  new dependency.
 - **Bound tap 0x14, DM keys**: `TapKind::DmKeys`,
   `Approval::DmKeys { operator, subject }`, `DmKeysPurpose`,
   `DmKeysSubject` and `dm_key_public_sha256`. The bytes are operator id,
@@ -40,21 +42,22 @@ envelope byte changes: the locked version-1 vector passes as it was.
 - **`DmCopyKind`** (`dm_copy_kind_enum`: `passkey`, `recovery_words`),
   and the ids `OperatorDmKeyId` and `OperatorDmCopyKeyId`.
 - **`PasskeyCredentialId` is on the wire**: hex, 16 to 1023 bytes, an
-  inline schema.
+  inline schema. WebAuthn's JSON has it (and a PRF salt) in base64url;
+  the page converts.
 - **The log's DM key kinds**: `OperatorActionKind::{DmKeyCreate,
   DmCopyAdd, DmCopyRemove, DmKeyRotate}` (appended, in that order) and
-  their `OperatorActionDetail` variants, which carry the public keys and
-  endorsements they record.
+  their `OperatorActionDetail` variants, which carry the public keys they
+  record.
 - **The portal's DM key wire**: `PortalDmKeys` (the listing),
   `PortalDmKeyStart` (a new generation's public keys travel here, so the
   tap binds them) and `PortalDmKeyTap`, `PortalDmKeyCreateRequest`,
   `PortalDmCopyAddRequest`, `PortalDmKeyRotateRequest` and
   `PortalDmCopyRemoveRequest`, with `DmKeyPublic`, `DmKeyGeneration`,
-  `DmCopyKey` (endorsed, and by which generation), `DmCopyOpener` (a
+  `DmCopyKey`, `DmCopyOpener` (a
   passkey's credential id and PRF salt), `DmKeyWrap`, `PrfSalt` and
   `WrappedDmPrivateKey` (exactly 81 bytes). Their `check`s refuse
   low-order X25519 keys (a wrap's ephemeral keys included), wraps of
-  another version, bindings and endorsements that don't verify, and
+  another version, bindings that don't verify, and
   more than `MAX_DM_KEY_WRAPS` (256) wraps, never cutting.
 
 ### What broke
