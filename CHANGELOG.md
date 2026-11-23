@@ -18,17 +18,20 @@ envelope byte changes: the locked version-1 vector passes as it was.
   X25519 key. `seal`, `unwrap_key` and `open` are unchanged. A whole seal
   with every random input fixed is pinned in
   `vectors/envelope/v1_seal.json`.
-- **`dm_key`**: the copy keys that open the DM keys. The copy secret
-  (HKDF, `"agora/dm-copy-secret/v1"`) from a `CopySecretInput`: a
-  passkey's 32-byte PRF output, or `RecoveryEntropy` (bytes, at least 16,
-  never the words' text); the wrap key per private key (the envelope's
-  KEK under `"agora/dm-key-copy/v1"`, with the generation and copy key
-  ids); a copy key's endorsement by the DM Ed25519 key
-  (`"agora/dm-copy/v1"`, `endorse_copy`, `verify_copy_endorsement`);
-  RFC 8410 PKCS#8. Pinned in `vectors/dm_keys/copy_wrap.json`, with each
-  key as a JWK. Not yet the AEAD step that wraps: AES-256-GCM or the
-  envelope's ChaCha20-Poly1305 is still being chosen. The module says
-  why an unwrap must be checked against the generation's public keys.
+- **`dm_key`**: the copy keys that open the DM keys, and the wrap.
+  The copy secret (HKDF, `"agora/dm-copy-secret/v1"`) from a
+  `CopySecretInput`: a passkey's 32-byte PRF output, or `RecoveryEntropy`
+  (bytes, at least 16, never the words' text). `wrap_dm_keys` and
+  `unwrap_dm_keys` wrap each raw private key of a generation with the
+  envelope's own key wrap (ChaCha20-Poly1305, a fresh ephemeral key per
+  part, KEK info `"agora/dm-key-copy/v1" ‖ key id ‖ copy id ‖ part`, the
+  same label as AAD): `WrappedDmKeys`, 81 bytes each. Unwrapping gives
+  `DmPrivateKeys`, zeroized on drop, with `matches` (the check that makes
+  an unwrap mean anything) and the PKCS#8 WebCrypto imports. A copy key's
+  endorsement by the DM Ed25519 key (`"agora/dm-copy/v1"`,
+  `endorse_copy`, `verify_copy_endorsement`). Pinned in
+  `vectors/dm_keys/copy_wrap.json`, wraps included, with each key as a
+  JWK. No new dependency.
 - **Bound tap 0x14, DM keys**: `TapKind::DmKeys`,
   `Approval::DmKeys { operator, subject }`, `DmKeysPurpose`,
   `DmKeysSubject` and `dm_key_public_sha256`. The bytes are operator id,
@@ -48,10 +51,11 @@ envelope byte changes: the locked version-1 vector passes as it was.
   `PortalDmCopyAddRequest`, `PortalDmKeyRotateRequest` and
   `PortalDmCopyRemoveRequest`, with `DmKeyPublic`, `DmKeyGeneration`,
   `DmCopyKey` (endorsed, and by which generation), `DmCopyOpener` (a
-  passkey's credential id and PRF salt), `DmKeyWrap`, `DmKeyWrapIv`,
-  `PrfSalt` and `WrappedDmPrivateKey`. Their `check`s refuse low-order
-  X25519 keys, bindings and endorsements that don't verify, and more
-  than `MAX_DM_KEY_WRAPS` (256) wraps, never cutting.
+  passkey's credential id and PRF salt), `DmKeyWrap`, `PrfSalt` and
+  `WrappedDmPrivateKey` (exactly 81 bytes). Their `check`s refuse
+  low-order X25519 keys (a wrap's ephemeral keys included), wraps of
+  another version, bindings and endorsements that don't verify, and
+  more than `MAX_DM_KEY_WRAPS` (256) wraps, never cutting.
 
 ### What broke
 

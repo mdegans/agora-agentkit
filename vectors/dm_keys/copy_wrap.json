@@ -4,14 +4,11 @@
   "copy_id": "c0b17e2a-9d3c-4b5e-8f60-1a2b3c4d5e6f",
   "copy_public": "ef2a6aaa75547baa60c4c061ad8addfc90126122155c8d417dd6e69bf9399f5b",
   "copy_secret": "0639748086a415fc45f9883f48bd548089150dc7bcb75b6c8cd765998711e9be",
-  "description": "One DM key generation wrapped to one copy key (`agentkit::dm_key`; agora docs/design-operator-posting.md, Track B). copy_secret = HKDF-SHA256(salt none, ikm prf_output, info \"agora/dm-copy-secret/v1\" || copy_id), an X25519 scalar (raw, unclamped). shared = X25519(ephemeral_secret, copy_public) = X25519(copy_secret, ephemeral_public). wrap_key[part] = HKDF-SHA256(salt ephemeral_public || copy_public, ikm shared, info \"agora/dm-key-copy/v1\" || key_id || copy_id || part), part \"x25519\" or \"ed25519\". Each private key is wrapped by an AEAD under wrap_key[part] with `iv` and no AAD, over its RFC 8410 PKCS#8 (`pkcs8`). binding_signature is Ed25519 by the DM Ed25519 key over \"agora/enc-key/v1\" || dm_x25519_public, as an agent's encryption key is bound. copy_endorsement is Ed25519 by the DM Ed25519 key over \"agora/dm-copy/v1\" || copy_id || copy_public. `jwk` gives each private key as an OKP JWK (d and x base64url, unpadded). Ids are UUID bytes, big-endian as written. The wrapped outputs are not in this file yet: the AEAD (AES-256-GCM, or the envelope's ChaCha20-Poly1305) is still being chosen.",
+  "description": "One DM key generation wrapped to one copy key (`agentkit::dm_key`; agora docs/design-operator-posting.md, Track B). copy_secret = HKDF-SHA256(salt none, ikm prf_output, info \"agora/dm-copy-secret/v1\" || copy_id), an X25519 scalar (raw, unclamped). Per part (\"x25519\": the DM X25519 secret; \"ed25519\": the DM Ed25519 seed), with its own ephemeral key: label = key_id || copy_id || part; shared = X25519(ephemeral_secret, copy_public) = X25519(copy_secret, ephemeral_public); kek = HKDF-SHA256(salt ephemeral_public || copy_public, ikm shared, info \"agora/dm-key-copy/v1\" || label); wrapped = 0x01 || ephemeral_public || ChaCha20-Poly1305(kek, 12 zero bytes nonce, aad label, the raw 32-byte private key), 81 bytes: the envelope's key wrap. binding_signature is Ed25519 by the DM Ed25519 key over \"agora/enc-key/v1\" || dm_x25519_public, as an agent's encryption key is bound. copy_endorsement is Ed25519 by the DM Ed25519 key over \"agora/dm-copy/v1\" || copy_id || copy_public. `pkcs8` is what the browser imports into WebCrypto after opening a wrap; `jwk` gives each private key as an OKP JWK (d and x base64url, unpadded). Ids are UUID bytes, big-endian as written.",
   "dm_ed25519_public": "a7f6dfaf8f38b89ba8ce649b594f91e4d01fdc57f9c9493df43b5e50a9987367",
   "dm_ed25519_seed": "6363636363636363636363636363636363636363636363636363636363636363",
   "dm_x25519_public": "4a4f8ccde198d66e99b4c014418a3223ce256c98900ae4a6811fd10f7eb84c2c",
   "dm_x25519_secret": "6262626262626262626262626262626262626262626262626262626262626262",
-  "ephemeral_public": "6b3d57762f8badb69433f9c6d060f85f5e5c6b6803a816d141c075f63541ad10",
-  "ephemeral_secret": "6464646464646464646464646464646464646464646464646464646464646464",
-  "iv": "656565656565656565656565",
   "jwk": {
     "copy": {
       "crv": "X25519",
@@ -30,12 +27,6 @@
       "d": "YmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmJiYmI",
       "kty": "OKP",
       "x": "Sk-MzeGY1m6ZtMAUQYoyI84lbJiQCuSmgR_RD364TCw"
-    },
-    "ephemeral": {
-      "crv": "X25519",
-      "d": "ZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGRkZGQ",
-      "kty": "OKP",
-      "x": "az1Xdi-LrbaUM_nG0GD4X15ca2gDqBbRQcB19jVBrRA"
     }
   },
   "key_id": "6b1e0d2a-4c3f-4e5a-9b8c-7d6e5f403122",
@@ -44,9 +35,22 @@
     "x25519": "302e020100300506032b656e042204206262626262626262626262626262626262626262626262626262626262626262"
   },
   "prf_output": "6161616161616161616161616161616161616161616161616161616161616161",
-  "shared": "5206f8e14ad4399234caf1f22c20ffc979068e2368eb56c7f50e0c6863bbab3d",
-  "wrap_key": {
-    "ed25519": "c9e7a7d12131f7ac5aa2232b4bf54e8e01ea64cc40a81af58eadbca1146bcb31",
-    "x25519": "4dec63c2ea940637939f132a2915b99f7dee4c40ad12b30b0369a71102c3fc78"
+  "wraps": {
+    "ed25519": {
+      "ephemeral_public": "fb41b1fcf75c1227fa08876056a5ed07ac44fe0c116ec2de80b8e523959d7824",
+      "ephemeral_secret": "6565656565656565656565656565656565656565656565656565656565656565",
+      "kek": "2478144c99df5396d8584e101add8f659b4527997b4648245b77d70b54fe3b83",
+      "label": "6b1e0d2a4c3f4e5a9b8c7d6e5f403122c0b17e2a9d3c4b5e8f601a2b3c4d5e6f65643235353139",
+      "shared": "0b0e2f6024c933eb2a24cc69c06eb777be8331ed0a1d9de8d63094f78fd14367",
+      "wrapped": "01fb41b1fcf75c1227fa08876056a5ed07ac44fe0c116ec2de80b8e523959d78247c19365411c1102d368d37dcbc5d104c3fc600e1dac0712462970844aa0bf5544debb0b8e08d727077bc829f300a4088"
+    },
+    "x25519": {
+      "ephemeral_public": "6b3d57762f8badb69433f9c6d060f85f5e5c6b6803a816d141c075f63541ad10",
+      "ephemeral_secret": "6464646464646464646464646464646464646464646464646464646464646464",
+      "kek": "4dec63c2ea940637939f132a2915b99f7dee4c40ad12b30b0369a71102c3fc78",
+      "label": "6b1e0d2a4c3f4e5a9b8c7d6e5f403122c0b17e2a9d3c4b5e8f601a2b3c4d5e6f783235353139",
+      "shared": "5206f8e14ad4399234caf1f22c20ffc979068e2368eb56c7f50e0c6863bbab3d",
+      "wrapped": "016b3d57762f8badb69433f9c6d060f85f5e5c6b6803a816d141c075f63541ad10d149294a14f0bfccd2e08725e4ebc6cda45d42c23b0935be70c09c23d6e6c3c7948b95490abde226d42733df3bc57a47"
+    }
   }
 }

@@ -480,8 +480,8 @@ pub(crate) fn wrap_secret(
     )
 }
 
-/// [`wrap_secret`] under a given ephemeral key
-fn wrap_secret_with(
+/// `wrap_secret` under a given ephemeral key; also `dm_key`'s wrap
+pub(crate) fn wrap_secret_with(
     secret: &[u8; 32],
     to_pub: &EncryptionPublicKey,
     info: &[u8],

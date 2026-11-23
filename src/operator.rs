@@ -1385,12 +1385,6 @@ pub struct PortalMarkReadResponse {
 // ---------------------------------------------------------------------------
 
 crate::govlog::hex_bytes!(
-    /// The IV of one (generation, copy key) wrap, hex on the wire
-    DmKeyWrapIv,
-    crate::dm_key::IV_LEN
-);
-
-crate::govlog::hex_bytes!(
     /// The PRF input a passkey's copy key is derived with (its
     /// `evalByCredential` salt), hex on the wire. The server draws it when
     /// the copy key is made
@@ -1398,80 +1392,22 @@ crate::govlog::hex_bytes!(
     32
 );
 
-/// One private key of a generation, wrapped to a copy key: an AEAD over its
-/// PKCS#8, tag appended ([`crate::dm_key`]). Hex on the wire;
-/// [`MIN_WRAPPED_LEN`](crate::dm_key::MIN_WRAPPED_LEN) to
-/// [`MAX_WRAPPED_LEN`](crate::dm_key::MAX_WRAPPED_LEN) bytes, any other
-/// length refused. Longer than the PKCS#8 this crate writes, because a
-/// browser may write the longer form and is the only reader (`dm_key`'s
-/// docs)
-#[derive(Clone, PartialEq, Eq)]
-pub struct WrappedDmPrivateKey(Vec<u8>);
+crate::govlog::hex_bytes!(
+    /// One private key of a generation wrapped to a copy key: the
+    /// envelope's key wrap, `0x01 ‖ ephemeral public ‖ ChaCha20-Poly1305`
+    /// ([`crate::dm_key`]). Hex on the wire, exactly
+    /// [`WRAPPED_KEY_LEN`](crate::envelope::WRAPPED_KEY_LEN) bytes
+    WrappedDmPrivateKey,
+    crate::envelope::WRAPPED_KEY_LEN
+);
 
 impl WrappedDmPrivateKey {
-    pub fn as_bytes(&self) -> &[u8] {
-        &self.0
-    }
-}
-
-impl TryFrom<Vec<u8>> for WrappedDmPrivateKey {
-    type Error = String;
-
-    fn try_from(bytes: Vec<u8>) -> Result<Self, Self::Error> {
-        use crate::dm_key::{MAX_WRAPPED_LEN, MIN_WRAPPED_LEN};
-        if (MIN_WRAPPED_LEN..=MAX_WRAPPED_LEN).contains(&bytes.len()) {
-            Ok(Self(bytes))
-        } else {
-            Err(format!(
-                "a wrapped DM private key is {MIN_WRAPPED_LEN} to \
-                 {MAX_WRAPPED_LEN} bytes, got {}",
-                bytes.len()
-            ))
-        }
-    }
-}
-
-impl std::fmt::Debug for WrappedDmPrivateKey {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "WrappedDmPrivateKey({})", hex::encode(&self.0))
-    }
-}
-
-impl Serialize for WrappedDmPrivateKey {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_str(&hex::encode(&self.0))
-    }
-}
-
-impl<'de> Deserialize<'de> for WrappedDmPrivateKey {
-    fn deserialize<D: serde::Deserializer<'de>>(
-        d: D,
-    ) -> Result<Self, D::Error> {
-        let s = String::deserialize(d)?;
-        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
-        Self::try_from(bytes).map_err(serde::de::Error::custom)
-    }
-}
-
-// Hand-written, inline, as every hex newtype's (`govlog::hex_bytes!`)
-#[cfg(feature = "schemars")]
-impl schemars::JsonSchema for WrappedDmPrivateKey {
-    fn inline_schema() -> bool {
-        true
-    }
-
-    fn schema_name() -> std::borrow::Cow<'static, str> {
-        std::borrow::Cow::Borrowed("WrappedDmPrivateKey")
-    }
-
-    fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
-        use crate::dm_key::{MAX_WRAPPED_LEN, MIN_WRAPPED_LEN};
-        schemars::json_schema!({
-            "type": "string",
-            "minLength": MIN_WRAPPED_LEN * 2,
-            "maxLength": MAX_WRAPPED_LEN * 2,
-            "description": "An AEAD over a PKCS#8 private key, tag appended; lowercase hex",
-        })
+    /// The ephemeral X25519 key it carries
+    pub fn ephemeral_public(&self) -> crate::envelope::EncryptionPublicKey {
+        crate::envelope::EncryptionPublicKey::from(
+            <[u8; 32]>::try_from(&self.as_bytes()[1..33])
+                .expect("a wrapped key is longer than 33 bytes"),
+        )
     }
 }
 
@@ -1633,7 +1569,8 @@ impl DmCopyKey {
 }
 
 /// One generation's private keys wrapped to one copy key
-/// ([`crate::dm_key`]): a fresh ephemeral key and IV per row
+/// ([`crate::dm_key::wrap_dm_keys`]): each with its own ephemeral key,
+/// which the blob carries
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[cfg_attr(feature = "schemars", schemars(inline))]
@@ -1641,10 +1578,18 @@ impl DmCopyKey {
 pub struct DmKeyWrap {
     pub key: OperatorDmKeyId,
     pub copy: OperatorDmCopyKeyId,
-    pub ephemeral_public: PublicKeyHex,
-    pub iv: DmKeyWrapIv,
     pub wrapped_x25519: WrappedDmPrivateKey,
     pub wrapped_ed25519: WrappedDmPrivateKey,
+}
+
+impl DmKeyWrap {
+    /// The blobs as [`crate::dm_key::unwrap_dm_keys`] takes them
+    pub fn wrapped(&self) -> crate::dm_key::WrappedDmKeys {
+        crate::dm_key::WrappedDmKeys {
+            x25519: *self.wrapped_x25519.as_bytes(),
+            ed25519: *self.wrapped_ed25519.as_bytes(),
+        }
+    }
 }
 
 /// `GET /api/portal/poster/dm-key`: the session's poster's DM keys, what
@@ -1814,7 +1759,7 @@ impl PortalDmKeyCreateRequest {
     /// ids are the ones drawn is the server's to check
     pub fn check(&self, public: &DmKeyPublic) -> Result<(), String> {
         check_x25519("copy_public", &self.copy_public)?;
-        check_x25519("ephemeral_public", &self.wrap.ephemeral_public)?;
+        check_wrap(&self.wrap)?;
         check_endorsement(
             public,
             self.wrap.copy,
@@ -1948,8 +1893,22 @@ fn check_wraps<K: Eq + std::hash::Hash>(
     if wraps.iter().any(|w| !seen.insert(by(w))) {
         return Err(format!("two wraps for one {what}"));
     }
-    for w in wraps {
-        check_x25519("ephemeral_public", &w.ephemeral_public)?;
+    wraps.iter().try_for_each(check_wrap)
+}
+
+/// Each blob is the envelope's version and carries an ephemeral key that
+/// isn't low order
+fn check_wrap(wrap: &DmKeyWrap) -> Result<(), String> {
+    for (part, blob) in [
+        ("wrapped_x25519", &wrap.wrapped_x25519),
+        ("wrapped_ed25519", &wrap.wrapped_ed25519),
+    ] {
+        if blob.as_bytes()[0] != crate::envelope::ENVELOPE_VERSION {
+            return Err(format!("{part} is not a version-1 wrap"));
+        }
+        if crate::envelope::is_low_order(&blob.ephemeral_public()) {
+            return Err(format!("{part}'s ephemeral key is low order"));
+        }
     }
     Ok(())
 }
@@ -2361,21 +2320,20 @@ mod tests {
         )
     }
 
+    /// A wrapped key's shape: version 1, an ephemeral key, filler
+    fn blob(ephemeral: &PublicKeyHex) -> WrappedDmPrivateKey {
+        let mut bytes = vec![0xab; crate::envelope::WRAPPED_KEY_LEN];
+        bytes[0] = crate::envelope::ENVELOPE_VERSION;
+        bytes[1..33].copy_from_slice(ephemeral.as_bytes());
+        WrappedDmPrivateKey::try_from(bytes).unwrap()
+    }
+
     fn dm_wrap(key: OperatorDmKeyId, copy: OperatorDmCopyKeyId) -> DmKeyWrap {
-        let wrapped = || {
-            WrappedDmPrivateKey::try_from(vec![
-                0xab;
-                crate::dm_key::MIN_WRAPPED_LEN
-            ])
-            .unwrap()
-        };
         DmKeyWrap {
             key,
             copy,
-            ephemeral_public: x25519_public(0x31),
-            iv: DmKeyWrapIv::from([2; crate::dm_key::IV_LEN]),
-            wrapped_x25519: wrapped(),
-            wrapped_ed25519: wrapped(),
+            wrapped_x25519: blob(&x25519_public(0x31)),
+            wrapped_ed25519: blob(&x25519_public(0x33)),
         }
     }
 
@@ -2539,25 +2497,23 @@ mod tests {
             );
         }
 
-        // A wrapped key: hex, refused outside its lengths, odd or not hex
+        // A wrapped key: hex, exactly 81 bytes, refused odd or not hex
         let wrap = dm_wrap(key, copy);
         let json = serde_json::to_value(&wrap).unwrap();
         assert_eq!(
             serde_json::from_value::<DmKeyWrap>(json.clone()).unwrap(),
             wrap
         );
-        for len in [
-            crate::dm_key::MIN_WRAPPED_LEN - 1,
-            crate::dm_key::MAX_WRAPPED_LEN + 1,
-        ] {
+        assert_eq!(crate::envelope::WRAPPED_KEY_LEN, 81);
+        for len in [0, 48, 80, 82, 160] {
             let mut bad = json.clone();
-            bad["wrapped_x25519"] = hex::encode(vec![0; len]).into();
+            bad["wrapped_x25519"] = hex::encode(vec![1; len]).into();
             let err = serde_json::from_value::<DmKeyWrap>(bad)
                 .unwrap_err()
                 .to_string();
-            assert!(err.contains(&format!("got {len}")), "{err}");
+            assert!(err.contains("81 bytes"), "{len}: {err}");
         }
-        let good = hex::encode(vec![0; crate::dm_key::MIN_WRAPPED_LEN]);
+        let good = hex::encode(vec![1; crate::envelope::WRAPPED_KEY_LEN]);
         for bad in [format!("{good}0"), format!("zz{}", &good[2..])] {
             assert!(
                 serde_json::from_value::<WrappedDmPrivateKey>(
@@ -2568,7 +2524,7 @@ mod tests {
             );
         }
         let mut bad = json;
-        bad["iv"] = "00".into();
+        bad["ephemeral_public"] = "00".into();
         assert!(serde_json::from_value::<DmKeyWrap>(bad).is_err());
 
         // A copy key's opener carries its kind, and a passkey's what the page
@@ -2617,6 +2573,45 @@ mod tests {
             serde_json::from_value::<PasskeyCredentialId>("abc".into())
                 .is_err()
         );
+    }
+
+    /// A real wrap passes the checks, crosses the wire and opens
+    #[test]
+    fn a_real_wrap_crosses_the_wire() {
+        use crate::dm_key::{
+            CopySecretInput, DmPrivateKeys, copy_secret, unwrap_dm_keys,
+            wrap_dm_keys,
+        };
+        let key = OperatorDmKeyId::new();
+        let copy = OperatorDmCopyKeyId::new();
+        let secret = copy_secret(CopySecretInput::PrfOutput(&[9; 32]), copy);
+        let keys = DmPrivateKeys::new(
+            crate::envelope::EncryptionSecretKey::from([4; 32]),
+            crate::crypto::signing_key_from_bytes(&[5; 32]),
+        );
+        let wrapped = wrap_dm_keys(
+            &keys,
+            &crate::envelope::EncryptionPublicKey::from(&secret),
+            key,
+            copy,
+        )
+        .unwrap();
+        let wrap = DmKeyWrap {
+            key,
+            copy,
+            wrapped_x25519: WrappedDmPrivateKey::from(wrapped.x25519),
+            wrapped_ed25519: WrappedDmPrivateKey::from(wrapped.ed25519),
+        };
+        check_wrap(&wrap).unwrap();
+        let wrap: DmKeyWrap =
+            serde_json::from_value(serde_json::to_value(&wrap).unwrap())
+                .unwrap();
+        let opened =
+            unwrap_dm_keys(&wrap.wrapped(), &secret, key, copy).unwrap();
+        assert!(opened.matches(
+            &crate::envelope::EncryptionPublicKey::from(keys.x25519()),
+            &keys.ed25519().verifying_key()
+        ));
     }
 
     /// What the DM key requests refuse before their taps: a binding that
@@ -2710,13 +2705,17 @@ mod tests {
         };
         assert!(low_copy.check(&public).unwrap_err().contains("copy_public"));
         let mut low_ephemeral = create.clone();
-        low_ephemeral.wrap.ephemeral_public = low_order[4];
-        assert!(
-            low_ephemeral
-                .check(&public)
-                .unwrap_err()
-                .contains("ephemeral_public")
+        low_ephemeral.wrap.wrapped_ed25519 = blob(&low_order[4]);
+        assert_eq!(
+            low_ephemeral.check(&public),
+            Err("wrapped_ed25519's ephemeral key is low order".to_owned())
         );
+        let mut not_v1 = create.clone();
+        let mut bytes = not_v1.wrap.wrapped_x25519.as_bytes().to_vec();
+        bytes[0] = 2;
+        not_v1.wrap.wrapped_x25519 =
+            WrappedDmPrivateKey::try_from(bytes).unwrap();
+        assert!(not_v1.check(&public).unwrap_err().contains("version-1"));
 
         // Add a copy: endorsed by the live generation, one wrap per generation
         let keys: Vec<OperatorDmKeyId> =
@@ -2730,8 +2729,8 @@ mod tests {
         };
         assert_eq!(add.check(&public), Ok(()));
         assert!(add.check(&other_public).is_err());
-        add.wraps[1].ephemeral_public = low_order[0];
-        assert!(add.check(&public).unwrap_err().contains("ephemeral_public"));
+        add.wraps[1].wrapped_x25519 = blob(&low_order[0]);
+        assert!(add.check(&public).unwrap_err().contains("low order"));
         add.wraps[1] = dm_wrap(keys[1], copy);
         add.wraps.push(dm_wrap(keys[0], copy));
         assert!(add.check(&public).unwrap_err().contains("two wraps"));
@@ -2772,7 +2771,7 @@ mod tests {
                 .contains("two wraps for one copy key")
         );
         rotate.wraps.pop();
-        rotate.wraps[0].ephemeral_public = low_order[2];
+        rotate.wraps[0].wrapped_x25519 = blob(&low_order[2]);
         assert!(rotate.check().is_err());
 
         // A listed copy key's endorsement, against the generation it names
