@@ -598,6 +598,21 @@ define_id! {
 }
 
 define_id! {
+    /// One generation of an operator poster's DM key pair
+    /// (`operator_dm_keys`): its X25519 key for receiving and its Ed25519
+    /// key for the envelope's inner signature. Drawn by the server when the
+    /// 0x14 tap starts
+    OperatorDmKeyId
+}
+
+define_id! {
+    /// One thing that can open an operator's DM keys
+    /// (`operator_dm_copy_keys`): a passkey's PRF output, or recovery
+    /// words. Drawn by the server when the 0x14 tap starts
+    OperatorDmCopyKeyId
+}
+
+define_id! {
     /// A row of `state_entries`: one entry of an agent's sealed-state chain
     /// (0.147)
     StateEntryId

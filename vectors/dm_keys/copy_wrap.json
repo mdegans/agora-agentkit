@@ -1,0 +1,25 @@
+{
+  "binding_signature": "c023f4b11e86039d4c1005d6c9466ecfa56f9c5c61dcc0f2a4c4084e0e5b9c991ba437e14ae1e688d25d84f7216749a537311a5f9922883c2ea40be0940f8308",
+  "copy_id": "c0b17e2a-9d3c-4b5e-8f60-1a2b3c4d5e6f",
+  "copy_public": "ef2a6aaa75547baa60c4c061ad8addfc90126122155c8d417dd6e69bf9399f5b",
+  "copy_secret": "0639748086a415fc45f9883f48bd548089150dc7bcb75b6c8cd765998711e9be",
+  "description": "One DM key generation wrapped to one copy key (`agentkit::dm_key`; agora docs/design-operator-posting.md, Track B). copy_secret = HKDF-SHA256(salt none, ikm prf_output, info \"agora/dm-copy-secret/v1\" || copy_id), an X25519 scalar (raw, unclamped). shared = X25519(ephemeral_secret, copy_public) = X25519(copy_secret, ephemeral_public). wrap_key[part] = HKDF-SHA256(salt ephemeral_public || copy_public, ikm shared, info \"agora/dm-key-copy/v1\" || key_id || copy_id || part), part \"x25519\" or \"ed25519\". Each private key is wrapped as AES-256-GCM(wrap_key[part], iv, no AAD) over its RFC 8410 PKCS#8 (`pkcs8`), 16-byte tag appended. binding_signature is Ed25519 by the DM Ed25519 key over \"agora/enc-key/v1\" || dm_x25519_public, as an agent's encryption key is bound. Ids are UUID bytes, big-endian as written. The AES-GCM outputs are not in this file yet: agentkit has no AES-GCM until the dependency is approved.",
+  "dm_ed25519_public": "a7f6dfaf8f38b89ba8ce649b594f91e4d01fdc57f9c9493df43b5e50a9987367",
+  "dm_ed25519_seed": "6363636363636363636363636363636363636363636363636363636363636363",
+  "dm_x25519_public": "4a4f8ccde198d66e99b4c014418a3223ce256c98900ae4a6811fd10f7eb84c2c",
+  "dm_x25519_secret": "6262626262626262626262626262626262626262626262626262626262626262",
+  "ephemeral_public": "6b3d57762f8badb69433f9c6d060f85f5e5c6b6803a816d141c075f63541ad10",
+  "ephemeral_secret": "6464646464646464646464646464646464646464646464646464646464646464",
+  "iv": "656565656565656565656565",
+  "key_id": "6b1e0d2a-4c3f-4e5a-9b8c-7d6e5f403122",
+  "pkcs8": {
+    "ed25519": "302e020100300506032b6570042204206363636363636363636363636363636363636363636363636363636363636363",
+    "x25519": "302e020100300506032b656e042204206262626262626262626262626262626262626262626262626262626262626262"
+  },
+  "prf_output": "6161616161616161616161616161616161616161616161616161616161616161",
+  "shared": "5206f8e14ad4399234caf1f22c20ffc979068e2368eb56c7f50e0c6863bbab3d",
+  "wrap_key": {
+    "ed25519": "c9e7a7d12131f7ac5aa2232b4bf54e8e01ea64cc40a81af58eadbca1146bcb31",
+    "x25519": "4dec63c2ea940637939f132a2915b99f7dee4c40ad12b30b0369a71102c3fc78"
+  }
+}
