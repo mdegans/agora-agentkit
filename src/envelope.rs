@@ -301,6 +301,25 @@ pub fn seal(
     sender_pub: &EncryptionPublicKey,
     recipient_pub: &EncryptionPublicKey,
 ) -> Result<SealedMessage, EnvelopeError> {
+    seal_by_with(
+        ctx,
+        plaintext,
+        sender_signing_key,
+        sender_pub,
+        recipient_pub,
+        SealRandomness::draw(),
+    )
+}
+
+/// [`seal`] under given randomness
+fn seal_by_with(
+    ctx: &MessageContext,
+    plaintext: &[u8],
+    sender_signing_key: &SigningKey,
+    sender_pub: &EncryptionPublicKey,
+    recipient_pub: &EncryptionPublicKey,
+    random: SealRandomness,
+) -> Result<SealedMessage, EnvelopeError> {
     let signature = sender_signing_key.sign(&ctx.signing_bytes(plaintext));
     seal_with(
         ctx,
@@ -308,7 +327,7 @@ pub fn seal(
         &signature,
         sender_pub,
         recipient_pub,
-        SealRandomness::draw(),
+        random,
     )
 }
 
@@ -325,17 +344,31 @@ pub fn seal_signed(
     sender_pub: &EncryptionPublicKey,
     recipient_pub: &EncryptionPublicKey,
 ) -> Result<SealedMessage, EnvelopeError> {
-    sender_verifying_key
-        .verify_strict(&ctx.signing_bytes(plaintext), signature)
-        .map_err(|_| EnvelopeError::BadSignature)?;
-    seal_with(
+    seal_signed_with(
         ctx,
         plaintext,
         signature,
+        sender_verifying_key,
         sender_pub,
         recipient_pub,
         SealRandomness::draw(),
     )
+}
+
+/// [`seal_signed`] under given randomness
+fn seal_signed_with(
+    ctx: &MessageContext,
+    plaintext: &[u8],
+    signature: &Signature,
+    sender_verifying_key: &VerifyingKey,
+    sender_pub: &EncryptionPublicKey,
+    recipient_pub: &EncryptionPublicKey,
+    random: SealRandomness,
+) -> Result<SealedMessage, EnvelopeError> {
+    sender_verifying_key
+        .verify_strict(&ctx.signing_bytes(plaintext), signature)
+        .map_err(|_| EnvelopeError::BadSignature)?;
+    seal_with(ctx, plaintext, signature, sender_pub, recipient_pub, random)
 }
 
 /// Everything random in one [`seal`]: drawn fresh for each, fixed only by
@@ -577,17 +610,14 @@ fn derive_kek(
 }
 
 /// [`derive_kek`] over the shared secret's bytes, refusing all zeros as
-/// `was_contributory` does
-fn derive_kek_from_bytes(
+/// `was_contributory` does. Also `dm_key`'s wrap key, under its own `info`
+pub(crate) fn derive_kek_from_bytes(
     shared: &[u8; 32],
     ephemeral_pub: &EncryptionPublicKey,
     to_pub: &EncryptionPublicKey,
     info: &[u8],
 ) -> Result<Zeroizing<[u8; 32]>, EnvelopeError> {
-    use subtle::ConstantTimeEq;
-    if bool::from(shared.ct_eq(&[0u8; 32])) {
-        return Err(EnvelopeError::NonContributory);
-    }
+    check_contributory(shared)?;
     let mut salt = [0u8; 64];
     salt[..32].copy_from_slice(ephemeral_pub.as_bytes());
     salt[32..].copy_from_slice(to_pub.as_bytes());
@@ -596,6 +626,29 @@ fn derive_kek_from_bytes(
     hk.expand(info, kek.as_mut())
         .expect("32-byte HKDF output is always valid");
     Ok(kek)
+}
+
+/// Refuse an all-zero X25519 result (in constant time), as
+/// `was_contributory` does
+pub(crate) fn check_contributory(
+    shared: &[u8; 32],
+) -> Result<(), EnvelopeError> {
+    use subtle::ConstantTimeEq;
+    if bool::from(shared.ct_eq(&[0u8; 32])) {
+        return Err(EnvelopeError::NonContributory);
+    }
+    Ok(())
+}
+
+/// A public key of small order (the identity, or a point of order 2, 4 or
+/// 8): X25519 of it with any clamped scalar is all zeros, so nothing sealed
+/// or wrapped to it is secret. Keys from elsewhere are refused with this
+/// before they are stored
+pub fn is_low_order(public: &EncryptionPublicKey) -> bool {
+    // A clamped scalar is a multiple of 8, so it kills exactly the points
+    // whose order divides 8; any fixed one serves
+    let probe = EncryptionSecretKey::from([1u8; 32]);
+    !probe.diffie_hellman(public).was_contributory()
 }
 
 /// Decrypt a ciphertext blob with `K` and verify the embedded signature
@@ -1084,6 +1137,44 @@ mod tests {
             wrapped_key_ephemeral(&v2),
             Err(EnvelopeError::Version(2))
         ));
+    }
+
+    /// Under the same randomness, [`seal_signed`] with the sender's own
+    /// signature seals exactly what [`seal`] seals
+    #[test]
+    fn seal_signed_equals_seal_under_fixed_randomness() {
+        let sender = party();
+        let recipient = party();
+        let ctx = fixed_ctx();
+        let random = || SealRandomness {
+            key: MessageKey(Zeroizing::new([0x41; 32])),
+            xnonce: [0x42; XNONCE_LEN],
+            ephemeral_recipient: EncryptionSecretKey::from([0x43; 32]),
+            ephemeral_sender: EncryptionSecretKey::from([0x44; 32]),
+        };
+        let sealed = seal_by_with(
+            &ctx,
+            b"same",
+            &sender.signing,
+            &sender.enc_pub,
+            &recipient.enc_pub,
+            random(),
+        )
+        .unwrap();
+        let signature = sender.signing.sign(&ctx.signing_bytes(b"same"));
+        let signed = seal_signed_with(
+            &ctx,
+            b"same",
+            &signature,
+            &sender.signing.verifying_key(),
+            &sender.enc_pub,
+            &recipient.enc_pub,
+            random(),
+        )
+        .unwrap();
+        assert_eq!(signed.ciphertext, sealed.ciphertext);
+        assert_eq!(signed.wrapped_key_recipient, sealed.wrapped_key_recipient);
+        assert_eq!(signed.wrapped_key_sender, sealed.wrapped_key_sender);
     }
 
     /// `vectors/envelope/v1_seal.json`: one whole version-1 seal with every
