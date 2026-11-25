@@ -45,8 +45,19 @@ async fn settle(dom: &mut VirtualDom) -> String {
 
 fn slots() -> ClientSlots {
     ClientSlots::new()
-        .with(ClientSlot::Session, InboxLink)
+        .with(ClientSlot::Session, SessionLine)
         .with(ClientSlot::Inbox, Inbox)
+}
+
+/// The session slot as agora-web draws it: who is signed in, the inbox's
+/// link, and the drafts no box on the page draws
+#[allow(non_snake_case)]
+fn SessionLine() -> Element {
+    rsx! {
+        session::SessionStatus {}
+        InboxLink {}
+        crate::ui::compose::UnsentDrafts {}
+    }
 }
 
 #[allow(non_snake_case)]
@@ -61,6 +72,7 @@ struct Harness {
 
 impl Harness {
     async fn new(portal: &FakePortal) -> (Self, String) {
+        portal.0.borrow_mut().here = Some("/agora/inbox".into());
         let mut dom = VirtualDom::new(Root);
         dom.provide_root_context(slots());
         session::provide(&dom, portal.clone());
@@ -1168,4 +1180,337 @@ async fn a_sent_message_shows_what_the_server_said_besides() {
     assert!(html.contains("Sent to ada."), "{html}");
     assert!(html.contains("ada asked the Council to stop."), "{html}");
     assert!(html.contains("A cap was reached."), "{html}");
+}
+
+// -- The check window (W3) ------------------------------------------------
+
+/// The window ends while a reply is being written (the page's probe at
+/// the window's end finds it ended): the inbox shows what a signed-out
+/// visitor sees, plus the tap in place, and nothing it had read; the reply
+/// and a friend's name typed are kept. After the tap the inbox is read
+/// again, the reply box opens as it was, with its text, and sends
+#[tokio::test]
+async fn a_reply_being_written_survives_the_windows_end() {
+    let from_ada = fixtures::message(1, "ada", "a private hello", true);
+    let portal = with(vec![from_ada.clone()], ada());
+    let (mut h, _) = Harness::new(&portal).await;
+    let to = MessageTo::Reply(from_ada.id);
+    h.act(|| controls::message(to).open());
+    h.settle().await;
+    h.act(|| controls::message(to).input("a reply in progress"));
+    h.act(|| page_controls().name_typed("dee".into()));
+    let html = h.settle().await;
+    assert!(html.contains("a reply in progress"), "{html}");
+    let reads = portal.0.borrow().inbox_calls;
+
+    portal.0.borrow_mut().session =
+        Some(Err(crate::ui::test_portal::check_needed()));
+    portal.fire(0);
+    let html = h.settle().await;
+    assert!(html.contains(INBOX_CHECK_NEEDED), "{html}");
+    assert!(html.contains(">Confirm with a passkey</button>"), "{html}");
+    for private in ["a private hello", "ui-inbox-list", "dee"] {
+        assert!(!html.contains(private), "{private}: {html}");
+    }
+    // The operator's own text stays reachable, read-only, in the list of
+    // drafts: its box is on this page, hidden, so no link to this page
+    assert_eq!(html.matches("a reply in progress").count(), 1, "{html}");
+    assert!(html.contains("readonly=true"), "{html}");
+    assert!(
+        html.contains("Its box is on this page, hidden until you confirm with your passkey."),
+        "{html}"
+    );
+    assert!(!html.contains("Open its page"), "{html}");
+    assert!(!html.contains("Sign in"), "{html}");
+    assert!(!html.contains("login"), "{html}");
+
+    let handle = h.act(consume_context::<session::SessionHandle>);
+    h.act(|| handle.start_window_tap());
+    h.settle().await;
+    h.act(|| handle.confirm_window_tap());
+    let html = h.settle().await;
+    assert!(
+        portal.0.borrow().inbox_calls > reads,
+        "read again after the tap"
+    );
+    assert!(html.contains("a private hello"), "{html}");
+    assert!(
+        html.contains("a reply in progress"),
+        "the box open as it was: {html}"
+    );
+    assert!(html.contains(r#"value="dee""#), "the name kept: {html}");
+    h.act(|| controls::message(to).send());
+    h.settle().await;
+    h.act(|| controls::message(to).confirm());
+    let html = h.settle().await;
+    assert!(html.contains("Sent to ada."), "{html}");
+    assert_eq!(
+        portal.0.borrow().messages[0].payload.body,
+        "a reply in progress"
+    );
+}
+
+/// A message whose tap call is refused because the window ended keeps its
+/// draft; the tap in place opens a window, and Send then asks for the
+/// message's own tap as before
+#[tokio::test]
+async fn a_message_refused_check_needed_keeps_its_draft() {
+    let portal = with(vec![], ada());
+    portal
+        .0
+        .borrow_mut()
+        .tap_answers
+        .push_back(Err(crate::ui::test_portal::check_needed()));
+    let (mut h, _) = Harness::new(&portal).await;
+    new_message(&mut h, "kept for later").await;
+    h.act(|| controls::message(MessageTo::New).send());
+    let html = h.settle().await;
+    assert!(html.contains(INBOX_CHECK_NEEDED), "{html}");
+    let handle = h.act(consume_context::<session::SessionHandle>);
+    h.act(|| handle.start_window_tap());
+    h.settle().await;
+    h.act(|| handle.confirm_window_tap());
+    let html = h.settle().await.replace("&#39;", "'");
+    assert!(html.contains("kept for later"), "{html}");
+    assert!(
+        html.contains(
+            "It wasn't sent, as Agora needed a recent passkey check then"
+        ),
+        "{html}"
+    );
+    h.act(|| controls::message(MessageTo::New).send());
+    let html = h.settle().await;
+    assert!(html.contains("Tap your passkey to send"), "{html}");
+}
+
+/// The tap in place, with the server outside a window until it
+async fn tap_in_place(h: &mut Harness, portal: &FakePortal) -> String {
+    portal.0.borrow_mut().session =
+        Some(Err(crate::ui::test_portal::check_needed()));
+    let handle = h.act(consume_context::<session::SessionHandle>);
+    h.act(|| handle.start_window_tap());
+    h.settle().await;
+    h.act(|| handle.confirm_window_tap());
+    h.settle().await
+}
+
+/// A mark and a friendship action refused because the window ended keep
+/// their notice through the tap: it wasn't done, and to press it again
+#[tokio::test]
+async fn a_refused_mark_or_friendship_says_so_after_the_tap() {
+    let from_ada = fixtures::message(1, "ada", "one", true);
+    let portal = with(vec![from_ada.clone()], ada());
+    {
+        let mut fake = portal.0.borrow_mut();
+        fake.mark_answers
+            .push_back(Err(crate::ui::test_portal::check_needed()));
+    }
+    let (mut h, _) = Harness::new(&portal).await;
+    h.act(|| page_controls().mark(vec![from_ada.id]));
+    let html = h.settle().await;
+    assert!(html.contains(INBOX_CHECK_NEEDED), "{html}");
+    let html = tap_in_place(&mut h, &portal).await;
+    assert!(
+        html.contains("Not marked: Agora needed a recent passkey check first."),
+        "{html}"
+    );
+    assert!(html.contains("press it again"), "{html}");
+
+    portal
+        .0
+        .borrow_mut()
+        .friendship_answers
+        .push_back(Err(crate::ui::test_portal::check_needed()));
+    h.act(|| page_controls().friend(FriendshipAction::Request, name("dee")));
+    h.settle().await;
+    let html = tap_in_place(&mut h, &portal).await;
+    assert!(
+        html.contains("Not done: Agora needed a recent passkey check first."),
+        "{html}"
+    );
+}
+
+/// A message's 0x13 tap asked for before the window ended is kept through
+/// the lapse: after the window's tap, "Tap your passkey to send" is still
+/// there, and sends
+#[tokio::test]
+async fn a_pending_message_tap_survives_the_lapse() {
+    let portal = with(vec![], ada());
+    let (mut h, _) = Harness::new(&portal).await;
+    new_message(&mut h, "hello ada").await;
+    h.act(|| controls::message(MessageTo::New).send());
+    let html = h.settle().await;
+    assert!(html.contains("Tap your passkey to send"), "{html}");
+    portal.0.borrow_mut().session =
+        Some(Err(crate::ui::test_portal::check_needed()));
+    portal.fire_last();
+    let html = h.settle().await;
+    assert!(html.contains(INBOX_CHECK_NEEDED), "{html}");
+    let html = tap_in_place(&mut h, &portal).await;
+    assert!(html.contains("Tap your passkey to send"), "{html}");
+    assert!(html.contains("hello ada"), "{html}");
+    h.act(|| controls::message(MessageTo::New).confirm());
+    let html = h.settle().await;
+    assert!(html.contains("Sent to ada."), "{html}");
+    let fake = portal.0.borrow();
+    assert_eq!(fake.messages.len(), 1);
+    assert_eq!(fake.messages[0].payload.body, "hello ada");
+    assert!(fake.messages[0].assertion.is_some());
+}
+
+/// A probe that can't reach Agora for long enough takes the messages off
+/// the page (never kept up on a guess); the drafts stay, and the first
+/// answer brings the inbox back, read again
+#[tokio::test]
+async fn an_unreachable_probe_hides_the_inbox() {
+    let from_ada = fixtures::message(1, "ada", "a private hello", true);
+    let portal = with(vec![from_ada], ada());
+    let (mut h, html) = Harness::new(&portal).await;
+    assert!(html.contains("a private hello"), "{html}");
+    let start = fixtures::portal_session(true).window.ends_at();
+    portal.0.borrow_mut().now = Some(start);
+    portal.0.borrow_mut().session =
+        Some(Err(ApiError::Network("asleep".into())));
+    portal.fire_last();
+    let html = h.settle().await;
+    assert!(html.contains("a private hello"), "a moment's grace: {html}");
+    portal.0.borrow_mut().now = Some(start + session::PROBE_UNKNOWN_FOR);
+    portal.fire_last();
+    let html = h.settle().await;
+    assert!(!html.contains("a private hello"), "{html}");
+    assert!(
+        html.contains("Agora couldn't be reached (asleep)"),
+        "{html}"
+    );
+    let reads = portal.0.borrow().inbox_calls;
+    portal.0.borrow_mut().session = Some(Ok(fixtures::portal_session(true)));
+    portal.fire_last();
+    let html = h.settle().await;
+    assert!(html.contains("a private hello"), "{html}");
+    assert!(portal.0.borrow().inbox_calls > reads, "read again");
+}
+
+/// Woken hours after the window's end, offline: the private messages go at
+/// once (the page slept past its probe), before any answer, and the page
+/// says Agora couldn't be reached
+#[tokio::test]
+async fn woken_long_after_the_end_hides_at_once() {
+    let from_ada = fixtures::message(1, "ada", "a private hello", true);
+    let portal = with(vec![from_ada], ada());
+    let (mut h, html) = Harness::new(&portal).await;
+    assert!(html.contains("a private hello"), "{html}");
+    let end = fixtures::portal_session(true).window.ends_at();
+    portal.0.borrow_mut().now = Some(end + chrono::TimeDelta::hours(3));
+    portal.0.borrow_mut().session =
+        Some(Err(ApiError::Network("asleep".into())));
+    portal.fire_last();
+    let html = h.settle().await;
+    assert!(!html.contains("a private hello"), "{html}");
+    assert!(html.contains(INBOX_UNREACHABLE), "{html}");
+}
+
+/// The heartbeat finds a sleep no timer reported: hidden, then asked
+#[tokio::test]
+async fn the_heartbeat_finds_a_sleep() {
+    let from_ada = fixtures::message(1, "ada", "a private hello", true);
+    let portal = with(vec![from_ada], ada());
+    let (mut h, _) = Harness::new(&portal).await;
+    let end = fixtures::portal_session(true).window.ends_at();
+    portal.0.borrow_mut().now = Some(end + chrono::TimeDelta::hours(3));
+    portal.0.borrow_mut().session =
+        Some(Err(crate::ui::test_portal::check_needed()));
+    let asked = portal.0.borrow().status_calls;
+    // The answer held: hidden before it comes
+    let gate = portal.hold();
+    portal.beat();
+    let html = h.settle().await;
+    assert!(!html.contains("a private hello"), "hidden at once: {html}");
+    assert!(
+        portal.0.borrow().status_calls > asked,
+        "asked after the beat"
+    );
+    drop(gate);
+    let html = h.settle().await;
+    assert!(!html.contains("a private hello"), "{html}");
+    assert!(html.contains(INBOX_CHECK_NEEDED), "{html}");
+}
+
+/// A slow answer to a probe that fired on time is not a sleep: a heartbeat
+/// while it is awaited leaves the inbox shown
+#[tokio::test]
+async fn a_slow_answer_is_not_a_sleep() {
+    let from_ada = fixtures::message(1, "ada", "a private hello", true);
+    let portal = with(vec![from_ada], ada());
+    let (mut h, _) = Harness::new(&portal).await;
+    let window = fixtures::portal_session(true).window;
+    let due =
+        window.now + (window.ends_at() - window.now) + session::PROBE_AFTER_END;
+    portal.0.borrow_mut().now = Some(due);
+    let gate = portal.hold();
+    portal.fire_last();
+    h.settle().await;
+    portal.0.borrow_mut().now = Some(due + chrono::TimeDelta::seconds(25));
+    portal.beat();
+    let html = h.settle().await;
+    assert!(html.contains("a private hello"), "still shown: {html}");
+    drop(gate);
+    let html = h.settle().await;
+    assert!(html.contains("a private hello"), "{html}");
+}
+
+/// A page that couldn't reach Agora comes back when it answers, even when
+/// the status answers before the bootstrap does, and when "Try again" is
+/// pressed while a retry is in flight
+#[tokio::test]
+async fn an_unreachable_page_comes_back_when_agora_answers() {
+    let from_ada = fixtures::message(1, "ada", "a private hello", true);
+    let portal = with(vec![from_ada], ada());
+    let (mut h, _) = Harness::new(&portal).await;
+    let end = fixtures::portal_session(true).window.ends_at();
+    portal.0.borrow_mut().now = Some(end + chrono::TimeDelta::hours(3));
+    portal.0.borrow_mut().session =
+        Some(Err(ApiError::Network("asleep".into())));
+    portal.fire_last();
+    h.settle().await;
+    // The status is back, the bootstrap not yet: still asking
+    portal
+        .0
+        .borrow_mut()
+        .status_answers
+        .push_back(Ok(fixtures::portal_session(true).window));
+    let waits = portal.0.borrow().waits.len();
+    portal.fire_last();
+    let html = h.settle().await;
+    assert!(html.contains(INBOX_UNREACHABLE), "{html}");
+    assert!(portal.0.borrow().waits.len() > waits, "a next question set");
+    // "Try again" while that retry waits: still failing, still asking
+    let handle = h.act(consume_context::<session::SessionHandle>);
+    h.act(|| handle.refresh());
+    h.settle().await;
+    // Agora answers
+    portal.0.borrow_mut().session = Some(Ok(fixtures::portal_session(true)));
+    portal.fire_last();
+    let html = h.settle().await;
+    assert!(html.contains("a private hello"), "{html}");
+}
+
+/// A connection that can't hold a window: the inbox, the session line and
+/// a compose box say why and what will bring it back, and none asks for a
+/// confirmation it can't give
+#[tokio::test]
+async fn an_unusable_address_never_asks_to_confirm() {
+    let portal = with(vec![], ada());
+    portal.0.borrow_mut().session = Some(Err(ApiError::refused(
+        403,
+        crate::errors::CheckNeeded::new(
+            "x",
+            crate::operator::NoWindow::AddressUnusable,
+        )
+        .into(),
+    )));
+    let (_h, html) = Harness::new(&portal).await;
+    let html = html.replace("&#39;", "'");
+    assert!(html.contains("public address"), "{html}");
+    assert!(!html.to_lowercase().contains("confirm"), "{html}");
+    assert!(html.contains("Your drafts stay in this tab"), "{html}");
 }

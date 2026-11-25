@@ -33,6 +33,14 @@
 //! read again only when asked (Refresh, or after marking or a friendship
 //! action), never on a timer, and cleared when the session becomes another
 //! operator's or poster's, or no one's.
+//!
+//! **Outside a check window the inbox is hidden, not lost.** A session
+//! outside its check window ([`Session::CheckNeeded`]) sees what a
+//! signed-out visitor sees here, plus the tap in place
+//! ([`WindowCheck`](super::session::WindowCheck)). What was read is
+//! dropped (it is read again after the tap, from the server); the drafts
+//! (compose's store, at the root) and a name typed for a friend request
+//! are kept, and a reply box that was open opens again.
 
 use std::rc::Rc;
 
@@ -159,6 +167,20 @@ pub struct InboxStore {
     inbox_asked: CopyValue<u64>,
     friends_asked: CopyValue<u64>,
     owner: CopyValue<Option<Owner>>,
+    /// The name typed for a friend request: kept while the inbox is hidden
+    /// for a passkey check, cleared with the owner
+    asked_name: Signal<String>,
+    /// A mark in flight, and what the last one said (with whether it was a
+    /// failure): kept while the inbox is hidden for a passkey check, so a
+    /// mark refused outside the window still says so after the tap
+    marking: Signal<bool>,
+    marked: Signal<Option<(String, bool)>>,
+    /// The same for a friendship action
+    befriending: Signal<bool>,
+    friend_said: Signal<Option<(String, bool)>>,
+    /// Bumped whenever the owner changes: a mark's or friendship's answer
+    /// for an earlier owner writes nothing of the new one's page
+    epoch: CopyValue<u64>,
 }
 
 impl PartialEq for InboxStore {
@@ -190,15 +212,27 @@ impl InboxStore {
             inbox_asked: CopyValue::new_in_scope(0, ScopeId::ROOT),
             friends_asked: CopyValue::new_in_scope(0, ScopeId::ROOT),
             owner: CopyValue::new_in_scope(None, ScopeId::ROOT),
+            asked_name: Signal::new_in_scope(String::new(), ScopeId::ROOT),
+            marking: Signal::new_in_scope(false, ScopeId::ROOT),
+            marked: Signal::new_in_scope(None, ScopeId::ROOT),
+            befriending: Signal::new_in_scope(false, ScopeId::ROOT),
+            friend_said: Signal::new_in_scope(None, ScopeId::ROOT),
+            epoch: CopyValue::new_in_scope(0, ScopeId::ROOT),
         }
     }
 
     /// The session is now `next`: another operator's or poster's inbox, or
-    /// no one's, is never shown from what this store holds
+    /// no one's, is never shown from what this store holds. Outside a check
+    /// window, what was read is dropped (it is read again after the tap)
+    /// and the owner kept, with what was typed
     pub(crate) fn session_is(&self, next: &Session) {
         let now = match next {
             Session::SignedIn(s) => owner_of(s),
             Session::SignedOut => None,
+            Session::CheckNeeded(_) => {
+                self.forget_reads();
+                return;
+            }
             // Unknown for now: what is held stays until the session says
             Session::Loading | Session::Failed(_) => return,
         };
@@ -207,6 +241,20 @@ impl InboxStore {
             return;
         }
         owner.set(now);
+        let mut epoch = self.epoch;
+        *epoch.write() += 1;
+        self.forget_reads();
+        if !self.asked_name.peek().is_empty() {
+            put(self.asked_name, String::new());
+        }
+        put(self.marking, false);
+        put(self.marked, None);
+        put(self.befriending, false);
+        put(self.friend_said, None);
+    }
+
+    /// Drops what was read, and any answer still on its way
+    pub(crate) fn forget_reads(&self) {
         let (mut inbox_asked, mut friends_asked) =
             (self.inbox_asked, self.friends_asked);
         *inbox_asked.write() += 1;
@@ -352,6 +400,12 @@ fn write_failed(e: &ApiError, what: &str) -> String {
         ApiError::SignedOut(_) => "You're no longer signed in: sign in \
              again, in another tab, then refresh."
             .to_owned(),
+        _ if e.code() == Some(crate::errors::RefusalCode::CheckNeeded) => {
+            format!(
+                "Not {what}: Agora needed a recent passkey check first. Once \
+                 you have confirmed with your passkey, press it again."
+            )
+        }
         ApiError::Forbidden(body) => body.human_message(),
         ApiError::Status { message, .. } => {
             format!("Agora refused it: {message}")
@@ -461,13 +515,19 @@ impl InboxControls {
                 Session::SignedOut => "You're no longer signed in: sign in \
                      again, in another tab, then refresh."
                     .to_owned(),
+                Session::CheckNeeded(_) => {
+                    "Agora needs a recent passkey check: \
+                     confirm with your passkey on this page, then try again."
+                        .to_owned()
+                }
                 Session::Loading => {
                     "Still checking who is signed in: try again in a moment."
                         .to_owned()
                 }
-                Session::Failed(e) => {
-                    format!("Couldn't check who is signed in ({e}).")
-                }
+                Session::Failed(e) => format!(
+                    "Agora couldn't be reached ({e}): try again once it \
+                     answers."
+                ),
             };
             put(said, Some((why, true)));
         }
@@ -492,7 +552,11 @@ impl InboxControls {
         }
         put(self.marking, true);
         put(self.marked, None);
+        let epoch = *self.store.epoch.peek();
         self.handle.mark_read(signed_in, request, move |answer| {
+            if *self.store.epoch.peek() != epoch {
+                return;
+            }
             put(self.marking, false);
             match answer {
                 Ok(answer) => {
@@ -552,7 +616,11 @@ impl InboxControls {
         };
         put(self.befriending, true);
         put(self.friend_said, None);
+        let epoch = *self.store.epoch.peek();
         self.handle.friendship(signed_in, request, move |answer| {
+            if *self.store.epoch.peek() != epoch {
+                return;
+            }
             put(self.befriending, false);
             match answer {
                 Ok(answer) => {
@@ -644,10 +712,12 @@ pub fn Inbox() -> Element {
                 }
             }
         }
+        Session::CheckNeeded(why) => rsx! {
+            p { class: "ui-note", role: "status", "{inbox_check_needed(why)}" }
+            super::session::WindowCheck {}
+        },
         Session::Failed(_) => rsx! {
-            p { class: "ui-note", role: "status",
-                "Couldn't check who is signed in, so there is nothing to show here yet."
-            }
+            p { class: "ui-note", role: "status", "{INBOX_UNREACHABLE}" }
         },
         Session::SignedIn(s) => match s.poster() {
             None => rsx! {
@@ -676,6 +746,36 @@ pub fn Inbox() -> Element {
         },
     }
 }
+
+/// What the inbox says outside a check window, and why there is none
+/// ([`no_window_words`](super::session::no_window_words))
+pub fn inbox_check_needed(why: Option<crate::operator::NoWindow>) -> String {
+    let because =
+        super::session::sentence(super::session::no_window_words(why));
+    let next = match why {
+        Some(crate::operator::NoWindow::AddressUnusable) => {
+            "Your drafts stay in this tab, and the inbox comes back once this \
+             tab reaches Agora through its public address."
+        }
+        _ => super::session::no_window_next(why),
+    };
+    format!(
+        "Your poster's messages are shown only inside a recent passkey check. \
+         {because}. {next}"
+    )
+}
+
+/// What the inbox says when Agora couldn't be reached: the messages are
+/// hidden until it answers, and a reply being written is kept
+pub const INBOX_UNREACHABLE: &str = "Agora couldn't be reached, so your \
+     poster's messages are hidden until it answers. Your drafts are kept: a \
+     reply you were writing is listed above, and its box opens again here, \
+     as it was, once Agora answers.";
+
+/// [`inbox_check_needed`] with no reason
+pub const INBOX_CHECK_NEEDED: &str = "Your poster's messages are shown only \
+     inside a recent passkey check. There is no passkey check open for this \
+     page. Confirm with your passkey to carry on here; your drafts are kept.";
 
 /// The friends a message can go to, from the friends list, as far as it
 /// is read
@@ -706,11 +806,11 @@ fn InboxBody(
     let controls = InboxControls {
         handle,
         store,
-        marking: use_signal(|| false),
-        marked: use_signal(|| None),
-        befriending: use_signal(|| false),
-        friend_said: use_signal(|| None),
-        asked_name: use_signal(String::new),
+        marking: store.marking,
+        marked: store.marked,
+        befriending: store.befriending,
+        friend_said: store.friend_said,
+        asked_name: store.asked_name,
     };
     #[cfg(all(test, feature = "dioxus-ssr"))]
     tests::register(controls);

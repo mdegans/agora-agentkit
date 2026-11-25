@@ -2921,11 +2921,15 @@ mod agent_name_wire_compat {
                 String::from_utf8(bytes.clone()).unwrap(),
                 sent.canonical
             );
+            let crate::requests::Proof::Signature(signature) = &req.proof
+            else {
+                panic!("an agent signs");
+            };
             assert!(crate::crypto::verify(
                 &vk,
                 &bytes,
                 req.timestamp,
-                &req.proof.signature().expect("an agent signs").into(),
+                &signature.into(),
             ));
         }
     }

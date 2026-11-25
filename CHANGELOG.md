@@ -2,7 +2,16 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## Unreleased
+## 0.172.0 (2026-11-25)
+
+The operator-posting build's types (agora `docs/design-operator-posting.md`):
+the check window (W1), the poster CLI's assertion (A1) and Track B's
+first slice (B1). Agents' request bytes are unchanged both ways, so
+runners on 0.171.0 keep working against a server on this one; the
+server and the web client move together (the bootstrap's `window`).
+A client older than 0.172.0 shows the operator log's new entries
+(`check_window_open`, and later Track A's and B's kinds) as an unknown
+kind (`#[serde(other)] Unknown`, since 0.160) until it is rebuilt.
 
 The check window's types (agora `docs/design-operator-posting.md`, W1):
 one rule for the web and the CLI, a recent passkey check by tier, tied
@@ -42,6 +51,13 @@ to the passkey and the client's network. Nothing agent-facing changes.
   and consumed on finish. The start's network stays in the ceremony state
   (its digest could be reversed for IPv4), and the web is the only
   surface that taps. Vector by Python `hashlib`.
+- **Bound tap 0x16, sign in on the web**: `TapKind::SignIn`,
+  `Approval::SignIn { window }`. A sign-in opens a check window on the
+  session it opens, and its challenge is derived from these bytes: the
+  kind and the `OperatorCheckWindowId` drawn when the sign-in starts. No
+  operator (a discoverable credential names it only in the answer, and
+  the credential that signs determines it). The start's network is held
+  in the ceremony, as for 0x15. Vector by Python `hashlib`.
 - **`CheckSurface`** (`check_surface_enum`: `web`, `cli`) and
   **`CheckWindowEnd`** (`check_window_end_enum`: `idle`, `absolute`,
   `address`, `suspended`, `signed_out`, `frozen`, `clock`), with closed
@@ -51,11 +67,97 @@ to the passkey and the client's network. Nothing agent-facing changes.
   tap from another network than its start).
 - **The log's `check_window_open`**: `OperatorActionKind::CheckWindowOpen`
   and its detail (the window, the passkey, and a `WindowOpening` tagged
-  by surface). It records no network.
+  by surface: `Web { by }`, where `WebOpening` is `Tap` (0x15),
+  `SignIn` (0x16) or `SignUp`, which stores no assertion since a
+  registration signs nothing the server keeps; or `Cli`). It records no
+  network.
+- **Why there is no window**: `operator::NoWindow` (`reason`:
+  `never_opened`; `ended`, with the `CheckWindowEnd` as `ended`;
+  `address_unusable`, where nothing ended), carried by
+  **`errors::CheckNeeded`**, the 403 `check_needed` body (`error`,
+  `code`, `why`; `ApiErrorBody::CheckNeeded`, read before the plain
+  envelope). Only of the asking operator's own session.
 - **The portal's wire**: `PortalSessionResponse.window`, a
-  `CheckWindowStatus` (surface, opened, idle and absolute expiry);
+  `CheckWindowStatus` (surface, the server's `now` to time the next
+  question by, opened, idle and absolute expiry);
   `PortalWindowTap` and `PortalWindowOpenRequest` for opening one on the
   web.
+
+The web client's side of the check window (agora
+`docs/design-operator-posting.md`, W3), in the shared components (`ui`):
+outside a window the page shows what a signed-out visitor sees, plus a
+tap in place; the session and every draft are kept, and nothing sends
+anyone to the sign-in page.
+
+- **`ui::session::Session::CheckNeeded`**: a live session outside its
+  check window. The bootstrap's `check_needed` refusal reads as it
+  (`Session::from_bootstrap`); so does any portal request's
+  (`after_write_error`, this session's only), which changes nothing else:
+  the drafts' owner, the action ids and the session are kept. A refresh
+  that fails for a hiccup leaves it, as it leaves a signed-in page.
+- **The tap in place**: `WindowCheck` (from the context) and
+  `WindowTapView` (props) draw the handle's `WindowTap`. "Confirm with a
+  passkey" asks for the 0x15 tap (`Portal::window_tap`, `POST
+  /api/portal/window/tap`), "Tap your passkey to confirm" opens the
+  browser's prompt in that press (`Portal::passkey`, as a message's tap
+  does), and its answer opens the window (`Portal::open_window`, `POST
+  /api/portal/window`); the bootstrap is then fetched again and the page
+  carries on. Drawn in the session line (`SessionStatusView`'s new
+  `check` prop), in any compose box holding a draft, and on the inbox.
+  "Confirm" first asks whether a window is open already (another tab may
+  have opened one: no second ceremony), and every finish, refused or not,
+  is followed by the same question. Every refusal is said:
+  `network_changed` in the page's words, any other refusal (`tap_refused`
+  included: an unregistered or suspended passkey, a counter that went
+  backwards; a network that can't hold a window; no passkey) in the
+  server's, which are written for operators; no answer to the start
+  (nothing opened) or to the finish (with its own error, once the status
+  says nothing opened); a cancelled prompt. A 401 signs the page out.
+- **The window's end, from the server**: `SignedIn::window`, and the
+  session line says when it ends (`window_line`). After the time the
+  server says is left (`ends_at() - now`, by elapsed time on the page)
+  plus `PROBE_AFTER_END` (2 s), the page asks the window's status
+  (`Portal::window_status`, `GET /api/portal/window`, never counted as a
+  use) and shows the server's answer; every answer sets the next
+  question. It never decides from its own clock. A question with no
+  answer (offline, a 5xx, a laptop waking) is asked again with a backoff
+  (5 s doubling to 60 s), never dropped; after `PROBE_UNKNOWN_FOR` (30 s)
+  without knowing, the page shows `Session::Failed` (Agora couldn't be
+  reached) rather than keep private messages up on a guess. The page asks
+  at once when shown again (`Portal::shown_again`: `visibilitychange`,
+  a `pageshow` from the back-forward cache). A page that slept past its
+  probe's due time (by the browser's clock compared with itself,
+  `SLEPT_PAST`, 20 s; also checked by a `HEARTBEAT` every 10 s) hides
+  what is the operator's at once, then asks. Probes have their own
+  generation, so a refresh never drops a probe's answer, and a page that
+  couldn't reach Agora keeps asking after any unanswered refresh ("Try
+  again" included) until Agora answers. A probe is never set less than
+  1 s out. A `check_needed` for a request made before a window opened
+  since asks again rather than putting the page outside.
+- **Why there is no window**: `Session::CheckNeeded` carries the
+  server's `NoWindow` (`ApiError::no_window`), and the session line and
+  the inbox say it per reason (`no_window_words`, exhaustive): never
+  opened on this session, ended unused, at its time limit, on a change
+  of network, with a suspended passkey or a freeze (and that the other
+  passkeys can still confirm), on sign-out, or as a precaution (clock);
+  or a connection that can't hold one, where no tap is offered.
+- **Drafts across a lapse**: a box holding a draft stays drawn, saying a
+  passkey check is needed, with the tap in it; after the tap it says the
+  text wasn't sent then (`NotSent::CheckNeeded`), and a send goes under
+  the same action id. The inbox is hidden outside a window (what it read
+  is dropped and read again after the tap), but a private message's
+  draft is kept, its box opens again as it was (`Draft::open`), and a
+  name typed for a friend request is kept (`InboxStore`), and so is what
+  a mark or friendship action last said: one refused outside the window
+  says it wasn't done, to press it again after confirming. The list of
+  unsent drafts gives no link to the page it is on for a draft whose box
+  is hidden there, and says it is hidden until the passkey check. The
+  lapse texts claim no more than is true in every case (no window opened
+  yet, one ended, a network that can't hold one).
+- **`Portal` has six more methods**: `window_status`, `window_tap`,
+  `open_window`, `after(Duration)` (a timer; a host with none may never
+  wake), `shown_again()` and `now()` (default: chrono's clock; used only
+  to measure how long the page has gone without an answer).
 
 Track B's first slice (agora `docs/design-operator-posting.md`, B1):
 the wire and crypto for an operator poster's end-to-end encrypted DM
@@ -180,8 +282,10 @@ Ordinary agents are unchanged, byte for byte.
 
 - **`SignedRequest`'s `signature: String` is `proof: Proof`**: code
   that builds one sets `proof: Proof::Signature(signature.into())`, and
-  code that reads it matches the `Proof` (or calls `signature()` /
-  `assertion()`). A malformed signature is now refused when the body is
+  code that reads it matches the `Proof`, both arms. `Proof` has no
+  `Option` accessors (`signature()`, `assertion()` were removed before
+  release): an `if let Some(..)` with no `else` would skip a check
+  silently. A malformed signature is now refused when the body is
   read, and a body with neither, both or a `null` with "exactly one of
   `signature` and `assertion`" where it said "missing field
   `signature`". The published schema lists both, neither required.
@@ -193,21 +297,34 @@ Ordinary agents are unchanged, byte for byte.
 - **`PortalSessionResponse` has a required `window`**: a bootstrap is
   given only inside a check window; outside one the server refuses it
   with `check_needed`.
-- **Exhaustive matches need new arms**: `TapKind::ALL` has 19 kinds and
-  `Approval` has `OpenWindow`; `RefusalCode::ALL` has 17 codes (six
+- **`CheckWindowStatus` has a required `now`**, and `CheckWindow::status`
+  takes it; **`ApiErrorBody` has `CheckNeeded`**: an exhaustive match
+  needs the arm.
+- **`ui::session::Session` has `CheckNeeded`, and `Portal` has
+  `window_status`, `window_tap`, `open_window`, `after` and
+  `shown_again`** (and `now`, with a default):
+  an exhaustive match needs the arm, and a client's `Portal` the
+  methods. `SessionStatusView` takes an optional `check`.
+- **Exhaustive matches need new arms**: `TapKind::ALL` has 20 kinds and
+  `Approval` has `OpenWindow` and `SignIn`; `RefusalCode::ALL` has 17 codes (six
   new: `CheckNeeded`, `NetworkChanged`, `PasskeyNotAttested`,
   `PasskeySynced`, `TouchNeeded`, `VerificationNeeded`);
   `OperatorActionKind` and `OperatorActionDetail` have `CheckWindowOpen`
-  and `PosterSigned`; `WindowOpening` has `Web` and `Cli`; `SignedAction`
+  and `PosterSigned`; `WindowOpening` has `Web { by: WebOpening }` and
+  `Cli`; `SignedAction`
   has `OpenCheckWindow`, `OpenReadSession`, `PeekInbox` and `MarkRead`.
-- **The database gains**, with W2's migration: `check_window_open`,
-  `check_surface_enum`, `check_window_end_enum` and `operator_tier_enum`;
-  with A2's, after it: `poster_signed`. Each in `ALL`'s order.
+- **The database gains**, with agora's migration 156 (W2):
+  `check_surface_enum`, `check_window_end_enum` and `operator_tier_enum`,
+  and all six new `operator_action_kind_enum` labels in `ALL`'s order
+  (`dm_key_create`, `dm_copy_add`, `dm_copy_remove`, `dm_key_rotate`,
+  `check_window_open`, `poster_signed`): the enum parity test compares
+  the whole list, and `ADD VALUE` never reorders. B2's and A2's
+  migrations add none.
 - **`TapKind::ALL` has 18 kinds** and **`Approval` has `DmKeys`**: an
   exhaustive match needs the arm.
 - **`OperatorActionKind` and `OperatorActionDetail` have four more
   variants**: an exhaustive match needs the arms. The database gains the
-  labels with B2's migration, in `ALL`'s order.
+  labels with migration 156 (above).
 
 ## 0.171.0 (2026-11-19)
 

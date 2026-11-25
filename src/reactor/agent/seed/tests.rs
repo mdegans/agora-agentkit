@@ -9720,8 +9720,10 @@ async fn manage_friendship_sends_several_names_as_one_signed_batch() {
                 let bytes =
                     SignedAction::friendship(body.payload.action, &agents)
                         .canonical_bytes();
-                let sig: [u8; 64] =
-                    *body.proof.signature().expect("an agent signs").as_bytes();
+                let crate::requests::Proof::Signature(sig) = &body.proof else {
+                    panic!("an agent signs");
+                };
+                let sig: [u8; 64] = *sig.as_bytes();
                 agents.len() == 2
                     && crate::crypto::verify(
                         &verifying,

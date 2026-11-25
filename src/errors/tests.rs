@@ -143,3 +143,44 @@ fn an_unknown_code_or_field_still_reads() {
     assert_eq!(body.message(), "Refused for a newer reason.");
     assert!(!RefusalCode::ALL.contains(&RefusalCode::Unknown));
 }
+
+/// `check_needed`'s body says why there is no window, typed, and reads
+/// back as itself, not as the plain envelope; the plain `check_needed` a
+/// client can still be sent reads as before
+#[test]
+fn check_needed_says_why_and_reads_as_itself() {
+    use crate::enums::CheckWindowEnd;
+    use crate::operator::NoWindow;
+    for (why, json) in [
+        (
+            NoWindow::NeverOpened,
+            serde_json::json!({"reason": "never_opened"}),
+        ),
+        (
+            NoWindow::Ended {
+                ended: CheckWindowEnd::Idle,
+            },
+            serde_json::json!({"reason": "ended", "ended": "idle"}),
+        ),
+        (
+            NoWindow::AddressUnusable,
+            serde_json::json!({"reason": "address_unusable"}),
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(why).unwrap(), json);
+        let body = CheckNeeded::new("confirm with a passkey", why);
+        let wire = serde_json::to_value(&body).unwrap();
+        assert_eq!(wire["code"], "check_needed");
+        assert_eq!(wire["why"], json);
+        let back: ApiErrorBody = serde_json::from_value(wire).unwrap();
+        assert_eq!(back, ApiErrorBody::CheckNeeded(body));
+        assert_eq!(back.code(), Some(RefusalCode::CheckNeeded));
+        assert_eq!(back.message(), "confirm with a passkey");
+    }
+    let plain: ApiErrorBody = serde_json::from_value(
+        serde_json::json!({"error": "x", "code": "check_needed"}),
+    )
+    .unwrap();
+    assert!(matches!(plain, ApiErrorBody::Plain(_)));
+    assert_eq!(plain.code(), Some(RefusalCode::CheckNeeded));
+}

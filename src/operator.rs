@@ -9,7 +9,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::enums::{CheckSurface, DmCopyKind, MessageKind, PosterKind};
+use crate::enums::{
+    CheckSurface, CheckWindowEnd, DmCopyKind, MessageKind, PosterKind,
+};
 pub use crate::enums::{OperatorActionKind, OperatorCredentialKind};
 use crate::govlog::{HexLengthError, PublicKeyHex, Sha256Hex, SignatureHex};
 use crate::ids::{
@@ -978,15 +980,33 @@ pub enum OperatorActionDetail {
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(tag = "surface", rename_all = "snake_case")]
 pub enum WindowOpening {
-    /// By a 0x15 tap, whose assertion is stored with the entry as every
-    /// tap's is
-    Web,
+    /// On the web, `by` a tap in place, a sign-in or a sign-up
+    Web { by: WebOpening },
     /// By the operator poster's command line: an `open` assertion, with the
     /// PIN and a touch
     Cli {
         poster: AgentId,
         assertion: PosterAssertionRecord,
     },
+}
+
+/// What opened a [`WindowOpening::Web`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum WebOpening {
+    /// A tap in place (0x15) on a session outside its window; the
+    /// assertion is stored with the entry as every tap's is
+    Tap,
+    /// The sign-in that opened the session (0x16), its assertion stored
+    /// with the entry
+    SignIn,
+    /// The sign-up that created the account and opened the session. No
+    /// assertion is stored: a registration signs nothing the server can
+    /// keep (a passkey's attestation is usually `none`), so this opening
+    /// rests on the new passkey's registration alone
+    SignUp,
 }
 
 impl WindowOpening {
@@ -1006,7 +1026,7 @@ impl WindowOpening {
 
     pub fn surface(&self) -> CheckSurface {
         match self {
-            Self::Web => CheckSurface::Web,
+            Self::Web { .. } => CheckSurface::Web,
             Self::Cli { .. } => CheckSurface::Cli,
         }
     }
@@ -1485,11 +1505,32 @@ pub struct PortalSessionResponse {
 #[serde(deny_unknown_fields)]
 pub struct CheckWindowStatus {
     pub surface: CheckSurface,
+    /// The server's clock when it answered: a client times its next
+    /// question from `idle_expires_at - now`, never from its own clock
+    pub now: DateTime<Utc>,
     pub opened_at: DateTime<Utc>,
     /// When it ends unless used before then
     pub idle_expires_at: DateTime<Utc>,
     /// When it ends however it is used
     pub expires_at: DateTime<Utc>,
+}
+
+/// Why a session has no open check window, as `check_needed` and the
+/// portal's window status say it: only of the asking operator's own session
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum NoWindow {
+    /// None was ever opened on this session (a session from before windows,
+    /// or a sign-up from a network that couldn't hold one)
+    NeverOpened,
+    /// The session's last window ended, and why
+    Ended { ended: CheckWindowEnd },
+    /// This request's address can't hold a window (none, or a network where
+    /// the client's address is lost on the way in). Nothing ended: from
+    /// another connection the window may still be open
+    AddressUnusable,
 }
 
 impl CheckWindowStatus {
@@ -2335,6 +2376,27 @@ mod tests {
         );
         assert_eq!(entry.detail.kind(), OperatorActionKind::Unknown);
         assert_eq!(entry.for_agent(&[]), None);
+        // A kind with nested fields, as a newer server's `check_window_open`
+        // is to a 0.171.0 client, reads as `Unknown` too; and the kind alone
+        let nested = serde_json::json!({
+            "id": OperatorActionId::new(),
+            "detail": {
+                "kind": "window_from_the_future",
+                "window": OperatorActionId::new(),
+                "opening": {"surface": "web", "by": "sign_in"},
+                "list": [1, 2, {"x": null}],
+            },
+            "created_at": "2026-11-25T00:00:00Z",
+        });
+        let nested: OperatorLogEntry = serde_json::from_value(nested).unwrap();
+        assert_eq!(nested.detail, OperatorActionDetail::Unknown);
+        assert_eq!(
+            serde_json::from_value::<OperatorActionKind>(serde_json::json!(
+                "window_from_the_future"
+            ))
+            .unwrap(),
+            OperatorActionKind::Unknown
+        );
         // A known kind with a malformed body is still refused
         assert!(
             serde_json::from_value::<OperatorActionDetail>(
@@ -2351,6 +2413,7 @@ mod tests {
     fn check_window_wire() {
         let status = crate::fixtures::portal_session(false).window;
         assert_eq!(status.ends_at(), status.idle_expires_at);
+        assert!(status.now <= status.opened_at + chrono::Duration::hours(1));
         let late = CheckWindowStatus {
             idle_expires_at: status.expires_at + chrono::Duration::hours(1),
             ..status
@@ -2383,13 +2446,18 @@ mod tests {
             detail: OperatorActionDetail::CheckWindowOpen {
                 window: crate::ids::OperatorCheckWindowId::new(),
                 passkey: OperatorPasskeyId::new(),
-                opening: WindowOpening::Web,
+                opening: WindowOpening::Web {
+                    by: WebOpening::SignIn,
+                },
             },
             created_at: status.opened_at,
         };
         let json = serde_json::to_value(&entry.detail).unwrap();
         assert_eq!(json["kind"], "check_window_open");
-        assert_eq!(json["opening"], serde_json::json!({"surface": "web"}));
+        assert_eq!(
+            json["opening"],
+            serde_json::json!({"surface": "web", "by": "sign_in"})
+        );
         assert_eq!(
             serde_json::from_value::<OperatorActionDetail>(json).unwrap(),
             entry.detail
@@ -2436,7 +2504,13 @@ mod tests {
             [1; 16],
         );
         let cli = WindowOpening::cli(&open, assertion([1; 16])).unwrap();
-        for opening in [WindowOpening::Web, cli.clone()] {
+        let web = |by| WindowOpening::Web { by };
+        for opening in [
+            web(WebOpening::Tap),
+            web(WebOpening::SignIn),
+            web(WebOpening::SignUp),
+            cli.clone(),
+        ] {
             assert_eq!(
                 serde_json::to_value(&opening).unwrap()["surface"],
                 opening.surface().to_string()
@@ -2658,6 +2732,7 @@ mod tests {
             json["window"],
             serde_json::json!({
                 "surface": "web",
+                "now": "2025-10-30T00:01:00Z",
                 "opened_at": "2025-10-30T00:00:00Z",
                 "idle_expires_at": "2025-10-30T12:00:00Z",
                 "expires_at": "2025-11-01T00:00:00Z",

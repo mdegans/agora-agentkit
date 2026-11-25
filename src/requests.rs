@@ -783,24 +783,6 @@ pub enum Proof {
     Assertion(PasskeyAssertion),
 }
 
-impl Proof {
-    /// An agent's signature, if this is one
-    pub fn signature(&self) -> Option<&SignatureHex> {
-        match self {
-            Self::Signature(s) => Some(s),
-            Self::Assertion(_) => None,
-        }
-    }
-
-    /// An operator poster's assertion, if this is one
-    pub fn assertion(&self) -> Option<&PasskeyAssertion> {
-        match self {
-            Self::Assertion(a) => Some(a),
-            Self::Signature(_) => None,
-        }
-    }
-}
-
 /// A field present, as opposed to absent: `Some(None)` is an explicit
 /// `null`
 fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
@@ -3653,8 +3635,6 @@ mod tests {
             serde_json::from_value(body(serde_json::json!({"assertion": a})))
                 .unwrap();
         assert_eq!(req.proof, Proof::Assertion(assertion()));
-        assert_eq!(req.proof.assertion(), Some(&assertion()));
-        assert_eq!(req.proof.signature(), None);
         // Written where `signature` is: after the payload, before the time
         let text = serde_json::to_string(&req).unwrap();
         let at = |k: &str| text.find(&format!("\"{k}\"")).unwrap();
@@ -3669,8 +3649,8 @@ mod tests {
             serde_json::from_value(body(serde_json::json!({"signature": sig})))
                 .unwrap();
         assert_eq!(
-            agent_body.proof.signature(),
-            Some(&SignatureHex::from([0xab; 64]))
+            agent_body.proof,
+            Proof::Signature(SignatureHex::from([0xab; 64]))
         );
 
         for bad in [

@@ -60,11 +60,14 @@ pub enum TapKind {
     /// CLI*). Built for the web only: the command line opens one with its
     /// own assertion (`signing::poster_cli`), never with this tap
     OpenWindow = 0x15,
+    /// Signing in to the web, which opens a check window on the new
+    /// session: bound to the window the sign-in's start draws
+    SignIn = 0x16,
 }
 
 impl TapKind {
     /// Every kind still produced, by tag
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::Send,
         Self::OAuthConsent,
         Self::EnrolmentApproval,
@@ -84,6 +87,7 @@ impl TapKind {
         Self::PortalMessage,
         Self::DmKeys,
         Self::OpenWindow,
+        Self::SignIn,
     ];
 
     pub const fn tag(self) -> u8 {
@@ -316,6 +320,14 @@ pub enum Approval {
         operator: OperatorId,
         window: OperatorCheckWindowId,
     },
+    /// 0x16: a sign-in on the web, which opens a check window on the
+    /// session it opens: the window's id, drawn when the sign-in starts.
+    /// No operator: a sign-in by a discoverable credential doesn't know it
+    /// until the answer names the credential, and the credential that
+    /// signs determines it. As for 0x15, the start's network is held in
+    /// the ceremony, never in the bytes, and a finish from another network
+    /// is refused
+    SignIn { window: OperatorCheckWindowId },
 }
 
 fn uuid_bytes(id: impl Into<uuid::Uuid>) -> [u8; 16] {
@@ -344,6 +356,7 @@ impl Approval {
             Self::PortalMessage { .. } => TapKind::PortalMessage,
             Self::DmKeys { .. } => TapKind::DmKeys,
             Self::OpenWindow { .. } => TapKind::OpenWindow,
+            Self::SignIn { .. } => TapKind::SignIn,
         }
     }
 
@@ -443,6 +456,7 @@ impl Approval {
                 out.extend(uuid_bytes(*operator));
                 out.extend(uuid_bytes(*window));
             }
+            Self::SignIn { window } => out.extend(uuid_bytes(*window)),
         }
         out
     }
@@ -581,6 +595,7 @@ mod tests {
                 operator: id(A),
                 window: id(B),
             },
+            Approval::SignIn { window: id(B) },
         ]
     }
 
@@ -591,12 +606,12 @@ mod tests {
             tags,
             [
                 1, 2, 3, 4, 6, 8, 9, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-                0x11, 0x12, 0x13, 0x14, 0x15
+                0x11, 0x12, 0x13, 0x14, 0x15, 0x16
             ]
         );
         assert_eq!(TapKind::from_tag(0x07), None);
         assert_eq!(TapKind::from_tag(0x00), None);
-        assert_eq!(TapKind::from_tag(0x16), None);
+        assert_eq!(TapKind::from_tag(0x17), None);
         // 0x05 still reads, so stored assertions do, and isn't produced
         let retired = TapKind::from_tag(0x05).unwrap();
         assert!(retired.is_retired() && !TapKind::ALL.contains(&retired));
@@ -638,6 +653,7 @@ mod tests {
                 1 + 16 + 16,
                 1 + 16 + 1 + 16,
                 1 + 16 + 16,
+                1 + 16,
             ]
         );
     }
@@ -721,7 +737,7 @@ mod tests {
     }
 
     /// Computed independently (Python `hashlib`) from the spec's table
-    const VECTORS: [&str; 19] = [
+    const VECTORS: [&str; 20] = [
         "e417deb6abe94bb74037918fb0f749e401b58c3b282b206c96963217826c3435",
         "a4304de3920dfbb53406abda4991fa100f08578a65fd37a361de8364bf438940",
         "b55e306e201216cb476830ef7bada806c0e1f97ae49cca4b50aeb8989d0bddde",
@@ -741,6 +757,7 @@ mod tests {
         "2dde0a214a02d679163541709f56c1abd88d2fbe0a1c2ec6b2f621580034eb3e",
         "e6f3e3e64fcb22577e14248e151b5c3f624b7b86e602d2558f15fecb38e7794f",
         "6a924fcc4deef0ccac1bac0ee1ee65a860ff91b6979df54efbe829febc7edbea",
+        "cdd51657059c27337afa275f27f1a2ddb78ae90186fb40a33576ed2afb36a40c",
     ];
 
     /// 0x14's bytes: operator id ‖ purpose ‖ subject id, then for a new

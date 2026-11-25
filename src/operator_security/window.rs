@@ -338,9 +338,14 @@ impl CheckWindow {
     }
 
     /// What the portal's bootstrap says of it
-    pub fn status(&self, tier: Tier) -> crate::operator::CheckWindowStatus {
+    pub fn status(
+        &self,
+        tier: Tier,
+        now: DateTime<Utc>,
+    ) -> crate::operator::CheckWindowStatus {
         crate::operator::CheckWindowStatus {
             surface: self.surface,
+            now,
             opened_at: self.opened_at,
             idle_expires_at: self.idle_expires_at(tier),
             expires_at: self.expires_at(tier),
@@ -531,7 +536,7 @@ mod tests {
                 busy.check(tier, abs_at, here),
                 Err(CheckWindowEnd::Absolute)
             );
-            let status = busy.status(tier);
+            let status = busy.status(tier, abs_at);
             assert_eq!(status.expires_at, abs_at);
             assert_eq!(status.idle_expires_at, abs_at - second + limits.idle);
             assert_eq!(status.ends_at(), abs_at);
@@ -580,7 +585,7 @@ mod tests {
             Ok(Tier::UpTo500)
         );
         assert_eq!(
-            w.status(Tier::UpTo5).idle_expires_at,
+            w.status(Tier::UpTo5, t).idle_expires_at,
             t + Duration::minutes(15)
         );
     }
