@@ -495,9 +495,25 @@ fn blocked(session: &Session) -> Option<String> {
              again in another tab, then press “I've signed in”."
                 .to_owned(),
         ),
+        // The box says why itself: the reason, and what to do
+        Session::CheckNeeded(why) => Some(match why {
+            Some(crate::operator::NoWindow::AddressUnusable) => format!(
+                "This can't be sent from this connection: {}. Your text \
+                 stays in this tab; send it once this tab reaches Agora \
+                 through its public address.",
+                super::session::no_window_words(*why)
+            ),
+            _ => format!(
+                "Agora needs a recent passkey check before this can be sent: \
+                 {}. Your text is kept here: confirm with your passkey, then \
+                 send it.",
+                super::session::no_window_words(*why)
+            ),
+        }),
         Session::Loading => Some("Checking who is signed in…".to_owned()),
         Session::Failed(e) => Some(format!(
-            "Couldn't check who is signed in ({e}). Your text is kept here."
+            "Agora couldn't be reached ({e}), so this can't be sent now. Your \
+             text is kept here; send it once Agora answers."
         )),
     }
 }
@@ -553,6 +569,9 @@ enum NotSent {
     /// A 403 that isn't a suspension: the request's Origin or CSRF token
     /// (say after signing in again in another tab)
     SignInRefused,
+    /// Outside the session's check window
+    /// ([`RefusalCode::CheckNeeded`])
+    CheckNeeded,
 }
 
 impl NotSent {
@@ -571,6 +590,10 @@ impl NotSent {
                  sending it again; if it is refused again, sign in again in \
                  another tab."
             }
+            Self::CheckNeeded => {
+                "It wasn't sent, as Agora needed a recent passkey check then. \
+                 You can send it now."
+            }
         }
     }
 }
@@ -582,6 +605,9 @@ impl Said {
             ApiError::SignedOut(_) => Self::NotSentThen(NotSent::SignedOut),
             _ if e.suspension().is_some() => {
                 Self::NotSentThen(NotSent::Suspended)
+            }
+            _ if e.code() == Some(RefusalCode::CheckNeeded) => {
+                Self::NotSentThen(NotSent::CheckNeeded)
             }
             // A 403 the server named is about the write, not the session
             // (a message to a non-friend, a tap that wasn't accepted)
@@ -645,6 +671,10 @@ struct Draft<T> {
     /// person presses "Tap your passkey to send", and the browser's prompt
     /// opens in that press ([`Portal::passkey`])
     tap: Option<PendingTap>,
+    /// A private message's box was open when last drawn: one drawn again
+    /// (the inbox hidden and shown again around a passkey check, or its
+    /// page left and come back to) opens as it was
+    open: bool,
 }
 
 /// A message's tap the server asked for: the request it goes with (no
@@ -669,6 +699,7 @@ impl<T> Draft<T> {
             said: None,
             checking: None,
             tap: None,
+            open: false,
         }
     }
 
@@ -1084,6 +1115,8 @@ fn use_drawn_here(drafts: Option<Drafts>, key: Option<DraftKey>) {
 /// no client provided the store (the server)
 #[component]
 pub fn UnsentDrafts() -> Element {
+    // Hooks first, whatever is drawn
+    let session = super::session::try_use_session();
     let Some(drafts) = try_use_context::<Drafts>() else {
         return rsx! {};
     };
@@ -1106,25 +1139,49 @@ pub fn UnsentDrafts() -> Element {
         1 => "1 unsent draft isn't shown on this page".to_owned(),
         n => format!("{n} unsent drafts aren't shown on this page"),
     };
+    // A draft whose box belongs on this very page (the inbox, hidden for a
+    // passkey check, or a message gone since): no link to the page it is
+    // on, and why its box isn't drawn
+    let here = drafts.portal.peek().here().map(|here| {
+        here.split(['?', '#']).next().unwrap_or_default().to_owned()
+    });
+    let state = session.map(|h| h.get());
+    let hidden_why = match state {
+        Some(Session::CheckNeeded(_)) => Some(
+            "Its box is on this page, hidden until you confirm with your passkey.",
+        ),
+        Some(Session::Failed(_)) | Some(Session::Loading) => Some(
+            "Its box is on this page, hidden until Agora answers; it opens again here as it was.",
+        ),
+        _ => None,
+    };
+    let hidden_words =
+        hidden_why.unwrap_or("Its box isn't shown on this page now.");
     rsx! {
         div { class: "ui-compose ui-drafts",
             details {
                 summary { class: "post-meta", "{summary}" }
                 p { class: "ui-note",
-                    "Kept in this tab only. A draft is listed here when its box isn't on this \
-                     page: it was started on another page (open that page to send it), or its \
-                     thread was locked or its comment removed since (then it can't be sent; \
-                     copy its text from here if you want it)."
+                    "Kept in this tab only. A draft is listed here when its box isn't drawn: it \
+                     was started on another page (open that page to send it), its box is hidden \
+                     until a passkey check, or its thread was locked or its comment removed \
+                     since (then it can't be sent; copy its text from here if you want it)."
                 }
                 ul { class: "ui-drafts-list",
                     for (key , text , sending) in listed {
                         li { key: "{key.page().site_path()} {key.what()}", class: "ui-drafts-item",
                             span { class: "ui-field-label", "{key.what()}" }
                             div { class: "ui-actions",
-                                super::route::To {
-                                    link: key.page(),
-                                    class: "ui-pill ui-pill-action",
-                                    "Open its page"
+                                if here.as_deref() == Some(key.page().site_path().as_str()) {
+                                    span { class: "ui-note",
+                                        "{hidden_words}"
+                                    }
+                                } else {
+                                    super::route::To {
+                                        link: key.page(),
+                                        class: "ui-pill ui-pill-action",
+                                        "Open its page"
+                                    }
                                 }
                                 if sending {
                                     span { class: "ui-note", role: "status", "Sending…" }
@@ -1683,6 +1740,7 @@ fn Feedback(
     let blocked = blocked(&state);
     let blocked_shown = blocked.is_some();
     let signed_out = matches!(state, Session::SignedOut);
+    let check_needed = matches!(state, Session::CheckNeeded(_));
     let sign_in = sign_in_href(handle.portal().here().as_deref());
     let send_as_new = rsx! {
         button {
@@ -1714,6 +1772,10 @@ fn Feedback(
                         "I've signed in"
                     }
                 }
+            }
+            // The tap in place, in the box: the page carries on here
+            if check_needed {
+                super::session::WindowCheck {}
             }
         }
         match said {
@@ -2406,6 +2468,11 @@ fn refusal_reason(e: &ApiError) -> String {
                 .to_owned()
         }
         _ => match e.code() {
+            Some(RefusalCode::CheckNeeded) => {
+                "Agora needed a recent passkey check (confirm with your \
+                 passkey on this page, then send it)."
+                    .to_owned()
+            }
             Some(RefusalCode::TapRefused) => {
                 "the passkey tap wasn't accepted (it \
                  took too long, was used already, or another passkey request \
@@ -2495,11 +2562,14 @@ impl MessageControls {
     }
 
     fn open(self) {
-        self.draft();
+        change(self.draft(), |d| d.open = true);
         put(self.open, true);
     }
 
     fn close(self) {
+        if let Some(draft) = self.drafts.message(self.to) {
+            change(draft, |d| d.open = false);
+        }
         put(self.refocus, true);
         put(self.open, false);
     }
@@ -2757,6 +2827,7 @@ impl MessageControls {
             if answer.is_ok() {
                 d.text.body.clear();
                 d.action = OperatorActionId::new();
+                d.open = false;
             }
         });
         self.drafts.report();
@@ -2824,7 +2895,13 @@ pub fn MessageBox(
 ) -> Element {
     let session = try_use_session();
     let drafts = try_use_context::<Drafts>();
-    let open_box = use_signal(|| start_open);
+    // Open as it was when last drawn ([`Draft::open`])
+    let open_box = use_signal(|| {
+        start_open
+            || drafts
+                .and_then(|d| d.message(to))
+                .is_some_and(|d| d.try_peek().is_ok_and(|d| d.open))
+    });
     let refocus = use_signal(|| false);
     let initial = recipient
         .as_ref()

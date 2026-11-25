@@ -1,7 +1,9 @@
 //! A [`Portal`] for tests: answers what it is told, and keeps every
 //! request it was sent (`cfg(test)` only)
 
-use std::{cell::RefCell, collections::VecDeque, rc::Rc};
+use std::{cell::RefCell, collections::VecDeque, rc::Rc, time::Duration};
+
+use chrono::{DateTime, Utc};
 
 use futures::{
     FutureExt,
@@ -14,9 +16,10 @@ use crate::{
     enums::MessageEncryption,
     ids::{CommentId, MessageId, PostId},
     operator::{
-        PortalCommentRequest, PortalFriendshipRequest, PortalMarkReadRequest,
-        PortalMarkReadResponse, PortalMessageRequest, PortalMessageTap,
-        PortalPostRequest, PortalSessionResponse,
+        CheckWindowStatus, PortalCommentRequest, PortalFriendshipRequest,
+        PortalMarkReadRequest, PortalMarkReadResponse, PortalMessageRequest,
+        PortalMessageTap, PortalPostRequest, PortalSessionResponse,
+        PortalWindowOpenRequest, PortalWindowTap,
     },
     responses::{
         CommunityResponse, FriendsResponse, InboxResponse, PostCreated,
@@ -35,6 +38,15 @@ pub struct Fake {
     pub session: Option<Result<PortalSessionResponse, ApiError>>,
     /// How many times the bootstrap was asked for
     pub session_calls: usize,
+    /// How many times the window's status was asked for (it answers as the
+    /// bootstrap does: its window, or its refusal)
+    pub status_calls: usize,
+    /// The status's answers, in order, before it answers as the bootstrap
+    /// does: so a test can script the status and the bootstrap apart
+    pub status_answers: VecDeque<Result<CheckWindowStatus, ApiError>>,
+    /// The heartbeat's waits ([`crate::ui::session::HEARTBEAT`]), kept
+    /// apart from the probes'
+    pub beats: Vec<Option<oneshot::Sender<()>>>,
     /// Answers to posts, in order; a post past them gets a 201 for
     /// [`created_post`]
     pub post_answers: VecDeque<Result<PostCreated, ApiError>>,
@@ -70,6 +82,21 @@ pub struct Fake {
     pub passkey_answers: VecDeque<Result<serde_json::Value, TapFailed>>,
     /// The options each prompt was opened with
     pub prompts: Vec<serde_json::Value>,
+    /// Answers to the window's tap call; past them, [`window_options`]
+    pub window_tap_answers: VecDeque<Result<PortalWindowTap, ApiError>>,
+    pub window_taps: usize,
+    /// Answers to the window's open; past them, the fixtures' window. An
+    /// open past them also makes the bootstrap answer signed in
+    pub open_answers: VecDeque<Result<CheckWindowStatus, ApiError>>,
+    pub opens: Vec<PortalWindowOpenRequest>,
+    /// The browser's clock; the fixtures' window's opening when `None`
+    pub now: Option<DateTime<Utc>>,
+    /// Each wait asked for, in order, with the sender that ends it
+    pub waits: Vec<(Duration, Option<oneshot::Sender<()>>)>,
+    /// The page's listeners for being shown again, in order
+    pub shown: Vec<Option<oneshot::Sender<()>>>,
+    /// The page's own path; `/agora/feed` when `None`
+    pub here: Option<String>,
 }
 
 impl FakePortal {
@@ -100,6 +127,22 @@ fn gated<T: 'static>(
 /// The tap options a tap call past the scripted answers gives
 pub fn tap_options() -> serde_json::Value {
     serde_json::json!({"challenge": "Y2hhbGxlbmdl", "rpId": "localhost"})
+}
+
+/// The window's tap options past the scripted answers
+pub fn window_options() -> serde_json::Value {
+    serde_json::json!({"challenge": "d2luZG93", "rpId": "localhost"})
+}
+
+/// The bootstrap's refusal outside a check window
+pub fn check_needed() -> ApiError {
+    ApiError::Forbidden(
+        crate::responses::ErrorResponse::coded(
+            crate::errors::RefusalCode::CheckNeeded,
+            "this needs a recent passkey check",
+        )
+        .into(),
+    )
 }
 
 /// The browser's answer a prompt past the scripted answers gives
@@ -147,6 +190,49 @@ impl FakePortal {
         fake.0.borrow_mut().session =
             Some(Ok(crate::fixtures::portal_session(poster)));
         fake
+    }
+
+    /// Signed in, outside the check window
+    pub fn check_needed() -> Self {
+        let fake = Self::default();
+        fake.0.borrow_mut().session = Some(Err(check_needed()));
+        fake
+    }
+
+    /// Ends the `n`th wait asked for (a timer firing)
+    pub fn fire(&self, n: usize) {
+        let sender = self.0.borrow_mut().waits[n].1.take();
+        sender.expect("not fired before").send(()).unwrap();
+    }
+
+    /// Fires the newest wait asked for (the current probe's timer)
+    pub fn fire_last(&self) {
+        let n = self.0.borrow().waits.len() - 1;
+        self.fire(n);
+    }
+
+    /// The heartbeat beats once
+    pub fn beat(&self) {
+        let sender = self
+            .0
+            .borrow_mut()
+            .beats
+            .iter_mut()
+            .rev()
+            .find_map(Option::take);
+        sender.expect("the page beats").send(()).unwrap();
+    }
+
+    /// The page is shown again (a tab brought back)
+    pub fn show_again(&self) {
+        let sender = self
+            .0
+            .borrow_mut()
+            .shown
+            .iter_mut()
+            .rev()
+            .find_map(Option::take);
+        sender.expect("the page listens").send(()).unwrap();
     }
 
     /// No one is signed in
@@ -247,7 +333,13 @@ impl Portal for FakePortal {
     }
 
     fn here(&self) -> Option<String> {
-        Some("/agora/feed".into())
+        Some(
+            self.0
+                .borrow()
+                .here
+                .clone()
+                .unwrap_or_else(|| "/agora/feed".into()),
+        )
     }
 
     fn drafts_unsent(&self, unsent: bool) {
@@ -357,5 +449,92 @@ impl Portal for FakePortal {
                 .pop_front()
                 .unwrap_or_else(|| Ok(assertion())),
         )
+    }
+
+    fn window_status(
+        &self,
+    ) -> LocalBoxFuture<'static, Result<CheckWindowStatus, ApiError>> {
+        let mut fake = self.0.borrow_mut();
+        fake.status_calls += 1;
+        let gate = fake.gate.clone();
+        if let Some(answer) = fake.status_answers.pop_front() {
+            return gated(gate, answer);
+        }
+        gated(
+            gate,
+            match fake.session.clone() {
+                Some(Ok(session)) => Ok(session.window),
+                Some(Err(e)) => Err(e),
+                None => Err(ApiError::Network("offline".into())),
+            },
+        )
+    }
+
+    fn window_tap(
+        &self,
+    ) -> LocalBoxFuture<'static, Result<PortalWindowTap, ApiError>> {
+        let mut fake = self.0.borrow_mut();
+        fake.window_taps += 1;
+        let gate = fake.gate.clone();
+        gated(
+            gate,
+            fake.window_tap_answers.pop_front().unwrap_or_else(|| {
+                Ok(PortalWindowTap {
+                    tap: window_options(),
+                })
+            }),
+        )
+    }
+
+    fn open_window(
+        &self,
+        request: &PortalWindowOpenRequest,
+    ) -> LocalBoxFuture<'static, Result<CheckWindowStatus, ApiError>> {
+        let mut fake = self.0.borrow_mut();
+        fake.opens.push(request.clone());
+        let gate = fake.gate.clone();
+        let answer = fake.open_answers.pop_front().unwrap_or_else(|| {
+            fake.session = Some(Ok(crate::fixtures::portal_session(true)));
+            Ok(crate::fixtures::portal_session(true).window)
+        });
+        gated(gate, answer)
+    }
+
+    fn now(&self) -> DateTime<Utc> {
+        self.0
+            .borrow()
+            .now
+            .unwrap_or(crate::fixtures::portal_session(true).window.now)
+    }
+
+    fn shown_again(&self) -> LocalBoxFuture<'static, ()> {
+        let (tx, rx) = oneshot::channel();
+        self.0.borrow_mut().shown.push(Some(tx));
+        async move {
+            if rx.await.is_err() {
+                futures::future::pending::<()>().await;
+            }
+        }
+        .boxed_local()
+    }
+
+    fn after(&self, delay: Duration) -> LocalBoxFuture<'static, ()> {
+        let (tx, rx) = oneshot::channel();
+        // The heartbeat's wait: its period, while no beat is pending (one
+        // loop, so one at a time). A probe's retry may wait as long
+        let beat = delay == crate::ui::session::HEARTBEAT
+            && !self.0.borrow().beats.iter().any(Option::is_some);
+        if beat {
+            self.0.borrow_mut().beats.push(Some(tx));
+        } else {
+            self.0.borrow_mut().waits.push((delay, Some(tx)));
+        }
+        async move {
+            // Dropped unfired (the fake gone): the wait never ends
+            if rx.await.is_err() {
+                futures::future::pending::<()>().await;
+            }
+        }
+        .boxed_local()
     }
 }
