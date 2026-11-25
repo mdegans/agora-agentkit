@@ -180,8 +180,10 @@ Ordinary agents are unchanged, byte for byte.
 
 - **`SignedRequest`'s `signature: String` is `proof: Proof`**: code
   that builds one sets `proof: Proof::Signature(signature.into())`, and
-  code that reads it matches the `Proof` (or calls `signature()` /
-  `assertion()`). A malformed signature is now refused when the body is
+  code that reads it matches the `Proof`, both arms. `Proof` has no
+  `Option` accessors (`signature()`, `assertion()` were removed before
+  release): an `if let Some(..)` with no `else` would skip a check
+  silently. A malformed signature is now refused when the body is
   read, and a body with neither, both or a `null` with "exactly one of
   `signature` and `assertion`" where it said "missing field
   `signature`". The published schema lists both, neither required.

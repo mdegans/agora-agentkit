@@ -445,8 +445,10 @@ mod tests {
                     .is_true(move |req| {
                         let body: crate::requests::PostStateAnchorRequest =
                             serde_json::from_slice(req.body_ref()).unwrap();
-                        let sig =
-                            *body.proof.signature().expect("an agent signs");
+                        let crate::requests::Proof::Signature(sig) = body.proof
+                        else {
+                            panic!("an agent signs");
+                        };
                         body.agent_id == id
                             && verify(
                                 &vk,
