@@ -325,7 +325,6 @@ impl InboxStore {
             put(self.refreshing, false);
             match answer {
                 Ok(inbox) => {
-                    handle.note_used();
                     put(self.stale, None);
                     put(self.inbox, Load::Loaded(Rc::new(inbox)));
                 }
@@ -364,7 +363,6 @@ impl InboxStore {
             }
             match answer {
                 Ok(friends) => {
-                    handle.note_used();
                     put(self.friends_stale, None);
                     put(self.friends, Load::Loaded(Rc::new(friends)));
                 }

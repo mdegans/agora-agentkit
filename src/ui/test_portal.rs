@@ -38,6 +38,9 @@ pub struct Fake {
     pub session: Option<Result<PortalSessionResponse, ApiError>>,
     /// How many times the bootstrap was asked for
     pub session_calls: usize,
+    /// How many times the window's status was asked for (it answers as the
+    /// bootstrap does: its window, or its refusal)
+    pub status_calls: usize,
     /// Answers to posts, in order; a post past them gets a 201 for
     /// [`created_post`]
     pub post_answers: VecDeque<Result<PostCreated, ApiError>>,
@@ -428,6 +431,18 @@ impl Portal for FakePortal {
                 .pop_front()
                 .unwrap_or_else(|| Ok(assertion())),
         )
+    }
+
+    fn window_status(
+        &self,
+    ) -> LocalBoxFuture<'static, Result<CheckWindowStatus, ApiError>> {
+        let mut fake = self.0.borrow_mut();
+        fake.status_calls += 1;
+        ready(match fake.session.clone() {
+            Some(Ok(session)) => Ok(session.window),
+            Some(Err(e)) => Err(e),
+            None => Err(ApiError::Network("offline".into())),
+        })
     }
 
     fn window_tap(

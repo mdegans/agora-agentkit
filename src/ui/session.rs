@@ -50,16 +50,18 @@
 //! nothing redirects to the sign-in page.
 //!
 //! **The server says when a window ends; the page asks it then.** A
-//! signed-in bootstrap carries its window ([`SignedIn::window`]). The page
-//! never decides from its own clock that the window has ended: at the
-//! window's end by the server's clock (the time left from the status's
-//! `now`), plus [`PROBE_AFTER_END`], it
-//! fetches the bootstrap again ([`SessionHandle`]'s probe), and the
-//! server's answer is what the page shows. A probe the server admits is a
-//! use of the window (the bootstrap is a portal request), so the page
-//! probes again only if it used the window itself since the last probe was
-//! set: a clock that runs ahead can stretch a window by one probe at most,
-//! never keep it open.
+//! signed-in bootstrap carries its window ([`SignedIn::window`]), with the
+//! server's `now`. The page never decides from its own clock that the
+//! window has ended: after the time the server says is left (by elapsed
+//! time on the page), plus [`PROBE_AFTER_END`], it asks the window's
+//! status (`GET /api/portal/window`, which never counts as a use, so
+//! asking can't keep a window open), and shows the server's answer; after
+//! every answer the next question is set. A question with no answer
+//! (offline, a 5xx, a laptop waking) is asked again with a backoff, and
+//! after [`PROBE_UNKNOWN_FOR`] without knowing, the page shows that it
+//! couldn't reach Agora rather than keep private messages up on a guess.
+//! A page shown again (a tab brought back, the back-forward cache) asks at
+//! once ([`Portal::shown_again`]).
 //!
 //! **What draws takes props.** [`SessionStatusView`] draws a [`Session`]
 //! and reads nothing; [`SessionStatus`] reads the context and draws it.
@@ -465,6 +467,13 @@ pub trait Portal {
     fn window_tap(
         &self,
     ) -> LocalBoxFuture<'static, Result<PortalWindowTap, ApiError>>;
+    /// `GET /api/portal/window`: whether the session's window is open, by
+    /// the server's clock, never counted as a use of it. Open: its status;
+    /// not: the 403 `check_needed` with why ([`ApiError::no_window`]).
+    /// The session's cookie only, no CSRF token
+    fn window_status(
+        &self,
+    ) -> LocalBoxFuture<'static, Result<CheckWindowStatus, ApiError>>;
     /// `POST /api/portal/window`: the tap's answer; the window opens, as
     /// [`Self::window_tap`] says of its headers
     fn open_window(
@@ -752,30 +761,13 @@ pub enum WindowTap {
     Failed(String),
 }
 
-/// Which kind of bootstrap fetch a refresh is
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fetch {
-    /// Asked for by the page or the person: a write's refusal, "Try
-    /// again", "I've signed in", a window just opened
-    Asked,
-    /// The page's own question: at a window's end ([`PROBE_AFTER_END`]),
-    /// after a probe that got no answer, or when the page is shown again
-    /// (a tab brought back, a page restored from the back-forward cache).
-    /// `used`: the page used the window since this probe was set
-    Probe { used: bool },
-}
-
-/// The probe of the window's end: which one is current, whether the page
-/// used the window since it was set, and since when probes have gone
-/// unanswered
+/// The probe of the window's end: which one is current, and since when
+/// probes have gone unanswered
 #[derive(Debug, Clone, Copy, Default)]
 struct Probe {
     /// Bumped by each probe set; a probe that wakes to another number was
     /// replaced, and asks nothing
     generation: u64,
-    /// A request of this page's was answered inside the window since the
-    /// probe was set ([`SessionHandle::note_used`])
-    used: bool,
     /// When the first of the probes that have gone unanswered since the
     /// last answer was made, by the browser's clock (only ever compared
     /// with that clock, for [`PROBE_UNKNOWN_FOR`])
@@ -860,16 +852,11 @@ impl SessionHandle {
     /// fetch runs on the root scope, so a refresh a form starts isn't
     /// cancelled when the form goes away
     pub fn refresh(self) {
-        self.fetch(Fetch::Asked);
-    }
-
-    /// Fetches the bootstrap, as `kind`
-    fn fetch(self, kind: Fetch) {
         self.watch_returns();
         let generation = self.begin_refresh();
         let answer = self.portal().session();
         dioxus::core::spawn_forever(async move {
-            self.finish_fetch(generation, kind, answer.await);
+            self.finish_refresh(generation, answer.await);
         });
     }
 
@@ -881,62 +868,24 @@ impl SessionHandle {
         next
     }
 
-    /// Applies a refresh's answer, unless a later refresh has started
-    #[cfg(test)]
+    /// Applies a bootstrap's answer, unless a later fetch has started, and
+    /// sets the probe of the window's end it gives: signed in, the next
+    /// probe; otherwise none (a page outside its window, or signed out,
+    /// has nothing to hide when a window ends; being shown again asks
+    /// anyway). A bootstrap with no answer leaves the state and the probe
+    /// as they are
     fn finish_refresh(
         self,
         generation: u64,
-        answer: Result<PortalSessionResponse, ApiError>,
-    ) {
-        self.finish_fetch(generation, Fetch::Asked, answer);
-    }
-
-    /// Applies a bootstrap's answer, unless a later fetch has started, and
-    /// sets the probe of the window's end it gives.
-    ///
-    /// - An answer (a 200, a 401, a `check_needed`) replaces the state.
-    ///   Signed in, the next probe is set; otherwise none is needed (a page
-    ///   outside its window, or signed out, has nothing to hide when the
-    ///   window ends; being shown again asks anyway).
-    /// - A probe with no answer (offline, a 5xx, an answer that couldn't
-    ///   be read) is set again, never dropped ([`Self::probe_failed`]).
-    /// - Another fetch with no answer leaves the state and the probe as
-    ///   they are.
-    ///
-    /// A probe that the server admitted sets the next only if the page
-    /// used the window since this one was set: the probe is the bootstrap,
-    /// which counts as a use, so probing again on its own would keep the
-    /// window open by itself (a clock ahead of the server's)
-    fn finish_fetch(
-        self,
-        generation: u64,
-        kind: Fetch,
         answer: Result<PortalSessionResponse, ApiError>,
     ) {
         if *self.generation.peek() != generation {
             return;
         }
         let answered = match &answer {
-            Ok(_) => true,
-            Err(ApiError::SignedOut(_)) => true,
+            Ok(_) | Err(ApiError::SignedOut(_)) => true,
             Err(e) => e.code() == Some(RefusalCode::CheckNeeded),
         };
-        if !answered {
-            if let (Fetch::Probe { .. }, Err(e)) = (kind, &answer) {
-                self.probe_failed(e.clone());
-            } else {
-                let mut next = self.state.peek().clone();
-                next.after_refresh(answer);
-                self.replace(next);
-            }
-            return;
-        }
-        {
-            let mut probe = self.probe;
-            let mut p = probe.write();
-            p.failing_since = None;
-            p.failures = 0;
-        }
         let mut next = self.state.peek().clone();
         next.after_refresh(answer);
         let window = match &next {
@@ -944,14 +893,67 @@ impl SessionHandle {
             _ => None,
         };
         self.replace(next);
-        match (window, kind) {
-            (Some(window), Fetch::Asked | Fetch::Probe { used: true }) => {
-                self.set_probe(window);
-            }
-            (Some(_), Fetch::Probe { used: false }) | (None, _) => {
-                self.cancel_probe();
-            }
+        match (answered, window) {
+            (true, Some(window)) => self.set_probe(window),
+            (true, None) => self.cancel_probe(),
+            (false, _) => {}
         }
+    }
+
+    /// Asks the server about the window (`GET /api/portal/window`, which
+    /// never counts as a use of it), and applies the answer:
+    ///
+    /// - open: a signed-in page takes the window's new times and sets the
+    ///   next probe by them; a page outside its window, or one that
+    ///   couldn't reach Agora, fetches the bootstrap (the session's token
+    ///   and whether it may write) and carries on;
+    /// - `check_needed`: the page is outside its window, and says why;
+    /// - 401: signed out;
+    /// - no answer (offline, a 5xx, one that couldn't be read): asked
+    ///   again, never dropped ([`Self::probe_failed`])
+    fn probe(self) {
+        self.watch_returns();
+        let generation = self.begin_refresh();
+        let answer = self.portal().window_status();
+        dioxus::core::spawn_forever(async move {
+            let answer = answer.await;
+            if *self.generation.peek() != generation {
+                return;
+            }
+            match answer {
+                Ok(window) => {
+                    self.answered();
+                    let mut state = self.state.peek().clone();
+                    match &mut state {
+                        Session::SignedIn(s) => {
+                            s.portal.window = window;
+                            self.replace(state);
+                            self.set_probe(window);
+                        }
+                        _ => self.refresh(),
+                    }
+                }
+                Err(ApiError::SignedOut(_)) => {
+                    self.answered();
+                    self.cancel_probe();
+                    self.replace(Session::SignedOut);
+                }
+                Err(e) if e.code() == Some(RefusalCode::CheckNeeded) => {
+                    self.answered();
+                    self.cancel_probe();
+                    self.replace(Session::CheckNeeded(e.no_window()));
+                }
+                Err(e) => self.probe_failed(e),
+            }
+        });
+    }
+
+    /// A probe got an answer: no longer failing
+    fn answered(self) {
+        let mut probe = self.probe;
+        let mut p = probe.write();
+        p.failing_since = None;
+        p.failures = 0;
     }
 
     /// A probe got no answer: whether the window is open is unknown. Asked
@@ -980,19 +982,10 @@ impl SessionHandle {
         self.set_probe_in(wait);
     }
 
-    /// The page's request was answered inside the window: it was used, so
-    /// a probe that finds it still open may set the next
-    pub(crate) fn note_used(self) {
-        let mut probe = self.probe;
-        probe.write().used = true;
-    }
-
     /// No probe is current
     fn cancel_probe(self) {
         let mut probe = self.probe;
-        let mut p = probe.write();
-        p.generation += 1;
-        p.used = false;
+        probe.write().generation += 1;
     }
 
     /// Asks the server again at `window`'s end, by the server's clock (the
@@ -1021,12 +1014,7 @@ impl SessionHandle {
     /// current probe and the page shows, or showed until it couldn't reach
     /// Agora, a window as open
     fn probe_now(self, generation: u64) {
-        let Probe {
-            generation: current,
-            used,
-            ..
-        } = *self.probe.peek();
-        if current != generation
+        if self.probe.peek().generation != generation
             || !matches!(
                 *self.state.peek(),
                 Session::SignedIn(_) | Session::Failed(_)
@@ -1034,7 +1022,7 @@ impl SessionHandle {
         {
             return;
         }
-        self.fetch(Fetch::Probe { used });
+        self.probe();
     }
 
     /// The page is shown again (a tab brought back, a page restored from
@@ -1049,8 +1037,7 @@ impl SessionHandle {
             *self.state.peek(),
             Session::SignedIn(_) | Session::CheckNeeded(_) | Session::Failed(_)
         ) {
-            let used = self.probe.peek().used;
-            self.fetch(Fetch::Probe { used });
+            self.probe();
         }
     }
 
@@ -1101,32 +1088,40 @@ impl SessionHandle {
             return;
         }
         self.set_tap(WindowTap::Asking);
+        // The status (never a use): a later fetch wins over it
         let generation = self.begin_refresh();
-        let status = self.portal().session();
+        let status = self.portal().window_status();
         dioxus::core::spawn_forever(async move {
             let status = status.await;
-            let outside = matches!(
-                &status,
-                Err(e) if e.code() == Some(RefusalCode::CheckNeeded)
-            );
+            if *self.generation.peek() != generation {
+                self.set_tap(WindowTap::Idle);
+                return;
+            }
             match status {
-                // Open already, or the session ended: the state says so
-                Ok(_) | Err(ApiError::SignedOut(_)) => {
-                    self.finish_fetch(generation, Fetch::Asked, status);
+                // Open already (another tab): the bootstrap, and on
+                Ok(_) => {
                     self.set_tap(WindowTap::Idle);
+                    self.refresh();
                     return;
                 }
-                _ if outside => {
-                    self.finish_fetch(generation, Fetch::Asked, status);
+                Err(ApiError::SignedOut(_)) => {
+                    self.set_tap(WindowTap::Idle);
+                    self.replace(Session::SignedOut);
+                    return;
+                }
+                Err(e) if e.code() == Some(RefusalCode::CheckNeeded) => {
+                    let why = e.no_window();
+                    self.replace(Session::CheckNeeded(why));
+                    // No tap from here can open one: none is offered
+                    if why == Some(NoWindow::AddressUnusable) {
+                        self.set_tap(WindowTap::Idle);
+                        return;
+                    }
                 }
                 Err(e) => {
                     self.set_tap(WindowTap::Failed(window_refusal_words(&e)));
                     return;
                 }
-            }
-            if !matches!(*self.state.peek(), Session::CheckNeeded(_)) {
-                self.set_tap(WindowTap::Idle);
-                return;
             }
             match self.portal().window_tap().await {
                 Ok(PortalWindowTap { tap }) => {
@@ -1232,7 +1227,7 @@ impl SessionHandle {
                     tap
                 )),
             };
-            self.finish_fetch(generation, Fetch::Asked, answer);
+            self.finish_refresh(generation, answer);
             self.set_tap(match words {
                 Some(words) => WindowTap::Failed(words),
                 None => WindowTap::Idle,
@@ -1322,7 +1317,7 @@ impl SessionHandle {
         dioxus::core::spawn_forever(async move {
             let answer = answer.await;
             match &answer {
-                Ok(_) => self.note_used(),
+                Ok(_) => {}
                 Err(e) => self.note_write_error(&signed_in, e),
             }
             done(answer);
@@ -1551,14 +1546,16 @@ pub fn no_window_words(why: Option<NoWindow>) -> &'static str {
                  signed out"
             }
             CheckWindowEnd::Clock => {
-                "the passkey check for this session ended because its stored \
-                 times were ahead of Agora's clock"
+                "Agora ended the passkey check for this session as a \
+                 precaution (its stored times were ahead of Agora's clock); \
+                 a fresh check fixes it"
             }
         },
         Some(NoWindow::AddressUnusable) => {
             "this connection doesn't tell Agora which network you're on, so no \
-             passkey check can be used over it: reach Agora through its public \
-             address (not straight over the local network)"
+             passkey check can be opened or used over it, and a tap from here \
+             would be refused: reach Agora through its public address (not \
+             straight over the local network), and confirm from there"
         }
     }
 }
@@ -1605,8 +1602,14 @@ pub fn window_line(window: &CheckWindowStatus) -> String {
 pub fn WindowCheck() -> Element {
     let handle = use_session();
     let pressed_here = use_signal(|| false);
-    if !matches!(handle.get(), Session::CheckNeeded(_)) {
-        return rsx! {};
+    match handle.get() {
+        // A tap from this connection would only be refused: the line says
+        // why, and offers none
+        Session::CheckNeeded(Some(NoWindow::AddressUnusable)) => {
+            return rsx! {};
+        }
+        Session::CheckNeeded(_) => {}
+        _ => return rsx! {},
     }
     let mut pressed = pressed_here;
     rsx! {

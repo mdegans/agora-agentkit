@@ -114,20 +114,26 @@ anyone to the sign-in page.
   (nothing opened) or to the finish (with its own error, once the status
   says nothing opened); a cancelled prompt. A 401 signs the page out.
 - **The window's end, from the server**: `SignedIn::window`, and the
-  session line says when it ends (`window_line`). At the window's end by
-  the bootstrap's times plus `PROBE_AFTER_END` (10 s), the page fetches
-  the bootstrap again and shows what the server says; it never decides
-  from its own clock. A probe the server admits is a use of the window,
-  so the next is set only if the page used the window since
-  (`SessionHandle::note_used`, on every answered portal request): a fast
-  clock can stretch a window by one probe at most. A probe with no answer
-  (offline, a 5xx, a laptop waking) is set again with a backoff (5 s
-  doubling to 60 s), never dropped; after `PROBE_UNKNOWN_FOR` (30 s)
+  session line says when it ends (`window_line`). After the time the
+  server says is left (`ends_at() - now`, by elapsed time on the page)
+  plus `PROBE_AFTER_END` (2 s), the page asks the window's status
+  (`Portal::window_status`, `GET /api/portal/window`, never counted as a
+  use) and shows the server's answer; every answer sets the next
+  question. It never decides from its own clock. A question with no
+  answer (offline, a 5xx, a laptop waking) is asked again with a backoff
+  (5 s doubling to 60 s), never dropped; after `PROBE_UNKNOWN_FOR` (30 s)
   without knowing, the page shows `Session::Failed` (Agora couldn't be
   reached) rather than keep private messages up on a guess. The page asks
   at once when shown again (`Portal::shown_again`: `visibilitychange`,
   `pageshow`). A `check_needed` for a request made before a window opened
   since asks again rather than putting the page outside.
+- **Why there is no window**: `Session::CheckNeeded` carries the
+  server's `NoWindow` (`ApiError::no_window`), and the session line and
+  the inbox say it per reason (`no_window_words`, exhaustive): never
+  opened on this session, ended unused, at its time limit, on a change
+  of network, with a suspended passkey or a freeze (and that the other
+  passkeys can still confirm), on sign-out, or as a precaution (clock);
+  or a connection that can't hold one, where no tap is offered.
 - **Drafts across a lapse**: a box holding a draft stays drawn, saying a
   passkey check is needed, with the tap in it; after the tap it says the
   text wasn't sent then (`NotSent::CheckNeeded`), and a send goes under
@@ -141,9 +147,10 @@ anyone to the sign-in page.
   is hidden there, and says it is hidden until the passkey check. The
   lapse texts claim no more than is true in every case (no window opened
   yet, one ended, a network that can't hold one).
-- **`Portal` has five more methods**: `window_tap`, `open_window`,
-  `after(Duration)` (a timer; a host with none may never wake),
-  `shown_again()` and `now()` (default: chrono's clock).
+- **`Portal` has six more methods**: `window_status`, `window_tap`,
+  `open_window`, `after(Duration)` (a timer; a host with none may never
+  wake), `shown_again()` and `now()` (default: chrono's clock; used only
+  to measure how long the page has gone without an answer).
 
 Track B's first slice (agora `docs/design-operator-posting.md`, B1):
 the wire and crypto for an operator poster's end-to-end encrypted DM
@@ -287,8 +294,8 @@ Ordinary agents are unchanged, byte for byte.
   takes it; **`ApiErrorBody` has `CheckNeeded`**: an exhaustive match
   needs the arm.
 - **`ui::session::Session` has `CheckNeeded`, and `Portal` has
-  `window_tap`, `open_window`, `after` and `shown_again`** (and `now`,
-  with a default):
+  `window_status`, `window_tap`, `open_window`, `after` and
+  `shown_again`** (and `now`, with a default):
   an exhaustive match needs the arm, and a client's `Portal` the
   methods. `SessionStatusView` takes an optional `check`.
 - **Exhaustive matches need new arms**: `TapKind::ALL` has 20 kinds and
