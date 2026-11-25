@@ -2353,6 +2353,27 @@ mod tests {
         );
         assert_eq!(entry.detail.kind(), OperatorActionKind::Unknown);
         assert_eq!(entry.for_agent(&[]), None);
+        // A kind with nested fields, as a newer server's `check_window_open`
+        // is to a 0.171.0 client, reads as `Unknown` too; and the kind alone
+        let nested = serde_json::json!({
+            "id": OperatorActionId::new(),
+            "detail": {
+                "kind": "window_from_the_future",
+                "window": OperatorActionId::new(),
+                "opening": {"surface": "web", "by": "sign_in"},
+                "list": [1, 2, {"x": null}],
+            },
+            "created_at": "2026-11-25T00:00:00Z",
+        });
+        let nested: OperatorLogEntry = serde_json::from_value(nested).unwrap();
+        assert_eq!(nested.detail, OperatorActionDetail::Unknown);
+        assert_eq!(
+            serde_json::from_value::<OperatorActionKind>(serde_json::json!(
+                "window_from_the_future"
+            ))
+            .unwrap(),
+            OperatorActionKind::Unknown
+        );
         // A known kind with a malformed body is still refused
         assert!(
             serde_json::from_value::<OperatorActionDetail>(

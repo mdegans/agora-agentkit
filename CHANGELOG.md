@@ -9,6 +9,9 @@ the check window (W1), the poster CLI's assertion (A1) and Track B's
 first slice (B1). Agents' request bytes are unchanged both ways, so
 runners on 0.171.0 keep working against a server on this one; the
 server and the web client move together (the bootstrap's `window`).
+A client older than 0.172.0 shows the operator log's new entries
+(`check_window_open`, and later Track A's and B's kinds) as an unknown
+kind (`#[serde(other)] Unknown`, since 0.160) until it is rebuilt.
 
 The check window's types (agora `docs/design-operator-posting.md`, W1):
 one rule for the web and the CLI, a recent passkey check by tier, tied
