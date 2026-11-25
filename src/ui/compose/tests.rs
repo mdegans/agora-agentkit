@@ -111,6 +111,7 @@ async fn nothing_for_anyone_who_cannot_write() {
     let cases: Vec<(&str, Option<FakePortal>)> = vec![
         ("no session", None),
         ("signed out", Some(FakePortal::signed_out())),
+        ("outside the check window", Some(FakePortal::check_needed())),
         ("failed", Some(failed())),
         ("no poster", Some(FakePortal::signed_in(false))),
         ("suspended", Some(suspended())),
@@ -1724,4 +1725,128 @@ async fn a_poster_who_replied_to_a_comment_is_told() {
         "{html}"
     );
     assert!(html.contains(">Write a comment</button>"), "{html}");
+}
+
+// -- The check window (W3) ------------------------------------------------
+
+/// The page's session handle
+fn handle_of(h: &Harness) -> session::SessionHandle {
+    h.act(consume_context::<session::SessionHandle>)
+}
+
+/// The tap in place, through to a window opened
+async fn tap_in_place(h: &mut Harness) -> String {
+    let handle = handle_of(h);
+    h.act(|| handle.start_window_tap());
+    let html = h.settle().await;
+    assert!(html.contains("Tap your passkey to confirm"), "{html}");
+    h.act(|| handle.confirm_window_tap());
+    h.settle().await.replace("&#39;", "'")
+}
+
+/// A send refused because the window ended: the box keeps its text and
+/// says why, with the tap in place in the box (no sign-in, no other tab);
+/// after the tap the box says it wasn't sent then, and the same text goes
+/// under the same action id (the refusal wrote nothing)
+#[tokio::test]
+async fn a_draft_sent_after_the_window_ended_survives_the_tap() {
+    let portal = FakePortal::signed_in(true);
+    portal
+        .0
+        .borrow_mut()
+        .comment_answers
+        .push_back(Err(crate::ui::test_portal::check_needed()));
+    let mut h = Harness::new(&portal, reply_alone).await;
+    typed(&mut h, "kept across the check").await;
+    send(&h);
+    let html = h.settle().await.replace("&#39;", "'");
+    assert!(
+        html.contains(
+            "Agora needs a fresh passkey check before this can be sent"
+        ),
+        "{html}"
+    );
+    assert!(html.contains(r#"value="kept across the check""#), "{html}");
+    assert!(html.contains(">Confirm with a passkey</button>"), "{html}");
+    assert!(!html.contains("login"), "{html}");
+    assert!(!html.contains("Sign in"), "{html}");
+    assert!(html.contains("Can't post now"), "{html}");
+
+    let html = tap_in_place(&mut h).await;
+    assert!(
+        html.contains(
+            "It wasn't sent, as Agora needed a fresh passkey check then"
+        ),
+        "{html}"
+    );
+    assert!(html.contains(r#"value="kept across the check""#), "{html}");
+    assert!(html.contains(">Post comment</button>"), "{html}");
+    send(&h);
+    let html = h.settle().await;
+    assert!(html.contains("Your comment is posted."), "{html}");
+    let sent = portal.0.borrow().comments.clone();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0].action_id, sent[1].action_id);
+    assert_eq!(sent[1].payload.body, "kept across the check");
+}
+
+/// A draft being written when the server says the window ended (the
+/// page's probe at its end): the box stays open with its text, the tap in
+/// it; after the tap it is as it was, and sends
+#[tokio::test]
+async fn a_draft_being_written_when_the_window_ends_survives_the_tap() {
+    let portal = FakePortal::signed_in(true);
+    let mut h = Harness::new(&portal, reply_alone).await;
+    typed(&mut h, "half a thought").await;
+    portal.0.borrow_mut().session =
+        Some(Err(crate::ui::test_portal::check_needed()));
+    portal.fire(0);
+    let html = h.settle().await.replace("&#39;", "'");
+    assert!(html.contains(r#"value="half a thought""#), "{html}");
+    assert!(html.contains(">Confirm with a passkey</button>"), "{html}");
+    assert!(portal.0.borrow().comments.is_empty());
+
+    let html = tap_in_place(&mut h).await;
+    assert!(html.contains(r#"value="half a thought""#), "{html}");
+    assert!(html.contains(">Post comment</button>"), "{html}");
+    assert!(!html.contains("wasn't sent"), "nothing was sent: {html}");
+    h.act(|| {
+        controls::reply(on_post()).input("half a thought, finished".into())
+    });
+    send(&h);
+    let html = h.settle().await;
+    assert!(html.contains("Your comment is posted."), "{html}");
+}
+
+/// The new-post form too: its fields survive a refused send and the tap
+#[tokio::test]
+async fn a_new_post_survives_the_tap() {
+    let portal = FakePortal::signed_in(true);
+    portal
+        .0
+        .borrow_mut()
+        .post_answers
+        .push_back(Err(crate::ui::test_portal::check_needed()));
+    let mut h = Harness::new(&portal, post_alone).await;
+    let c = controls::post(in_community().0);
+    h.act(|| c.open());
+    h.settle().await;
+    h.act(|| {
+        controls::post(in_community().0).edit(|d| {
+            d.title = "A title kept".into();
+            d.body = "A body kept".into();
+        })
+    });
+    h.act(|| controls::post(in_community().0).send());
+    let html = h.settle().await;
+    assert!(html.contains("Confirm with a passkey"), "{html}");
+    assert!(html.contains("A title kept"), "{html}");
+    let html = tap_in_place(&mut h).await;
+    assert!(html.contains("A title kept"), "{html}");
+    assert!(html.contains("A body kept"), "{html}");
+    h.act(|| controls::post(in_community().0).send());
+    h.settle().await;
+    let posts = portal.0.borrow().posts.clone();
+    assert_eq!(posts.len(), 2);
+    assert_eq!(posts[0].action_id, posts[1].action_id);
 }

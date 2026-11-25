@@ -1169,3 +1169,100 @@ async fn a_sent_message_shows_what_the_server_said_besides() {
     assert!(html.contains("ada asked the Council to stop."), "{html}");
     assert!(html.contains("A cap was reached."), "{html}");
 }
+
+// -- The check window (W3) ------------------------------------------------
+
+/// The window ends while a reply is being written (the page's probe at
+/// the window's end finds it ended): the inbox shows what a signed-out
+/// visitor sees, plus the tap in place, and nothing it had read; the reply
+/// and a friend's name typed are kept. After the tap the inbox is read
+/// again, the reply box opens as it was, with its text, and sends
+#[tokio::test]
+async fn a_reply_being_written_survives_the_windows_end() {
+    let from_ada = fixtures::message(1, "ada", "a private hello", true);
+    let portal = with(vec![from_ada.clone()], ada());
+    let (mut h, _) = Harness::new(&portal).await;
+    let to = MessageTo::Reply(from_ada.id);
+    h.act(|| controls::message(to).open());
+    h.settle().await;
+    h.act(|| controls::message(to).input("a reply in progress"));
+    h.act(|| page_controls().name_typed("dee".into()));
+    let html = h.settle().await;
+    assert!(html.contains("a reply in progress"), "{html}");
+    let reads = portal.0.borrow().inbox_calls;
+
+    portal.0.borrow_mut().session =
+        Some(Err(crate::ui::test_portal::check_needed()));
+    portal.fire(0);
+    let html = h.settle().await;
+    assert!(html.contains(INBOX_CHECK_NEEDED), "{html}");
+    assert!(html.contains(">Confirm with a passkey</button>"), "{html}");
+    for private in [
+        "a private hello",
+        "a reply in progress",
+        "ui-inbox-list",
+        "dee",
+    ] {
+        assert!(!html.contains(private), "{private}: {html}");
+    }
+    assert!(!html.contains("Sign in"), "{html}");
+    assert!(!html.contains("login"), "{html}");
+
+    let handle = h.act(consume_context::<session::SessionHandle>);
+    h.act(|| handle.start_window_tap());
+    h.settle().await;
+    h.act(|| handle.confirm_window_tap());
+    let html = h.settle().await;
+    assert!(
+        portal.0.borrow().inbox_calls > reads,
+        "read again after the tap"
+    );
+    assert!(html.contains("a private hello"), "{html}");
+    assert!(
+        html.contains("a reply in progress"),
+        "the box open as it was: {html}"
+    );
+    assert!(html.contains(r#"value="dee""#), "the name kept: {html}");
+    h.act(|| controls::message(to).send());
+    h.settle().await;
+    h.act(|| controls::message(to).confirm());
+    let html = h.settle().await;
+    assert!(html.contains("Sent to ada."), "{html}");
+    assert_eq!(
+        portal.0.borrow().messages[0].payload.body,
+        "a reply in progress"
+    );
+}
+
+/// A message whose tap call is refused because the window ended keeps its
+/// draft; the tap in place opens a window, and Send then asks for the
+/// message's own tap as before
+#[tokio::test]
+async fn a_message_refused_check_needed_keeps_its_draft() {
+    let portal = with(vec![], ada());
+    portal
+        .0
+        .borrow_mut()
+        .tap_answers
+        .push_back(Err(crate::ui::test_portal::check_needed()));
+    let (mut h, _) = Harness::new(&portal).await;
+    new_message(&mut h, "kept for later").await;
+    h.act(|| controls::message(MessageTo::New).send());
+    let html = h.settle().await;
+    assert!(html.contains(INBOX_CHECK_NEEDED), "{html}");
+    let handle = h.act(consume_context::<session::SessionHandle>);
+    h.act(|| handle.start_window_tap());
+    h.settle().await;
+    h.act(|| handle.confirm_window_tap());
+    let html = h.settle().await.replace("&#39;", "'");
+    assert!(html.contains("kept for later"), "{html}");
+    assert!(
+        html.contains(
+            "It wasn't sent, as Agora needed a fresh passkey check then"
+        ),
+        "{html}"
+    );
+    h.act(|| controls::message(MessageTo::New).send());
+    let html = h.settle().await;
+    assert!(html.contains("Tap your passkey to send"), "{html}");
+}

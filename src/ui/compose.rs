@@ -495,6 +495,12 @@ fn blocked(session: &Session) -> Option<String> {
              again in another tab, then press “I've signed in”."
                 .to_owned(),
         ),
+        Session::CheckNeeded => Some(
+            "Agora needs a fresh passkey check before this can be sent: the \
+             last one ended. Your text is kept here: confirm with your \
+             passkey, then send it."
+                .to_owned(),
+        ),
         Session::Loading => Some("Checking who is signed in…".to_owned()),
         Session::Failed(e) => Some(format!(
             "Couldn't check who is signed in ({e}). Your text is kept here."
@@ -553,6 +559,9 @@ enum NotSent {
     /// A 403 that isn't a suspension: the request's Origin or CSRF token
     /// (say after signing in again in another tab)
     SignInRefused,
+    /// Outside the session's check window
+    /// ([`RefusalCode::CheckNeeded`])
+    CheckNeeded,
 }
 
 impl NotSent {
@@ -571,6 +580,10 @@ impl NotSent {
                  sending it again; if it is refused again, sign in again in \
                  another tab."
             }
+            Self::CheckNeeded => {
+                "It wasn't sent, as Agora needed a fresh passkey check then. \
+                 You can send it now."
+            }
         }
     }
 }
@@ -582,6 +595,9 @@ impl Said {
             ApiError::SignedOut(_) => Self::NotSentThen(NotSent::SignedOut),
             _ if e.suspension().is_some() => {
                 Self::NotSentThen(NotSent::Suspended)
+            }
+            _ if e.code() == Some(RefusalCode::CheckNeeded) => {
+                Self::NotSentThen(NotSent::CheckNeeded)
             }
             // A 403 the server named is about the write, not the session
             // (a message to a non-friend, a tap that wasn't accepted)
@@ -645,6 +661,10 @@ struct Draft<T> {
     /// person presses "Tap your passkey to send", and the browser's prompt
     /// opens in that press ([`Portal::passkey`])
     tap: Option<PendingTap>,
+    /// A private message's box was open when last drawn: one drawn again
+    /// (the inbox hidden and shown again around a passkey check, or its
+    /// page left and come back to) opens as it was
+    open: bool,
 }
 
 /// A message's tap the server asked for: the request it goes with (no
@@ -669,6 +689,7 @@ impl<T> Draft<T> {
             said: None,
             checking: None,
             tap: None,
+            open: false,
         }
     }
 
@@ -1683,6 +1704,7 @@ fn Feedback(
     let blocked = blocked(&state);
     let blocked_shown = blocked.is_some();
     let signed_out = matches!(state, Session::SignedOut);
+    let check_needed = matches!(state, Session::CheckNeeded);
     let sign_in = sign_in_href(handle.portal().here().as_deref());
     let send_as_new = rsx! {
         button {
@@ -1714,6 +1736,10 @@ fn Feedback(
                         "I've signed in"
                     }
                 }
+            }
+            // The tap in place, in the box: the page carries on here
+            if check_needed {
+                super::session::WindowCheck {}
             }
         }
         match said {
@@ -2406,6 +2432,11 @@ fn refusal_reason(e: &ApiError) -> String {
                 .to_owned()
         }
         _ => match e.code() {
+            Some(RefusalCode::CheckNeeded) => {
+                "Agora needed a fresh passkey check (confirm with your \
+                 passkey on this page, then send it)."
+                    .to_owned()
+            }
             Some(RefusalCode::TapRefused) => {
                 "the passkey tap wasn't accepted (it \
                  took too long, was used already, or another passkey request \
@@ -2495,11 +2526,14 @@ impl MessageControls {
     }
 
     fn open(self) {
-        self.draft();
+        change(self.draft(), |d| d.open = true);
         put(self.open, true);
     }
 
     fn close(self) {
+        if let Some(draft) = self.drafts.message(self.to) {
+            change(draft, |d| d.open = false);
+        }
         put(self.refocus, true);
         put(self.open, false);
     }
@@ -2757,6 +2791,7 @@ impl MessageControls {
             if answer.is_ok() {
                 d.text.body.clear();
                 d.action = OperatorActionId::new();
+                d.open = false;
             }
         });
         self.drafts.report();
@@ -2824,7 +2859,13 @@ pub fn MessageBox(
 ) -> Element {
     let session = try_use_session();
     let drafts = try_use_context::<Drafts>();
-    let open_box = use_signal(|| start_open);
+    // Open as it was when last drawn ([`Draft::open`])
+    let open_box = use_signal(|| {
+        start_open
+            || drafts
+                .and_then(|d| d.message(to))
+                .is_some_and(|d| d.try_peek().is_ok_and(|d| d.open))
+    });
     let refocus = use_signal(|| false);
     let initial = recipient
         .as_ref()

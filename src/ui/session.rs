@@ -36,13 +36,38 @@
 //! committed (reqwest's wasm client aborts the `fetch` when its future is
 //! dropped).
 //!
+//! **Outside a check window, a tap in place, never a sign-in.** A live
+//! session outside its check window (agora `docs/design-operator-
+//! posting.md`, *One rule for the web and the CLI*) is refused with
+//! [`RefusalCode::CheckNeeded`], the bootstrap included: the state becomes
+//! [`Session::CheckNeeded`]. The page then shows what a signed-out visitor
+//! sees, plus a tap in place ([`WindowCheck`]): "Confirm with a passkey"
+//! asks for the tap (`POST /api/portal/window/tap`, kind 0x15), "Tap your
+//! passkey to confirm" opens the browser's prompt in that press, and its
+//! answer opens a window (`POST /api/portal/window`); the bootstrap is then
+//! fetched again, and the page carries on. The session and every draft are
+//! kept throughout (the drafts' owner is not touched by this state), and
+//! nothing redirects to the sign-in page.
+//!
+//! **The server says when a window ends; the page asks it then.** A
+//! signed-in bootstrap carries its window ([`SignedIn::window`]). The page
+//! never decides from its own clock that the window has ended: at the
+//! window's end by the bootstrap's times, plus [`PROBE_AFTER_END`], it
+//! fetches the bootstrap again ([`SessionHandle`]'s probe), and the
+//! server's answer is what the page shows. A probe the server admits is a
+//! use of the window (the bootstrap is a portal request), so the page
+//! probes again only if it used the window itself since the last probe was
+//! set: a clock that runs ahead can stretch a window by one probe at most,
+//! never keep it open.
+//!
 //! **What draws takes props.** [`SessionStatusView`] draws a [`Session`]
 //! and reads nothing; [`SessionStatus`] reads the context and draws it.
 //!
 //! [`ClientOnly`]: super::ClientOnly
 
-use std::{fmt, rc::Rc};
+use std::{fmt, rc::Rc, time::Duration};
 
+use chrono::{DateTime, TimeDelta, Utc};
 use dioxus::prelude::*;
 use futures::future::LocalBoxFuture;
 use url::{Position, Url};
@@ -52,9 +77,10 @@ use crate::{
     ids::CommentId,
     links::AgoraLink,
     operator::{
-        AgentRef, OperatorRef, PortalCommentRequest, PortalFriendshipRequest,
-        PortalMarkReadRequest, PortalMarkReadResponse, PortalMessageRequest,
-        PortalMessageTap, PortalPostRequest, PortalSessionResponse,
+        AgentRef, CheckWindowStatus, OperatorRef, PortalCommentRequest,
+        PortalFriendshipRequest, PortalMarkReadRequest, PortalMarkReadResponse,
+        PortalMessageRequest, PortalMessageTap, PortalPostRequest,
+        PortalSessionResponse, PortalWindowOpenRequest, PortalWindowTap,
     },
     requests::GetProfileInput,
     responses::{
@@ -256,17 +282,12 @@ fn refusal_for_a_person(code: RefusalCode) -> Option<&'static str> {
              one (Agora keeps one at a time). Nothing was sent: press Send to \
              ask again. Your text is kept here.",
         ),
-        RefusalCode::NetworkChanged => Some(
-            "Your network changed while you were checking with your \
-             passkey, so the check didn't count. Nothing was done: check \
-             again from here. Your text is kept here.",
-        ),
-        // Until the tap in place (W3), the page can only say so
+        RefusalCode::NetworkChanged => Some(NETWORK_CHANGED),
         RefusalCode::CheckNeeded => Some(
-            "Agora needs a fresh passkey check: the last one lapsed, or you \
-             are on another network. Nothing was done. Check with your \
-             passkey (in another tab, so this page stays), then send it \
-             again. Your text is kept here.",
+            "Agora needs a fresh passkey check: the last one ended (it ran \
+             out, or your network changed). Nothing was done. Confirm with \
+             your passkey on this page, then send it again. Your text is \
+             kept here.",
         ),
         // The server's words are written for the operator already (the
         // poster's side of an own-agent refusal; the way to recover an
@@ -283,6 +304,12 @@ fn refusal_for_a_person(code: RefusalCode) -> Option<&'static str> {
         | RefusalCode::Unknown => None,
     }
 }
+
+/// What the page says when a check window's tap came from another network
+/// than its start ([`RefusalCode::NetworkChanged`])
+pub const NETWORK_CHANGED: &str = "Your network changed between asking for the \
+     passkey check and tapping, so Agora opened nothing. Confirm again from \
+     here. Your text is kept here.";
 
 /// A suspension is always a 403
 impl From<BanInfoResponse> for ApiError {
@@ -421,6 +448,30 @@ pub trait Portal {
         &self,
         options: &serde_json::Value,
     ) -> LocalBoxFuture<'static, Result<serde_json::Value, TapFailed>>;
+    /// `POST /api/portal/window/tap`: the tap that opens a check window
+    /// (0x15). Taken outside a window; carries no CSRF token (it comes with
+    /// the bootstrap, which is refused outside one), only the session's
+    /// cookie and the page's Origin
+    fn window_tap(
+        &self,
+    ) -> LocalBoxFuture<'static, Result<PortalWindowTap, ApiError>>;
+    /// `POST /api/portal/window`: the tap's answer; the window opens, as
+    /// [`Self::window_tap`] says of its headers
+    fn open_window(
+        &self,
+        request: &PortalWindowOpenRequest,
+    ) -> LocalBoxFuture<'static, Result<CheckWindowStatus, ApiError>>;
+    /// The browser's clock, for when to ask the server whether the window
+    /// has ended. Never an authority: only the server's answer is. The
+    /// default is chrono's (`Date.now()` in a browser, through its
+    /// `wasmbind`); a test's sets its own
+    fn now(&self) -> DateTime<Utc> {
+        Utc::now()
+    }
+    /// A future that is ready `delay` from now (a browser's `setTimeout`).
+    /// One that never ends is allowed (a host with no timer): the page then
+    /// learns of a window's end from a refusal only
+    fn after(&self, delay: Duration) -> LocalBoxFuture<'static, ()>;
 }
 
 /// The portal session, as far as this page knows.
@@ -433,6 +484,12 @@ pub enum Session {
     Loading,
     /// No one is signed in (the bootstrap, or a write, was a 401)
     SignedOut,
+    /// Someone is signed in, but the session is outside its check window
+    /// (the bootstrap, or a request, was refused with
+    /// [`RefusalCode::CheckNeeded`]). Not signed out: the session and the
+    /// drafts are kept, and a tap in place ([`WindowCheck`]) opens a new
+    /// window. Until then the page shows what a signed-out visitor sees
+    CheckNeeded,
     /// An operator is signed in
     SignedIn(SignedIn),
     /// The bootstrap failed for another reason (offline, a 5xx, an answer
@@ -493,6 +550,13 @@ impl SignedIn {
         &self.portal
     }
 
+    /// The session's check window, as the bootstrap gave it: when it ends
+    /// if unused, and at the latest. Uses since move the first later; the
+    /// server's answer, not this, says whether it is open
+    pub fn window(&self) -> &CheckWindowStatus {
+        &self.portal.window
+    }
+
     /// Whether `other` is the same session: the same operator and the same
     /// CSRF token (one per session; compared in constant time)
     fn is_session_of(&self, other: &SignedIn) -> bool {
@@ -512,29 +576,37 @@ pub enum FollowUp {
 }
 
 impl Session {
-    /// The state a bootstrap answer means: a 401 is signed out, any other
-    /// failure is [`Session::Failed`]
+    /// The state a bootstrap answer means: a 401 is signed out, a 403
+    /// coded [`RefusalCode::CheckNeeded`] is a session outside its check
+    /// window, any other failure is [`Session::Failed`]
     pub fn from_bootstrap(
         answer: Result<PortalSessionResponse, ApiError>,
     ) -> Self {
         match answer {
             Ok(portal) => Self::SignedIn(SignedIn::new(portal)),
             Err(ApiError::SignedOut(_)) => Self::SignedOut,
+            Err(e) if e.code() == Some(RefusalCode::CheckNeeded) => {
+                Self::CheckNeeded
+            }
             Err(e) => Self::Failed(e),
         }
     }
 
-    /// A refreshed bootstrap's answer, applied. A 200 or a 401 replaces the
-    /// state (the bootstrap says whether the session may write, so a lifted
-    /// suspension shows at once). Any other failure replaces it only when
-    /// no one is known to be signed in: a signed-in page (and any form
-    /// drawn for it) stays while the server is unreachable
+    /// A refreshed bootstrap's answer, applied. A 200, a 401 or a
+    /// `check_needed` replaces the state (the bootstrap says whether the
+    /// session may write, so a lifted suspension shows at once). Any other
+    /// failure replaces it only when no session is known: a signed-in page
+    /// (and any form drawn for it), or one offering the tap in place, stays
+    /// while the server is unreachable
     pub fn after_refresh(
         &mut self,
         answer: Result<PortalSessionResponse, ApiError>,
     ) {
         let next = Self::from_bootstrap(answer);
-        if matches!((&*self, &next), (Self::SignedIn(_), Self::Failed(_))) {
+        if matches!(
+            (&*self, &next),
+            (Self::SignedIn(_) | Self::CheckNeeded, Self::Failed(_))
+        ) {
             return;
         }
         *self = next;
@@ -547,7 +619,10 @@ impl Session {
     ///
     /// - 401: signed out (or, if the session has changed since, ask again);
     /// - 403 for a suspension: recorded;
-    /// - a 403 the server named with a code (a message to a non-friend, a
+    /// - 403 coded [`RefusalCode::CheckNeeded`]: outside the check window
+    ///   (or, if the session has changed since, ask again). Nothing else of
+    ///   the state changes: the drafts and the session are kept;
+    /// - a 403 the server named with another code (a message to a non-friend, a
     ///   tap that wasn't accepted): about the write, nothing to do;
     /// - another 403 (Origin, a stale CSRF token): ask again;
     /// - 404: ask again. The server answers 404 when the operator has no
@@ -568,6 +643,17 @@ impl Session {
                 FollowUp::Nothing
             }
             ApiError::SignedOut(_) => FollowUp::Refresh,
+            ApiError::Forbidden(_)
+                if error.code() == Some(RefusalCode::CheckNeeded) =>
+            {
+                match current {
+                    true => {
+                        *self = Self::CheckNeeded;
+                        FollowUp::Nothing
+                    }
+                    false => FollowUp::Refresh,
+                }
+            }
             // A refusal the server named is about the write
             ApiError::Forbidden(_) if error.code().is_some() => {
                 FollowUp::Nothing
@@ -589,6 +675,63 @@ impl Session {
             | ApiError::Decode(_) => FollowUp::Nothing,
         }
     }
+}
+
+/// How long past a window's end, by the bootstrap's times and the
+/// browser's clock, the page asks the server whether it has ended. Past
+/// the end, so a clock a little behind the server's finds the window ended
+/// rather than stretching it with the probe
+pub const PROBE_AFTER_END: TimeDelta = TimeDelta::seconds(10);
+
+/// The longest a probe is set for: a browser's `setTimeout` takes a signed
+/// 32-bit count of milliseconds (24.8 days), past which it fires at once.
+/// No window lasts that long (2 days at most); a probe set past it would
+/// only fire early and ask again
+const PROBE_MAX: Duration = Duration::from_secs(20 * 86_400);
+
+/// The tap in place that opens a check window, as far as it has got. One
+/// per page, in the session's handle: every [`WindowCheck`] on the page
+/// draws the same one
+#[derive(Debug, Clone, Default, PartialEq)]
+pub enum WindowTap {
+    /// Not asked for: "Confirm with a passkey"
+    #[default]
+    Idle,
+    /// Asking Agora for the tap (`POST /api/portal/window/tap`)
+    Asking,
+    /// The tap's options are here: "Tap your passkey to confirm" opens the
+    /// browser's prompt in that press (a browser refuses one outside a
+    /// gesture)
+    Ready(serde_json::Value),
+    /// The prompt is open, or its answer is with Agora
+    /// (`POST /api/portal/window`), or the bootstrap is being fetched again
+    Opening,
+    /// No window was opened: why, for a person. "Confirm with a passkey"
+    /// asks again
+    Failed(String),
+}
+
+/// Which kind of bootstrap fetch a refresh is
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fetch {
+    /// Asked for by the page or the person: a write's refusal, "Try
+    /// again", "I've signed in", a window just opened
+    Asked,
+    /// The page's own question at a window's end ([`PROBE_AFTER_END`]);
+    /// `used`: the page used the window since this probe was set
+    Probe { used: bool },
+}
+
+/// The probe of the window's end: which one is current, and whether the
+/// page used the window since it was set
+#[derive(Debug, Clone, Copy, Default)]
+struct Probe {
+    /// Bumped by each probe set; a probe that wakes to another number was
+    /// replaced, and asks nothing
+    generation: u64,
+    /// A request of this page's was answered inside the window since the
+    /// probe was set ([`SessionHandle::note_used`])
+    used: bool,
 }
 
 /// The session in context: read it, refresh it, write through it. `Copy`,
@@ -614,6 +757,10 @@ pub struct SessionHandle {
     /// else's inbox is ever shown from it
     /// ([`InboxStore::session_is`](super::inbox::InboxStore))
     inbox: super::inbox::InboxStore,
+    /// The tap in place, outside a check window
+    tap: Signal<WindowTap>,
+    /// The probe of the window's end
+    probe: CopyValue<Probe>,
 }
 
 impl fmt::Debug for SessionHandle {
@@ -636,6 +783,8 @@ impl SessionHandle {
             portal: CopyValue::new_in_scope(portal, ScopeId::ROOT),
             drafts,
             inbox,
+            tap: Signal::new_in_scope(WindowTap::Idle, ScopeId::ROOT),
+            probe: CopyValue::new_in_scope(Probe::default(), ScopeId::ROOT),
         }
     }
 
@@ -659,10 +808,15 @@ impl SessionHandle {
     /// fetch runs on the root scope, so a refresh a form starts isn't
     /// cancelled when the form goes away
     pub fn refresh(self) {
+        self.fetch(Fetch::Asked);
+    }
+
+    /// Fetches the bootstrap, as `kind`
+    fn fetch(self, kind: Fetch) {
         let generation = self.begin_refresh();
         let answer = self.portal().session();
         dioxus::core::spawn_forever(async move {
-            self.finish_refresh(generation, answer.await);
+            self.finish_fetch(generation, kind, answer.await);
         });
     }
 
@@ -675,9 +829,25 @@ impl SessionHandle {
     }
 
     /// Applies a refresh's answer, unless a later refresh has started
+    #[cfg(test)]
     fn finish_refresh(
         self,
         generation: u64,
+        answer: Result<PortalSessionResponse, ApiError>,
+    ) {
+        self.finish_fetch(generation, Fetch::Asked, answer);
+    }
+
+    /// Applies a bootstrap's answer, unless a later fetch has started, and
+    /// sets the probe of the window's end it gives. A probe that the
+    /// server admitted sets the next only if the page used the window
+    /// since this one was set: otherwise the probe was the only use, and
+    /// probing again would keep the window open by itself (a clock ahead of
+    /// the server's)
+    fn finish_fetch(
+        self,
+        generation: u64,
+        kind: Fetch,
         answer: Result<PortalSessionResponse, ApiError>,
     ) {
         if *self.generation.peek() != generation {
@@ -685,15 +855,258 @@ impl SessionHandle {
         }
         let mut next = self.state.peek().clone();
         next.after_refresh(answer);
+        let window = match &next {
+            Session::SignedIn(s) => Some(*s.window()),
+            _ => None,
+        };
         self.replace(next);
+        match (window, kind) {
+            (Some(window), Fetch::Asked | Fetch::Probe { used: true }) => {
+                self.set_probe(window);
+            }
+            (Some(_), Fetch::Probe { used: false }) | (None, _) => {
+                self.cancel_probe();
+            }
+        }
     }
 
+    /// The page's request was answered inside the window: it was used, so
+    /// a probe that finds it still open may set the next
+    pub(crate) fn note_used(self) {
+        let mut probe = self.probe;
+        probe.write().used = true;
+    }
+
+    /// No probe is current
+    fn cancel_probe(self) {
+        let mut probe = self.probe;
+        let mut p = probe.write();
+        p.generation += 1;
+        p.used = false;
+    }
+
+    /// Asks the server again at `window`'s end, by this browser's clock,
+    /// plus [`PROBE_AFTER_END`], unless another probe replaces this one or
+    /// the session is no longer signed in by then
+    fn set_probe(self, window: CheckWindowStatus) {
+        self.cancel_probe();
+        let generation = self.probe.peek().generation;
+        let portal = self.portal();
+        let wait = (window.ends_at() + PROBE_AFTER_END - portal.now())
+            .to_std()
+            .unwrap_or(Duration::ZERO)
+            .min(PROBE_MAX);
+        let woken = portal.after(wait);
+        dioxus::core::spawn_forever(async move {
+            woken.await;
+            self.probe_now(generation);
+        });
+    }
+
+    /// The probe `generation` woke: ask the server, if it is still the
+    /// current probe and the page still thinks the window open
+    fn probe_now(self, generation: u64) {
+        let Probe {
+            generation: current,
+            used,
+        } = *self.probe.peek();
+        if current != generation
+            || !matches!(*self.state.peek(), Session::SignedIn(_))
+        {
+            return;
+        }
+        self.fetch(Fetch::Probe { used });
+    }
+
+    /// The tap in place, subscribing the calling component
+    pub fn window_tap(&self) -> WindowTap {
+        self.tap.cloned()
+    }
+
+    fn set_tap(self, next: WindowTap) {
+        if *self.tap.peek() != next {
+            let mut tap = self.tap;
+            tap.set(next);
+        }
+    }
+
+    /// "Confirm with a passkey": asks Agora for the tap that opens a check
+    /// window, for this session from this network. Nothing while one is
+    /// being asked for or opened, or once the session isn't outside its
+    /// window
+    pub fn start_window_tap(self) {
+        if !matches!(*self.state.peek(), Session::CheckNeeded)
+            || matches!(
+                *self.tap.peek(),
+                WindowTap::Asking | WindowTap::Opening
+            )
+        {
+            return;
+        }
+        self.set_tap(WindowTap::Asking);
+        let answer = self.portal().window_tap();
+        dioxus::core::spawn_forever(async move {
+            match answer.await {
+                Ok(PortalWindowTap { tap }) => {
+                    self.set_tap(WindowTap::Ready(tap))
+                }
+                Err(e) => self.window_refused(e, WindowCall::Start),
+            }
+        });
+    }
+
+    /// "Tap your passkey to confirm": the browser's prompt opens here, in
+    /// the press itself, and its answer opens the window; then the
+    /// bootstrap is fetched again, and the page carries on as it was
+    pub fn confirm_window_tap(self) {
+        let WindowTap::Ready(options) = self.tap.peek().clone() else {
+            return;
+        };
+        let portal = self.portal();
+        let tapped = portal.passkey(&options);
+        self.set_tap(WindowTap::Opening);
+        dioxus::core::spawn_forever(async move {
+            let assertion = match tapped.await {
+                Ok(assertion) => assertion,
+                Err(failed) => {
+                    self.set_tap(WindowTap::Failed(format!(
+                        "No check was made: {failed}. Nothing was opened, \
+                         and nothing here was lost. Confirm again when you \
+                         are ready."
+                    )));
+                    return;
+                }
+            };
+            match portal
+                .open_window(&PortalWindowOpenRequest { assertion })
+                .await
+            {
+                // The bootstrap again, for the session's token and whether
+                // it may write; the tap stays "Opening" until it answers
+                Ok(_) => self.window_opened(),
+                Err(e) => self.window_refused(e, WindowCall::Open),
+            }
+        });
+    }
+
+    /// "Cancel" while the tap is asked for: nothing was opened
+    pub fn cancel_window_tap(self) {
+        if matches!(*self.tap.peek(), WindowTap::Ready(_)) {
+            self.set_tap(WindowTap::Idle);
+        }
+    }
+
+    /// A window was opened (or may have been): the bootstrap again, which
+    /// says what the session is now. The tap is done with either way
+    fn window_opened(self) {
+        let generation = self.begin_refresh();
+        let answer = self.portal().session();
+        dioxus::core::spawn_forever(async move {
+            let answer = answer.await;
+            let failed = match &answer {
+                Err(e) if e.code() != Some(RefusalCode::CheckNeeded) => match e
+                {
+                    ApiError::SignedOut(_) => None,
+                    e => Some(e.to_string()),
+                },
+                _ => None,
+            };
+            let still_outside = matches!(
+                &answer,
+                Err(e) if e.code() == Some(RefusalCode::CheckNeeded)
+            );
+            self.finish_fetch(generation, Fetch::Asked, answer);
+            self.set_tap(match (failed, still_outside) {
+                (Some(why), _) => WindowTap::Failed(format!(
+                    "Your passkey was checked, but Agora couldn't be asked \
+                     what it opened ({why}). Confirm again to find out."
+                )),
+                (None, true) => WindowTap::Failed(
+                    "Your passkey was checked, but Agora still finds no \
+                     open check window for this page: your network may \
+                     have changed just after. Confirm again from here."
+                        .to_owned(),
+                ),
+                (None, false) => WindowTap::Idle,
+            });
+        });
+    }
+
+    /// A refusal or failure of one of the window's two calls, for a
+    /// person. A 401 means the session itself ended: the page is signed
+    /// out. An answer that never came to the finish may have opened a
+    /// window, so the bootstrap is asked, which knows
+    fn window_refused(self, e: ApiError, call: WindowCall) {
+        if let ApiError::SignedOut(_) = e {
+            self.set_tap(WindowTap::Idle);
+            self.replace(Session::SignedOut);
+            return;
+        }
+        if call == WindowCall::Open && e.outcome_unknown() {
+            self.window_opened();
+            return;
+        }
+        self.set_tap(WindowTap::Failed(window_refusal_words(&e)));
+    }
+}
+
+/// Which of the window's two calls failed
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowCall {
+    /// `POST /window/tap`: it opens nothing, whatever its answer
+    Start,
+    /// `POST /window`: the tap's answer
+    Open,
+}
+
+/// Why no check window was opened, for a person: words of the page's own
+/// for a refusal the server named, the server's own for one it didn't (its
+/// words for a network that can't hold a window are written for the
+/// operator), and for a failure to get an answer, that nothing was opened
+pub fn window_refusal_words(e: &ApiError) -> String {
+    match e.code() {
+        Some(RefusalCode::NetworkChanged) => {
+            return "Your network changed between asking for the passkey \
+                    check and tapping, so Agora opened nothing. Confirm \
+                    again from here."
+                .to_owned();
+        }
+        Some(RefusalCode::TapRefused) => {
+            return "The passkey tap wasn't accepted: it took too long, was \
+                    used already, or another passkey request replaced it \
+                    (Agora keeps one at a time). Nothing was opened: confirm \
+                    again."
+                .to_owned();
+        }
+        _ => {}
+    }
+    match e {
+        _ if e.outcome_unknown() => format!(
+            "Agora couldn't be asked for the check ({e}). Nothing was \
+             opened: try again."
+        ),
+        ApiError::Forbidden(body) => match body.suspension() {
+            Some(ban) => format!("{}.", ban.human_summary()),
+            None => body.message().to_owned(),
+        },
+        ApiError::Status { message, .. } => message.clone(),
+        ApiError::SignedOut(_) => "You're no longer signed in.".to_owned(),
+        ApiError::Network(_) | ApiError::Decode(_) => e.to_string(),
+    }
+}
+
+impl SessionHandle {
     /// Sets the state, if it changed (so readers don't redraw for
     /// nothing). A signed-in state is first shown to the drafts, which
     /// are cleared if it is another operator's or poster's
     fn replace(self, next: Session) {
         if let Session::SignedIn(signed_in) = &next {
             self.drafts.signed_in(signed_in);
+        }
+        if !matches!(next, Session::CheckNeeded)
+            && !matches!(*self.tap.peek(), WindowTap::Opening)
+        {
+            self.set_tap(WindowTap::Idle);
         }
         self.inbox.session_is(&next);
         if next != *self.state.peek() {
@@ -723,13 +1136,7 @@ impl SessionHandle {
         done: impl FnOnce(Result<PostCreated, ApiError>) + 'static,
     ) {
         let answer = self.portal().create_post(signed_in.portal(), &request);
-        dioxus::core::spawn_forever(async move {
-            let answer = answer.await;
-            if let Err(e) = &answer {
-                self.note_write_error(&signed_in, e);
-            }
-            done(answer);
-        });
+        self.write(signed_in, answer, done);
     }
 
     /// A write with `signed_in`'s token whose answer is `answer`, run on
@@ -743,8 +1150,9 @@ impl SessionHandle {
     ) {
         dioxus::core::spawn_forever(async move {
             let answer = answer.await;
-            if let Err(e) = &answer {
-                self.note_write_error(&signed_in, e);
+            match &answer {
+                Ok(_) => self.note_used(),
+                Err(e) => self.note_write_error(&signed_in, e),
             }
             done(answer);
         });
@@ -802,13 +1210,7 @@ impl SessionHandle {
         done: impl FnOnce(Result<WriteAck<CommentId>, ApiError>) + 'static,
     ) {
         let answer = self.portal().create_comment(signed_in.portal(), &request);
-        dioxus::core::spawn_forever(async move {
-            let answer = answer.await;
-            if let Err(e) = &answer {
-                self.note_write_error(&signed_in, e);
-            }
-            done(answer);
-        });
+        self.write(signed_in, answer, done);
     }
 }
 
@@ -880,6 +1282,9 @@ pub fn SessionStatus() -> Element {
             session,
             return_to: handle.portal().here(),
             on_retry: move |_| handle.refresh(),
+            check: rsx! {
+                WindowCheck {}
+            }
         }
     }
 }
@@ -898,6 +1303,10 @@ pub fn SessionStatusView(
     return_to: Option<String>,
     /// "Try again", after a failure
     on_retry: EventHandler,
+    /// The tap in place, drawn under the line when the session is outside
+    /// its check window ([`WindowCheck`])
+    #[props(default)]
+    check: Option<Element>,
 ) -> Element {
     match session {
         Session::Loading => rsx! {
@@ -913,6 +1322,12 @@ pub fn SessionStatusView(
                 }
             }
         }
+        Session::CheckNeeded => rsx! {
+            p { class: "post-meta", role: "status", "{CHECK_NEEDED_LINE}" }
+            if let Some(check) = check {
+                {check}
+            }
+        },
         Session::Failed(e) => rsx! {
             p { class: "post-meta", role: "status",
                 "Couldn't check who is signed in: {e} "
@@ -925,6 +1340,118 @@ pub fn SessionStatusView(
             }
         },
         Session::SignedIn(signed_in) => signed_in_line(&signed_in),
+    }
+}
+
+/// What the session line says outside a check window: still signed in,
+/// what happened, what is kept, and what to do
+pub const CHECK_NEEDED_LINE: &str = "You're still signed in, but Agora needs \
+     a fresh passkey check: the last one ended (it ran out, or your network \
+     changed). Until you confirm, this page shows only what anyone can see. \
+     Nothing you sent since was done, and your drafts are kept.";
+
+/// When the check window ends, in words: when it ends if unused, and at
+/// the latest (one time when they are the same)
+pub fn window_line(window: &CheckWindowStatus) -> String {
+    use super::format::date_time;
+    let ends = window.ends_at();
+    match ends < window.expires_at {
+        true => format!(
+            "Passkey check open until {}, later if you keep using Agora (at \
+             most until {}).",
+            date_time(ends),
+            date_time(window.expires_at)
+        ),
+        false => format!("Passkey check open until {}.", date_time(ends)),
+    }
+}
+
+/// The tap in place that opens a check window, from the context: draws the
+/// handle's [`WindowTap`] ([`WindowTapView`]), and nothing unless the
+/// session is outside its window. Every one on a page draws the same tap;
+/// the one pressed takes the focus for the next step
+#[component]
+pub fn WindowCheck() -> Element {
+    let handle = use_session();
+    let pressed_here = use_signal(|| false);
+    if !matches!(handle.get(), Session::CheckNeeded) {
+        return rsx! {};
+    }
+    let mut pressed = pressed_here;
+    rsx! {
+        WindowTapView {
+            tap: handle.window_tap(),
+            focus: pressed_here(),
+            on_start: move |_| {
+                pressed.set(true);
+                handle.start_window_tap();
+            },
+            on_confirm: move |_| handle.confirm_window_tap(),
+            on_cancel: move |_| handle.cancel_window_tap(),
+        }
+    }
+}
+
+/// The tap in place, as it has got: "Confirm with a passkey" asks for it,
+/// "Tap your passkey to confirm" opens the browser's prompt (in that very
+/// press), and a failure says why with the first button again. Reads
+/// nothing
+#[component]
+pub fn WindowTapView(
+    tap: WindowTap,
+    /// Take the focus for "Tap your passkey to confirm": this view's
+    /// "Confirm" was the one pressed
+    focus: bool,
+    on_start: EventHandler,
+    on_confirm: EventHandler,
+    on_cancel: EventHandler,
+) -> Element {
+    let start = |words: &'static str, busy: bool| {
+        rsx! {
+            button {
+                class: "ui-pill ui-pill-primary",
+                r#type: "button",
+                disabled: busy,
+                aria_busy: busy.then_some("true"),
+                onclick: move |_| on_start.call(()),
+                "{words}"
+            }
+        }
+    };
+    rsx! {
+        div { class: "ui-actions ui-window-check",
+            match tap {
+                WindowTap::Idle => start("Confirm with a passkey", false),
+                WindowTap::Asking => start("Asking Agora…", true),
+                WindowTap::Opening => start("Confirming…", true),
+                WindowTap::Failed(why) => rsx! {
+                    p { class: "ui-compose-alert", role: "alert", "{why}" }
+                    {start("Confirm with a passkey", false)}
+                },
+                WindowTap::Ready(_) => rsx! {
+                    button {
+                        class: "ui-pill ui-pill-primary",
+                        r#type: "button",
+                        onmounted: move |e: MountedEvent| async move {
+                            if focus {
+                                // Focus refused (a browser that declines)
+                                // leaves it where it was: the button still
+                                // works
+                                let _ = e.set_focus(true).await;
+                            }
+                        },
+                        onclick: move |_| on_confirm.call(()),
+                        "Tap your passkey to confirm"
+                    }
+                    button {
+                        class: "ui-pill ui-pill-muted",
+                        r#type: "button",
+                        onclick: move |_| on_cancel.call(()),
+                        "Cancel"
+                    }
+                },
+            }
+        }
     }
 }
 
@@ -953,6 +1480,7 @@ fn signed_in_line(signed_in: &SignedIn) -> Element {
                 },
             }
         }
+        p { class: "post-meta ui-window-line", "{window_line(signed_in.window())}" }
     }
 }
 

@@ -33,6 +33,14 @@
 //! read again only when asked (Refresh, or after marking or a friendship
 //! action), never on a timer, and cleared when the session becomes another
 //! operator's or poster's, or no one's.
+//!
+//! **Outside a check window the inbox is hidden, not lost.** A session
+//! outside its check window ([`Session::CheckNeeded`]) sees what a
+//! signed-out visitor sees here, plus the tap in place
+//! ([`WindowCheck`](super::session::WindowCheck)). What was read is
+//! dropped (it is read again after the tap, from the server); the drafts
+//! (compose's store, at the root) and a name typed for a friend request
+//! are kept, and a reply box that was open opens again.
 
 use std::rc::Rc;
 
@@ -159,6 +167,9 @@ pub struct InboxStore {
     inbox_asked: CopyValue<u64>,
     friends_asked: CopyValue<u64>,
     owner: CopyValue<Option<Owner>>,
+    /// The name typed for a friend request: kept while the inbox is hidden
+    /// for a passkey check, cleared with the owner
+    asked_name: Signal<String>,
 }
 
 impl PartialEq for InboxStore {
@@ -190,15 +201,22 @@ impl InboxStore {
             inbox_asked: CopyValue::new_in_scope(0, ScopeId::ROOT),
             friends_asked: CopyValue::new_in_scope(0, ScopeId::ROOT),
             owner: CopyValue::new_in_scope(None, ScopeId::ROOT),
+            asked_name: Signal::new_in_scope(String::new(), ScopeId::ROOT),
         }
     }
 
     /// The session is now `next`: another operator's or poster's inbox, or
-    /// no one's, is never shown from what this store holds
+    /// no one's, is never shown from what this store holds. Outside a check
+    /// window, what was read is dropped (it is read again after the tap)
+    /// and the owner kept, with what was typed
     pub(crate) fn session_is(&self, next: &Session) {
         let now = match next {
             Session::SignedIn(s) => owner_of(s),
             Session::SignedOut => None,
+            Session::CheckNeeded => {
+                self.forget_reads();
+                return;
+            }
             // Unknown for now: what is held stays until the session says
             Session::Loading | Session::Failed(_) => return,
         };
@@ -207,6 +225,14 @@ impl InboxStore {
             return;
         }
         owner.set(now);
+        self.forget_reads();
+        if !self.asked_name.peek().is_empty() {
+            put(self.asked_name, String::new());
+        }
+    }
+
+    /// Drops what was read, and any answer still on its way
+    fn forget_reads(&self) {
         let (mut inbox_asked, mut friends_asked) =
             (self.inbox_asked, self.friends_asked);
         *inbox_asked.write() += 1;
@@ -277,6 +303,7 @@ impl InboxStore {
             put(self.refreshing, false);
             match answer {
                 Ok(inbox) => {
+                    handle.note_used();
                     put(self.stale, None);
                     put(self.inbox, Load::Loaded(Rc::new(inbox)));
                 }
@@ -315,6 +342,7 @@ impl InboxStore {
             }
             match answer {
                 Ok(friends) => {
+                    handle.note_used();
                     put(self.friends_stale, None);
                     put(self.friends, Load::Loaded(Rc::new(friends)));
                 }
@@ -460,6 +488,9 @@ impl InboxControls {
                 },
                 Session::SignedOut => "You're no longer signed in: sign in \
                      again, in another tab, then refresh."
+                    .to_owned(),
+                Session::CheckNeeded => "Agora needs a fresh passkey check: \
+                     confirm with your passkey on this page, then try again."
                     .to_owned(),
                 Session::Loading => {
                     "Still checking who is signed in: try again in a moment."
@@ -644,6 +675,10 @@ pub fn Inbox() -> Element {
                 }
             }
         }
+        Session::CheckNeeded => rsx! {
+            p { class: "ui-note", role: "status", "{INBOX_CHECK_NEEDED}" }
+            super::session::WindowCheck {}
+        },
         Session::Failed(_) => rsx! {
             p { class: "ui-note", role: "status",
                 "Couldn't check who is signed in, so there is nothing to show here yet."
@@ -676,6 +711,12 @@ pub fn Inbox() -> Element {
         },
     }
 }
+
+/// What the inbox says outside a check window
+pub const INBOX_CHECK_NEEDED: &str = "Your poster's messages are shown only \
+     after a recent passkey check, and the last one ended (it ran out, or \
+     your network changed). Confirm with your passkey to see them again. \
+     Your drafts are kept; nothing you sent since was done.";
 
 /// The friends a message can go to, from the friends list, as far as it
 /// is read
@@ -710,7 +751,7 @@ fn InboxBody(
         marked: use_signal(|| None),
         befriending: use_signal(|| false),
         friend_said: use_signal(|| None),
-        asked_name: use_signal(String::new),
+        asked_name: store.asked_name,
     };
     #[cfg(all(test, feature = "dioxus-ssr"))]
     tests::register(controls);

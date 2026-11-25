@@ -587,3 +587,393 @@ fn a_refused_write_updates_the_session_first() {
 fn state_now(handle: SessionHandle) -> Session {
     handle.state.peek().clone()
 }
+
+// -- The check window (W3) ------------------------------------------------
+
+use crate::ui::test_portal::{check_needed, window_options};
+
+fn coded(status: u16, code: RefusalCode, message: &str) -> ApiError {
+    ApiError::refused(status, ErrorResponse::coded(code, message).into())
+}
+
+/// The bootstrap's `check_needed` is a session outside its window: not
+/// signed out, not failed. A failing refresh keeps it (the tap stays on
+/// offer); a 200 or a 401 replace it
+#[test]
+fn outside_the_window_is_its_own_state() {
+    assert_eq!(
+        Session::from_bootstrap(Err(check_needed())),
+        Session::CheckNeeded
+    );
+    let mut s = Session::CheckNeeded;
+    s.after_refresh(Err(ApiError::Network("offline".into())));
+    assert_eq!(s, Session::CheckNeeded);
+    s.after_refresh(Ok(bootstrap(true)));
+    assert_eq!(s, signed_in(true));
+    let mut s = Session::CheckNeeded;
+    s.after_refresh(Err(ApiError::SignedOut("expired".into())));
+    assert_eq!(s, Session::SignedOut);
+}
+
+/// A request refused `check_needed` puts this session outside its window,
+/// asking nothing (the refusal says it all); an older session's refusal
+/// asks again. Never signed out
+#[test]
+fn a_check_needed_refusal_keeps_the_session() {
+    let mut s = signed_in(true);
+    let write = used(&s);
+    assert_eq!(
+        s.after_write_error(&write, &check_needed()),
+        FollowUp::Nothing
+    );
+    assert_eq!(s, Session::CheckNeeded);
+    let mut newer = Session::from_bootstrap(Ok(bootstrap_with(true, "newer")));
+    assert_eq!(
+        newer.after_write_error(&write, &check_needed()),
+        FollowUp::Refresh
+    );
+    assert!(can_write(&newer));
+}
+
+/// The session line outside a window: still signed in, what happened,
+/// what is kept, and the tap in place. No sign-in link, no way to the
+/// sign-in page
+#[test]
+fn the_line_outside_a_window_offers_the_tap_not_a_sign_in() {
+    #[component]
+    fn Drawn() -> Element {
+        rsx! {
+            SessionStatusView {
+                session: Session::CheckNeeded,
+                return_to: Some("/agora/app".to_owned()),
+                on_retry: |_| {},
+                check: rsx! {
+                    WindowTapView {
+                        tap: WindowTap::Idle,
+                        focus: false,
+                        on_start: |_| {},
+                        on_confirm: |_| {},
+                        on_cancel: |_| {},
+                    }
+                },
+            }
+        }
+    }
+    let mut dom = VirtualDom::new(Drawn);
+    dom.rebuild_in_place();
+    let html = dioxus_ssr::render(&dom).replace("&#39;", "'");
+    assert!(html.contains("You're still signed in"), "{html}");
+    assert!(html.contains("your drafts are kept"), "{html}");
+    assert!(html.contains(">Confirm with a passkey</button>"), "{html}");
+    assert!(!html.contains("login"), "{html}");
+    assert!(!html.contains("Sign in"), "{html}");
+}
+
+/// When the window ends, in the bootstrap's words: one time when the idle
+/// end is the absolute one, both otherwise
+#[test]
+fn the_window_is_said_with_its_times() {
+    let window = bootstrap(true).window;
+    assert_eq!(
+        window_line(&window),
+        "Passkey check open until Oct 30, 2025 at 12:00 UTC, later if you \
+         keep using Agora (at most until Nov 01, 2025 at 00:00 UTC)."
+    );
+    let last = crate::operator::CheckWindowStatus {
+        idle_expires_at: window.expires_at,
+        ..window
+    };
+    assert_eq!(
+        window_line(&last),
+        "Passkey check open until Nov 01, 2025 at 00:00 UTC."
+    );
+    assert!(draw(signed_in(true)).contains("Passkey check open until"));
+}
+
+/// The session line, read from the context, over `portal`
+fn line(portal: FakePortal) -> (VirtualDom, SessionHandle) {
+    fn root() -> Element {
+        rsx! { SessionStatus {} }
+    }
+    let mut dom = VirtualDom::new(root);
+    provide(&dom, portal);
+    dom.rebuild_in_place();
+    settle(&mut dom);
+    let handle = dom.in_scope(ScopeId::ROOT, consume_context::<SessionHandle>);
+    (dom, handle)
+}
+
+fn html(dom: &VirtualDom) -> String {
+    dioxus_ssr::render(dom).replace("&#39;", "'")
+}
+
+/// The tap in place: "Confirm with a passkey" asks for the 0x15 tap, "Tap
+/// your passkey to confirm" opens the prompt with its options, and its
+/// answer opens the window; the bootstrap is fetched again and the page
+/// carries on signed in, with no sign-in anywhere on the way
+#[test]
+fn the_tap_in_place_opens_a_window() {
+    let portal = FakePortal::check_needed();
+    let (mut dom, handle) = line(portal.clone());
+    let page = html(&dom);
+    assert!(page.contains("You're still signed in"), "{page}");
+    assert!(page.contains(">Confirm with a passkey</button>"), "{page}");
+    dom.in_scope(ScopeId::ROOT, || handle.start_window_tap());
+    settle(&mut dom);
+    assert_eq!(portal.0.borrow().window_taps, 1);
+    let page = html(&dom);
+    assert!(
+        page.contains(">Tap your passkey to confirm</button>"),
+        "{page}"
+    );
+    assert!(page.contains(">Cancel</button>"), "{page}");
+    assert!(
+        portal.0.borrow().prompts.is_empty(),
+        "no prompt before the press"
+    );
+    dom.in_scope(ScopeId::ROOT, || handle.confirm_window_tap());
+    settle(&mut dom);
+    {
+        let fake = portal.0.borrow();
+        assert_eq!(fake.prompts, vec![window_options()]);
+        assert_eq!(fake.opens.len(), 1);
+        assert_eq!(
+            fake.opens[0].assertion,
+            crate::ui::test_portal::assertion()
+        );
+        assert_eq!(fake.session_calls, 2, "the bootstrap again after the open");
+    }
+    assert_eq!(state(&dom, handle), signed_in(true));
+    assert_eq!(handle.tap.peek().clone(), WindowTap::Idle);
+    let page = html(&dom);
+    assert!(page.contains("Signed in as mdegans"), "{page}");
+    assert!(!page.contains("login"), "{page}");
+}
+
+/// Cancel before the prompt: nothing opened, the first button back
+#[test]
+fn the_tap_can_be_cancelled() {
+    let portal = FakePortal::check_needed();
+    let (mut dom, handle) = line(portal.clone());
+    dom.in_scope(ScopeId::ROOT, || handle.start_window_tap());
+    settle(&mut dom);
+    dom.in_scope(ScopeId::ROOT, || handle.cancel_window_tap());
+    settle(&mut dom);
+    assert!(html(&dom).contains(">Confirm with a passkey</button>"));
+    assert!(portal.0.borrow().opens.is_empty());
+    assert_eq!(state(&dom, handle), Session::CheckNeeded);
+}
+
+/// The start's refusal, the finish's, the browser's failure, and what the
+/// page says
+type TapCase = (
+    Option<ApiError>,
+    Option<ApiError>,
+    Option<TapFailed>,
+    &'static str,
+);
+
+/// Every way the tap can fail, and what the page says: each leaves the
+/// session outside its window with the tap on offer, except a 401 (the
+/// session itself ended: signed out) and a finish with no answer (the
+/// bootstrap is asked what it opened)
+#[test]
+fn every_refusal_of_the_tap_is_said() {
+    let lost = "This connection doesn't tell Agora which network you are \
+                on, so it can't open a check window here.";
+    // (start's answer, open's answer, the browser's, what the page says)
+    let cases: Vec<TapCase> = vec![
+        (
+            None,
+            Some(coded(403, RefusalCode::NetworkChanged, "x")),
+            None,
+            "Your network changed between asking for the passkey check and \
+             tapping, so Agora opened nothing.",
+        ),
+        (
+            None,
+            Some(coded(403, RefusalCode::TapRefused, "x")),
+            None,
+            "The passkey tap wasn't accepted",
+        ),
+        (
+            Some(ApiError::Forbidden(ErrorResponse::new(lost).into())),
+            None,
+            None,
+            lost,
+        ),
+        (
+            Some(coded(400, RefusalCode::NoPasskey, "No passkey in effect.")),
+            None,
+            None,
+            "No passkey in effect.",
+        ),
+        (
+            Some(ApiError::Network("offline".into())),
+            None,
+            None,
+            "Agora couldn't be asked for the check (Agora couldn't be \
+             reached (offline)). Nothing was opened: try again.",
+        ),
+        (
+            None,
+            None,
+            Some(TapFailed::Cancelled),
+            "No check was made: the passkey prompt was cancelled or timed \
+             out. Nothing was opened, and nothing here was lost.",
+        ),
+    ];
+    for (start, open, browser, words) in cases {
+        let portal = FakePortal::check_needed();
+        {
+            let mut fake = portal.0.borrow_mut();
+            if let Some(e) = start.clone() {
+                fake.window_tap_answers.push_back(Err(e));
+            }
+            if let Some(e) = open.clone() {
+                fake.open_answers.push_back(Err(e));
+            }
+            if let Some(f) = browser.clone() {
+                fake.passkey_answers.push_back(Err(f));
+            }
+        }
+        let (mut dom, handle) = line(portal.clone());
+        dom.in_scope(ScopeId::ROOT, || handle.start_window_tap());
+        settle(&mut dom);
+        dom.in_scope(ScopeId::ROOT, || handle.confirm_window_tap());
+        settle(&mut dom);
+        let page = html(&dom);
+        assert!(page.contains(words), "{words}\n{page}");
+        assert!(page.contains(">Confirm with a passkey</button>"), "{page}");
+        assert!(page.contains(r#"role="alert""#), "{page}");
+        assert_eq!(state(&dom, handle), Session::CheckNeeded, "{words}");
+        assert!(!page.contains("login"), "{page}");
+    }
+
+    // The session ended: signed out, the sign-in offered
+    let portal = FakePortal::check_needed();
+    portal
+        .0
+        .borrow_mut()
+        .window_tap_answers
+        .push_back(Err(ApiError::SignedOut("expired".into())));
+    let (mut dom, handle) = line(portal.clone());
+    dom.in_scope(ScopeId::ROOT, || handle.start_window_tap());
+    settle(&mut dom);
+    assert_eq!(state(&dom, handle), Session::SignedOut);
+
+    // No answer to the finish: it may have opened, and the bootstrap says
+    // it did
+    let portal = FakePortal::check_needed();
+    portal
+        .0
+        .borrow_mut()
+        .open_answers
+        .push_back(Err(ApiError::Network("offline".into())));
+    let (mut dom, handle) = line(portal.clone());
+    dom.in_scope(ScopeId::ROOT, || handle.start_window_tap());
+    settle(&mut dom);
+    portal.0.borrow_mut().session = Some(Ok(bootstrap(true)));
+    dom.in_scope(ScopeId::ROOT, || handle.confirm_window_tap());
+    settle(&mut dom);
+    assert_eq!(state(&dom, handle), signed_in(true));
+    // ... or that it didn't, which the page says
+    let portal = FakePortal::check_needed();
+    portal
+        .0
+        .borrow_mut()
+        .open_answers
+        .push_back(Err(ApiError::Network("offline".into())));
+    let (mut dom, handle) = line(portal.clone());
+    dom.in_scope(ScopeId::ROOT, || handle.start_window_tap());
+    settle(&mut dom);
+    dom.in_scope(ScopeId::ROOT, || handle.confirm_window_tap());
+    settle(&mut dom);
+    assert_eq!(state(&dom, handle), Session::CheckNeeded);
+    let page = html(&dom);
+    assert!(
+        page.contains("Agora still finds no open check window"),
+        "{page}"
+    );
+}
+
+/// The page never decides from its own clock that a window has ended: it
+/// asks the server at the window's end (by the bootstrap's times, plus
+/// `PROBE_AFTER_END`), and shows what the server says. Here it says the
+/// window ended: the tap in place
+#[test]
+fn the_page_asks_the_server_at_the_windows_end() {
+    let portal = FakePortal::signed_in(true);
+    let (mut dom, handle) = line(portal.clone());
+    let window = bootstrap(true).window;
+    {
+        let fake = portal.0.borrow();
+        assert_eq!(fake.waits.len(), 1, "one probe set");
+        let expected = (window.ends_at() + PROBE_AFTER_END - window.opened_at)
+            .to_std()
+            .unwrap();
+        assert_eq!(fake.waits[0].0, expected);
+        assert_eq!(fake.session_calls, 1);
+    }
+    // Until it fires, the page asks nothing, whatever its clock
+    portal.0.borrow_mut().now = Some(window.expires_at + TimeDelta::days(1));
+    settle(&mut dom);
+    assert_eq!(portal.0.borrow().session_calls, 1);
+    assert_eq!(state(&dom, handle), signed_in(true));
+    portal.0.borrow_mut().session = Some(Err(check_needed()));
+    portal.fire(0);
+    settle(&mut dom);
+    assert_eq!(portal.0.borrow().session_calls, 2);
+    assert_eq!(state(&dom, handle), Session::CheckNeeded);
+    assert!(html(&dom).contains(">Confirm with a passkey</button>"));
+    assert_eq!(
+        portal.0.borrow().waits.len(),
+        1,
+        "no probe outside a window"
+    );
+}
+
+/// A probe the server admits was a use of the window: the page probes
+/// again only if it used the window itself since, so a clock running ahead
+/// can't keep a window open by probing
+#[test]
+fn a_probe_alone_never_keeps_the_window_open() {
+    // Not used since: no further probe
+    let portal = FakePortal::signed_in(true);
+    let (mut dom, _handle) = line(portal.clone());
+    portal.fire(0);
+    settle(&mut dom);
+    assert_eq!(portal.0.borrow().session_calls, 2, "the probe asked");
+    assert_eq!(portal.0.borrow().waits.len(), 1, "and set none after");
+
+    // Used since (a write answered): the next probe is set
+    let portal = FakePortal::signed_in(true);
+    let (mut dom, handle) = line(portal.clone());
+    dom.in_scope(ScopeId::ROOT, || handle.note_used());
+    portal.fire(0);
+    settle(&mut dom);
+    assert_eq!(portal.0.borrow().waits.len(), 2, "the next probe set");
+
+    // An answered write through the handle is a use
+    let portal = FakePortal::signed_in(true);
+    let (mut dom, handle) = line(portal.clone());
+    dom.in_scope(ScopeId::ROOT, || {
+        handle.create_comment(
+            used(&signed_in(true)),
+            PortalCommentRequest {
+                action_id: crate::ids::OperatorActionId::new(),
+                payload: crate::requests::CreateCommentInput {
+                    reply_to: crate::ids::ContentTarget::Id(
+                        fixtures::post().id.into(),
+                    ),
+                    body: "hello".into(),
+                },
+            },
+            |_| {},
+        )
+    });
+    settle(&mut dom);
+    portal.fire(0);
+    settle(&mut dom);
+    assert_eq!(portal.0.borrow().waits.len(), 2, "the write was a use");
+}

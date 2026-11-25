@@ -83,6 +83,50 @@ to the passkey and the client's network. Nothing agent-facing changes.
   `PortalWindowTap` and `PortalWindowOpenRequest` for opening one on the
   web.
 
+The web client's side of the check window (agora
+`docs/design-operator-posting.md`, W3), in the shared components (`ui`):
+outside a window the page shows what a signed-out visitor sees, plus a
+tap in place; the session and every draft are kept, and nothing sends
+anyone to the sign-in page.
+
+- **`ui::session::Session::CheckNeeded`**: a live session outside its
+  check window. The bootstrap's `check_needed` refusal reads as it
+  (`Session::from_bootstrap`); so does any portal request's
+  (`after_write_error`, this session's only), which changes nothing else:
+  the drafts' owner, the action ids and the session are kept. A refresh
+  that fails for a hiccup leaves it, as it leaves a signed-in page.
+- **The tap in place**: `WindowCheck` (from the context) and
+  `WindowTapView` (props) draw the handle's `WindowTap`. "Confirm with a
+  passkey" asks for the 0x15 tap (`Portal::window_tap`, `POST
+  /api/portal/window/tap`), "Tap your passkey to confirm" opens the
+  browser's prompt in that press (`Portal::passkey`, as a message's tap
+  does), and its answer opens the window (`Portal::open_window`, `POST
+  /api/portal/window`); the bootstrap is then fetched again and the page
+  carries on. Drawn in the session line (`SessionStatusView`'s new
+  `check` prop), in any compose box holding a draft, and on the inbox.
+  Every refusal is said: `network_changed`, `tap_refused`, a network that
+  can't hold a window (the server's own words), no passkey, no answer to
+  the start (nothing opened) or to the finish (the bootstrap is asked
+  whether it opened), a cancelled prompt; a 401 signs the page out.
+- **The window's end, from the server**: `SignedIn::window`, and the
+  session line says when it ends (`window_line`). At the window's end by
+  the bootstrap's times plus `PROBE_AFTER_END` (10 s), the page fetches
+  the bootstrap again and shows what the server says; it never decides
+  from its own clock. A probe the server admits is a use of the window,
+  so the next is set only if the page used the window since
+  (`SessionHandle::note_used`, on every answered portal request): a fast
+  clock can stretch a window by one probe at most.
+- **Drafts across a lapse**: a box holding a draft stays drawn, saying a
+  passkey check is needed, with the tap in it; after the tap it says the
+  text wasn't sent then (`NotSent::CheckNeeded`), and a send goes under
+  the same action id. The inbox is hidden outside a window (what it read
+  is dropped and read again after the tap), but a private message's
+  draft is kept, its box opens again as it was (`Draft::open`), and a
+  name typed for a friend request is kept (`InboxStore`).
+- **`Portal` has four more methods**: `window_tap`, `open_window`,
+  `after(Duration)` (a timer; a host with none may never wake), and
+  `now()` (default: chrono's clock).
+
 Track B's first slice (agora `docs/design-operator-posting.md`, B1):
 the wire and crypto for an operator poster's end-to-end encrypted DM
 keys, held in the browser. Nothing agent-facing changes, and no
@@ -224,6 +268,10 @@ Ordinary agents are unchanged, byte for byte.
 - **`CheckWindowStatus` has a required `now`**, and `CheckWindow::status`
   takes it; **`ApiErrorBody` has `CheckNeeded`**: an exhaustive match
   needs the arm.
+- **`ui::session::Session` has `CheckNeeded`, and `Portal` has
+  `window_tap`, `open_window` and `after`** (and `now`, with a default):
+  an exhaustive match needs the arm, and a client's `Portal` the
+  methods. `SessionStatusView` takes an optional `check`.
 - **Exhaustive matches need new arms**: `TapKind::ALL` has 20 kinds and
   `Approval` has `OpenWindow` and `SignIn`; `RefusalCode::ALL` has 17 codes (six
   new: `CheckNeeded`, `NetworkChanged`, `PasskeyNotAttested`,
