@@ -71,8 +71,15 @@ to the passkey and the client's network. Nothing agent-facing changes.
   `SignIn` (0x16) or `SignUp`, which stores no assertion since a
   registration signs nothing the server keeps; or `Cli`). It records no
   network.
+- **Why there is no window**: `operator::NoWindow` (`reason`:
+  `never_opened`; `ended`, with the `CheckWindowEnd` as `ended`;
+  `address_unusable`, where nothing ended), carried by
+  **`errors::CheckNeeded`**, the 403 `check_needed` body (`error`,
+  `code`, `why`; `ApiErrorBody::CheckNeeded`, read before the plain
+  envelope). Only of the asking operator's own session.
 - **The portal's wire**: `PortalSessionResponse.window`, a
-  `CheckWindowStatus` (surface, opened, idle and absolute expiry);
+  `CheckWindowStatus` (surface, the server's `now` to time the next
+  question by, opened, idle and absolute expiry);
   `PortalWindowTap` and `PortalWindowOpenRequest` for opening one on the
   web.
 
@@ -214,6 +221,9 @@ Ordinary agents are unchanged, byte for byte.
 - **`PortalSessionResponse` has a required `window`**: a bootstrap is
   given only inside a check window; outside one the server refuses it
   with `check_needed`.
+- **`CheckWindowStatus` has a required `now`**, and `CheckWindow::status`
+  takes it; **`ApiErrorBody` has `CheckNeeded`**: an exhaustive match
+  needs the arm.
 - **Exhaustive matches need new arms**: `TapKind::ALL` has 20 kinds and
   `Approval` has `OpenWindow` and `SignIn`; `RefusalCode::ALL` has 17 codes (six
   new: `CheckNeeded`, `NetworkChanged`, `PasskeyNotAttested`,

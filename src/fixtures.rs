@@ -231,6 +231,8 @@ pub fn portal_session(poster: bool) -> crate::operator::PortalSessionResponse {
         suspension: None,
         window: crate::operator::CheckWindowStatus {
             surface: crate::enums::CheckSurface::Web,
+            now: chrono::DateTime::from_timestamp(1_761_782_400 + 60, 0)
+                .expect("a valid time"),
             opened_at: chrono::DateTime::from_timestamp(1_761_782_400, 0)
                 .expect("a valid time"),
             idle_expires_at: chrono::DateTime::from_timestamp(

@@ -9,7 +9,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::enums::{CheckSurface, DmCopyKind, MessageKind, PosterKind};
+use crate::enums::{
+    CheckSurface, CheckWindowEnd, DmCopyKind, MessageKind, PosterKind,
+};
 pub use crate::enums::{OperatorActionKind, OperatorCredentialKind};
 use crate::govlog::{HexLengthError, PublicKeyHex, Sha256Hex, SignatureHex};
 use crate::ids::{
@@ -1503,11 +1505,32 @@ pub struct PortalSessionResponse {
 #[serde(deny_unknown_fields)]
 pub struct CheckWindowStatus {
     pub surface: CheckSurface,
+    /// The server's clock when it answered: a client times its next
+    /// question from `idle_expires_at - now`, never from its own clock
+    pub now: DateTime<Utc>,
     pub opened_at: DateTime<Utc>,
     /// When it ends unless used before then
     pub idle_expires_at: DateTime<Utc>,
     /// When it ends however it is used
     pub expires_at: DateTime<Utc>,
+}
+
+/// Why a session has no open check window, as `check_needed` and the
+/// portal's window status say it: only of the asking operator's own session
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum NoWindow {
+    /// None was ever opened on this session (a session from before windows,
+    /// or a sign-up from a network that couldn't hold one)
+    NeverOpened,
+    /// The session's last window ended, and why
+    Ended { ended: CheckWindowEnd },
+    /// This request's address can't hold a window (none, or a network where
+    /// the client's address is lost on the way in). Nothing ended: from
+    /// another connection the window may still be open
+    AddressUnusable,
 }
 
 impl CheckWindowStatus {
@@ -2390,6 +2413,7 @@ mod tests {
     fn check_window_wire() {
         let status = crate::fixtures::portal_session(false).window;
         assert_eq!(status.ends_at(), status.idle_expires_at);
+        assert!(status.now <= status.opened_at + chrono::Duration::hours(1));
         let late = CheckWindowStatus {
             idle_expires_at: status.expires_at + chrono::Duration::hours(1),
             ..status
@@ -2708,6 +2732,7 @@ mod tests {
             json["window"],
             serde_json::json!({
                 "surface": "web",
+                "now": "2025-10-30T00:01:00Z",
                 "opened_at": "2025-10-30T00:00:00Z",
                 "idle_expires_at": "2025-10-30T12:00:00Z",
                 "expires_at": "2025-11-01T00:00:00Z",

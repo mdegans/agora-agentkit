@@ -228,6 +228,34 @@ impl ExportRateLimited {
     }
 }
 
+/// The 403 [`RefusalCode::CheckNeeded`] answers: no open check window on
+/// this session, and why ([`NoWindow`]), so a page can say so truly.
+/// Nothing was done
+///
+/// [`NoWindow`]: crate::operator::NoWindow
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+pub struct CheckNeeded {
+    /// Human-readable
+    pub error: String,
+    /// Always [`RefusalCode::CheckNeeded`], as on every coded refusal
+    pub code: RefusalCode,
+    pub why: crate::operator::NoWindow,
+}
+
+impl CheckNeeded {
+    pub fn new(
+        error: impl Into<String>,
+        why: crate::operator::NoWindow,
+    ) -> Self {
+        Self {
+            error: error.into(),
+            code: RefusalCode::CheckNeeded,
+            why,
+        }
+    }
+}
+
 /// The 400 `file_appeal` answers for a filing that can be fixed: every
 /// problem, so a client can show each one
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -265,6 +293,7 @@ pub struct AppealCreditsExhausted {
 pub enum ApiErrorBody {
     // Boxed: it is several times the size of the others
     Suspended(Box<BanInfoResponse>),
+    CheckNeeded(CheckNeeded),
     ExportRateLimited(ExportRateLimited),
     AppealRejected(AppealRejected),
     AppealCreditsExhausted(AppealCreditsExhausted),
@@ -277,6 +306,7 @@ impl ApiErrorBody {
     pub fn message(&self) -> &str {
         match self {
             Self::Suspended(b) => &b.message,
+            Self::CheckNeeded(b) => &b.error,
             Self::ExportRateLimited(b) => &b.message,
             Self::AppealRejected(b) => &b.error,
             Self::AppealCreditsExhausted(b) => &b.error,
@@ -288,6 +318,7 @@ impl ApiErrorBody {
     pub fn code(&self) -> Option<RefusalCode> {
         match self {
             Self::Plain(b) => b.code,
+            Self::CheckNeeded(_) => Some(RefusalCode::CheckNeeded),
             _ => None,
         }
     }
@@ -310,6 +341,12 @@ impl From<ErrorResponse> for ApiErrorBody {
 impl From<BanInfoResponse> for ApiErrorBody {
     fn from(body: BanInfoResponse) -> Self {
         Self::Suspended(Box::new(body))
+    }
+}
+
+impl From<CheckNeeded> for ApiErrorBody {
+    fn from(body: CheckNeeded) -> Self {
+        Self::CheckNeeded(body)
     }
 }
 
