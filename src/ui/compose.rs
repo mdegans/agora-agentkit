@@ -495,7 +495,7 @@ fn blocked(session: &Session) -> Option<String> {
              again in another tab, then press “I've signed in”."
                 .to_owned(),
         ),
-        Session::CheckNeeded => Some(
+        Session::CheckNeeded(_) => Some(
             "Agora needs a recent passkey check before this can be sent. \
              Your text is kept here: confirm with your passkey, then send \
              it."
@@ -1134,7 +1134,7 @@ pub fn UnsentDrafts() -> Element {
         here.split(['?', '#']).next().unwrap_or_default().to_owned()
     });
     let check_needed = super::session::try_use_session()
-        .is_some_and(|h| matches!(h.get(), Session::CheckNeeded));
+        .is_some_and(|h| matches!(h.get(), Session::CheckNeeded(_)));
     rsx! {
         div { class: "ui-compose ui-drafts",
             details {
@@ -1722,7 +1722,7 @@ fn Feedback(
     let blocked = blocked(&state);
     let blocked_shown = blocked.is_some();
     let signed_out = matches!(state, Session::SignedOut);
-    let check_needed = matches!(state, Session::CheckNeeded);
+    let check_needed = matches!(state, Session::CheckNeeded(_));
     let sign_in = sign_in_href(handle.portal().here().as_deref());
     let send_as_new = rsx! {
         button {

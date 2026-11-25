@@ -52,7 +52,8 @@
 //! **The server says when a window ends; the page asks it then.** A
 //! signed-in bootstrap carries its window ([`SignedIn::window`]). The page
 //! never decides from its own clock that the window has ended: at the
-//! window's end by the bootstrap's times, plus [`PROBE_AFTER_END`], it
+//! window's end by the server's clock (the time left from the status's
+//! `now`), plus [`PROBE_AFTER_END`], it
 //! fetches the bootstrap again ([`SessionHandle`]'s probe), and the
 //! server's answer is what the page shows. A probe the server admits is a
 //! use of the window (the bootstrap is a portal request), so the page
@@ -77,10 +78,11 @@ use crate::{
     ids::CommentId,
     links::AgoraLink,
     operator::{
-        AgentRef, CheckWindowStatus, OperatorRef, PortalCommentRequest,
-        PortalFriendshipRequest, PortalMarkReadRequest, PortalMarkReadResponse,
-        PortalMessageRequest, PortalMessageTap, PortalPostRequest,
-        PortalSessionResponse, PortalWindowOpenRequest, PortalWindowTap,
+        AgentRef, CheckWindowStatus, NoWindow, OperatorRef,
+        PortalCommentRequest, PortalFriendshipRequest, PortalMarkReadRequest,
+        PortalMarkReadResponse, PortalMessageRequest, PortalMessageTap,
+        PortalPostRequest, PortalSessionResponse, PortalWindowOpenRequest,
+        PortalWindowTap,
     },
     requests::GetProfileInput,
     responses::{
@@ -176,6 +178,15 @@ impl ApiError {
     pub fn suspension(&self) -> Option<&BanInfoResponse> {
         match self {
             Self::Forbidden(body) => body.suspension(),
+            _ => None,
+        }
+    }
+
+    /// Why the session has no open check window, when this is a
+    /// `check_needed` that says ([`crate::errors::CheckNeeded`])
+    pub fn no_window(&self) -> Option<NoWindow> {
+        match self {
+            Self::Forbidden(ApiErrorBody::CheckNeeded(body)) => Some(body.why),
             _ => None,
         }
     }
@@ -460,8 +471,9 @@ pub trait Portal {
         &self,
         request: &PortalWindowOpenRequest,
     ) -> LocalBoxFuture<'static, Result<CheckWindowStatus, ApiError>>;
-    /// The browser's clock, for when to ask the server whether the window
-    /// has ended. Never an authority: only the server's answer is. The
+    /// The browser's clock, only to measure how long the page has gone
+    /// without an answer about its window ([`PROBE_UNKNOWN_FOR`]). Never
+    /// when the window ends: that is timed from the server's `now`. The
     /// default is chrono's (`Date.now()` in a browser, through its
     /// `wasmbind`); a test's sets its own
     fn now(&self) -> DateTime<Utc> {
@@ -493,8 +505,9 @@ pub enum Session {
     /// (the bootstrap, or a request, was refused with
     /// [`RefusalCode::CheckNeeded`]). Not signed out: the session and the
     /// drafts are kept, and a tap in place ([`WindowCheck`]) opens a new
-    /// window. Until then the page shows what a signed-out visitor sees
-    CheckNeeded,
+    /// window. Until then the page shows what a signed-out visitor sees.
+    /// Why there is no window, when the server said ([`NoWindow`])
+    CheckNeeded(Option<NoWindow>),
     /// An operator is signed in
     SignedIn(SignedIn),
     /// The bootstrap failed for another reason (offline, a 5xx, an answer
@@ -591,7 +604,7 @@ impl Session {
             Ok(portal) => Self::SignedIn(SignedIn::new(portal)),
             Err(ApiError::SignedOut(_)) => Self::SignedOut,
             Err(e) if e.code() == Some(RefusalCode::CheckNeeded) => {
-                Self::CheckNeeded
+                Self::CheckNeeded(e.no_window())
             }
             Err(e) => Self::Failed(e),
         }
@@ -610,7 +623,7 @@ impl Session {
         let next = Self::from_bootstrap(answer);
         if matches!(
             (&*self, &next),
-            (Self::SignedIn(_) | Self::CheckNeeded, Self::Failed(_))
+            (Self::SignedIn(_) | Self::CheckNeeded(_), Self::Failed(_))
         ) {
             return;
         }
@@ -662,7 +675,7 @@ impl Session {
                 );
                 match current && same_window {
                     true => {
-                        *self = Self::CheckNeeded;
+                        *self = Self::CheckNeeded(error.no_window());
                         FollowUp::Nothing
                     }
                     false => FollowUp::Refresh,
@@ -691,11 +704,10 @@ impl Session {
     }
 }
 
-/// How long past a window's end, by the bootstrap's times and the
-/// browser's clock, the page asks the server whether it has ended. Past
-/// the end, so a clock a little behind the server's finds the window ended
-/// rather than stretching it with the probe
-pub const PROBE_AFTER_END: TimeDelta = TimeDelta::seconds(10);
+/// How long past a window's end the page asks the server whether it has
+/// ended. Timed by the server's clock (the status's `now`), never the
+/// browser's: the margin only covers the time the answer took to arrive
+pub const PROBE_AFTER_END: TimeDelta = TimeDelta::seconds(2);
 
 /// The longest a probe is set for: a browser's `setTimeout` takes a signed
 /// 32-bit count of milliseconds (24.8 days), past which it fires at once.
@@ -983,10 +995,11 @@ impl SessionHandle {
         p.used = false;
     }
 
-    /// Asks the server again at `window`'s end, by this browser's clock,
-    /// plus [`PROBE_AFTER_END`], unless another probe replaces this one
+    /// Asks the server again at `window`'s end, by the server's clock (the
+    /// time left from its `now`), plus [`PROBE_AFTER_END`], unless another
+    /// probe replaces this one
     fn set_probe(self, window: CheckWindowStatus) {
-        let wait = (window.ends_at() + PROBE_AFTER_END - self.portal().now())
+        let wait = (window.ends_at() + PROBE_AFTER_END - window.now)
             .to_std()
             .unwrap_or(Duration::ZERO);
         self.set_probe_in(wait);
@@ -1034,7 +1047,7 @@ impl SessionHandle {
         }
         if matches!(
             *self.state.peek(),
-            Session::SignedIn(_) | Session::CheckNeeded | Session::Failed(_)
+            Session::SignedIn(_) | Session::CheckNeeded(_) | Session::Failed(_)
         ) {
             let used = self.probe.peek().used;
             self.fetch(Fetch::Probe { used });
@@ -1079,7 +1092,7 @@ impl SessionHandle {
     /// from this network. Nothing while one is being asked for or opened,
     /// or once the session isn't outside its window
     pub fn start_window_tap(self) {
-        if !matches!(*self.state.peek(), Session::CheckNeeded)
+        if !matches!(*self.state.peek(), Session::CheckNeeded(_))
             || matches!(
                 *self.tap.peek(),
                 WindowTap::Asking | WindowTap::Opening
@@ -1111,7 +1124,7 @@ impl SessionHandle {
                     return;
                 }
             }
-            if !matches!(*self.state.peek(), Session::CheckNeeded) {
+            if !matches!(*self.state.peek(), Session::CheckNeeded(_)) {
                 self.set_tap(WindowTap::Idle);
                 return;
             }
@@ -1261,7 +1274,7 @@ impl SessionHandle {
         if let Session::SignedIn(signed_in) = &next {
             self.drafts.signed_in(signed_in);
         }
-        if !matches!(next, Session::CheckNeeded)
+        if !matches!(next, Session::CheckNeeded(_))
             && !matches!(*self.tap.peek(), WindowTap::Opening)
         {
             self.set_tap(WindowTap::Idle);
@@ -1480,8 +1493,8 @@ pub fn SessionStatusView(
                 }
             }
         }
-        Session::CheckNeeded => rsx! {
-            p { class: "post-meta", role: "status", "{CHECK_NEEDED_LINE}" }
+        Session::CheckNeeded(why) => rsx! {
+            p { class: "post-meta", role: "status", "{check_needed_line(why)}" }
             if let Some(check) = check {
                 {check}
             }
@@ -1501,13 +1514,72 @@ pub fn SessionStatusView(
     }
 }
 
+/// Why there is no passkey check open for this page, in a clause for a
+/// person, by what the server said ([`NoWindow`]); with no reason, what is
+/// true in every case
+pub fn no_window_words(why: Option<NoWindow>) -> &'static str {
+    use crate::enums::CheckWindowEnd;
+    match why {
+        None => "there is no passkey check open for this page",
+        Some(NoWindow::NeverOpened) => {
+            "this session hasn't had a passkey check yet, and Agora now asks \
+             for one before it shows anything of yours"
+        }
+        Some(NoWindow::Ended { ended }) => match ended {
+            CheckWindowEnd::Idle => {
+                "the passkey check for this session ended after a while unused"
+            }
+            CheckWindowEnd::Absolute => {
+                "the passkey check for this session reached its time limit"
+            }
+            CheckWindowEnd::Address => {
+                "the passkey check for this session ended because your \
+                 network changed"
+            }
+            CheckWindowEnd::Suspended => {
+                "the passkey check for this session ended because the passkey \
+                 that opened it was suspended; your other passkeys can still \
+                 confirm"
+            }
+            CheckWindowEnd::Frozen => {
+                "the passkey check for this session ended because your account \
+                 was frozen; the passkeys the freeze left in effect can still \
+                 confirm"
+            }
+            CheckWindowEnd::SignedOut => {
+                "the passkey check for this session ended when the session was \
+                 signed out"
+            }
+            CheckWindowEnd::Clock => {
+                "the passkey check for this session ended because its stored \
+                 times were ahead of Agora's clock"
+            }
+        },
+        Some(NoWindow::AddressUnusable) => {
+            "this connection doesn't tell Agora which network you're on, so no \
+             passkey check can be used over it: reach Agora through its public \
+             address (not straight over the local network)"
+        }
+    }
+}
+
 /// What the session line says outside a check window: still signed in,
-/// what that means here, what is kept, and what to do. True however the
-/// page got there (no window opened on this session yet, one that ended,
-/// a network that can't hold one): it says no more than that
-pub const CHECK_NEEDED_LINE: &str = "You're still signed in, but there is \
-     no passkey check open for this page, so it shows only what anyone can \
-     see. Confirm with your passkey to carry on here; your drafts are kept.";
+/// why there is no check ([`no_window_words`]), what that means here, what
+/// is kept, and what to do
+pub fn check_needed_line(why: Option<NoWindow>) -> String {
+    format!(
+        "You're still signed in, but {}. Until you confirm, this page shows \
+         only what anyone can see. Confirm with your passkey to carry on \
+         here; your drafts are kept.",
+        no_window_words(why)
+    )
+}
+
+/// [`check_needed_line`] with no reason: true however the page got there
+pub const CHECK_NEEDED_LINE: &str = "You're still signed in, but there is no \
+     passkey check open for this page. Until you confirm, this page shows only \
+     what anyone can see. Confirm with your passkey to carry on here; your \
+     drafts are kept.";
 
 /// When the check window ends, in words: when it ends if unused, and at
 /// the latest (one time when they are the same)
@@ -1533,7 +1605,7 @@ pub fn window_line(window: &CheckWindowStatus) -> String {
 pub fn WindowCheck() -> Element {
     let handle = use_session();
     let pressed_here = use_signal(|| false);
-    if !matches!(handle.get(), Session::CheckNeeded) {
+    if !matches!(handle.get(), Session::CheckNeeded(_)) {
         return rsx! {};
     }
     let mut pressed = pressed_here;

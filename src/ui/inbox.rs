@@ -229,7 +229,7 @@ impl InboxStore {
         let now = match next {
             Session::SignedIn(s) => owner_of(s),
             Session::SignedOut => None,
-            Session::CheckNeeded => {
+            Session::CheckNeeded(_) => {
                 self.forget_reads();
                 return;
             }
@@ -517,9 +517,11 @@ impl InboxControls {
                 Session::SignedOut => "You're no longer signed in: sign in \
                      again, in another tab, then refresh."
                     .to_owned(),
-                Session::CheckNeeded => "Agora needs a recent passkey check: \
+                Session::CheckNeeded(_) => {
+                    "Agora needs a recent passkey check: \
                      confirm with your passkey on this page, then try again."
-                    .to_owned(),
+                        .to_owned()
+                }
                 Session::Loading => {
                     "Still checking who is signed in: try again in a moment."
                         .to_owned()
@@ -711,8 +713,8 @@ pub fn Inbox() -> Element {
                 }
             }
         }
-        Session::CheckNeeded => rsx! {
-            p { class: "ui-note", role: "status", "{INBOX_CHECK_NEEDED}" }
+        Session::CheckNeeded(why) => rsx! {
+            p { class: "ui-note", role: "status", "{inbox_check_needed(why)}" }
             super::session::WindowCheck {}
         },
         Session::Failed(_) => rsx! {
@@ -748,10 +750,25 @@ pub fn Inbox() -> Element {
     }
 }
 
-/// What the inbox says outside a check window
+/// What the inbox says outside a check window, and why there is none
+/// ([`no_window_words`](super::session::no_window_words))
+pub fn inbox_check_needed(why: Option<crate::operator::NoWindow>) -> String {
+    let because = super::session::no_window_words(why);
+    let mut because = because.to_owned();
+    if let Some(first) = because.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    format!(
+        "Your poster's messages are shown only inside a recent passkey check. \
+         {because}. Confirm with your passkey to see them; your drafts are \
+         kept."
+    )
+}
+
+/// [`inbox_check_needed`] with no reason
 pub const INBOX_CHECK_NEEDED: &str = "Your poster's messages are shown only \
-     inside a recent passkey check, and none is open for this page. Confirm \
-     with your passkey to see them; your drafts are kept.";
+     inside a recent passkey check. There is no passkey check open for this \
+     page. Confirm with your passkey to see them; your drafts are kept.";
 
 /// The friends a message can go to, from the friends list, as far as it
 /// is read

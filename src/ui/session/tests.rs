@@ -603,14 +603,14 @@ fn coded(status: u16, code: RefusalCode, message: &str) -> ApiError {
 fn outside_the_window_is_its_own_state() {
     assert_eq!(
         Session::from_bootstrap(Err(check_needed())),
-        Session::CheckNeeded
+        Session::CheckNeeded(None)
     );
-    let mut s = Session::CheckNeeded;
+    let mut s = Session::CheckNeeded(None);
     s.after_refresh(Err(ApiError::Network("offline".into())));
-    assert_eq!(s, Session::CheckNeeded);
+    assert_eq!(s, Session::CheckNeeded(None));
     s.after_refresh(Ok(bootstrap(true)));
     assert_eq!(s, signed_in(true));
-    let mut s = Session::CheckNeeded;
+    let mut s = Session::CheckNeeded(None);
     s.after_refresh(Err(ApiError::SignedOut("expired".into())));
     assert_eq!(s, Session::SignedOut);
 }
@@ -626,7 +626,7 @@ fn a_check_needed_refusal_keeps_the_session() {
         s.after_write_error(&write, &check_needed()),
         FollowUp::Nothing
     );
-    assert_eq!(s, Session::CheckNeeded);
+    assert_eq!(s, Session::CheckNeeded(None));
     let mut newer = Session::from_bootstrap(Ok(bootstrap_with(true, "newer")));
     assert_eq!(
         newer.after_write_error(&write, &check_needed()),
@@ -644,7 +644,7 @@ fn the_line_outside_a_window_offers_the_tap_not_a_sign_in() {
     fn Drawn() -> Element {
         rsx! {
             SessionStatusView {
-                session: Session::CheckNeeded,
+                session: Session::CheckNeeded(None),
                 return_to: Some("/agora/app".to_owned()),
                 on_retry: |_| {},
                 check: rsx! {
@@ -763,7 +763,7 @@ fn the_tap_can_be_cancelled() {
     settle(&mut dom);
     assert!(html(&dom).contains(">Confirm with a passkey</button>"));
     assert!(portal.0.borrow().opens.is_empty());
-    assert_eq!(state(&dom, handle), Session::CheckNeeded);
+    assert_eq!(state(&dom, handle), Session::CheckNeeded(None));
 }
 
 /// The start's refusal, the finish's, the browser's failure, and what the
@@ -854,7 +854,7 @@ fn every_refusal_of_the_tap_is_said() {
         assert!(page.contains(words), "{words}\n{page}");
         assert!(page.contains(">Confirm with a passkey</button>"), "{page}");
         assert!(page.contains(r#"role="alert""#), "{page}");
-        assert_eq!(state(&dom, handle), Session::CheckNeeded, "{words}");
+        assert_eq!(state(&dom, handle), Session::CheckNeeded(None), "{words}");
         assert!(!page.contains("login"), "{page}");
     }
 
@@ -897,7 +897,7 @@ fn every_refusal_of_the_tap_is_said() {
     settle(&mut dom);
     dom.in_scope(ScopeId::ROOT, || handle.confirm_window_tap());
     settle(&mut dom);
-    assert_eq!(state(&dom, handle), Session::CheckNeeded);
+    assert_eq!(state(&dom, handle), Session::CheckNeeded(None));
     let page = html(&dom);
     assert!(
         page.contains(
@@ -943,7 +943,7 @@ fn the_page_asks_the_server_at_the_windows_end() {
     {
         let fake = portal.0.borrow();
         assert_eq!(fake.waits.len(), 1, "one probe set");
-        let expected = (window.ends_at() + PROBE_AFTER_END - window.opened_at)
+        let expected = (window.ends_at() + PROBE_AFTER_END - window.now)
             .to_std()
             .unwrap();
         assert_eq!(fake.waits[0].0, expected);
@@ -958,7 +958,7 @@ fn the_page_asks_the_server_at_the_windows_end() {
     portal.fire(0);
     settle(&mut dom);
     assert_eq!(portal.0.borrow().session_calls, 2);
-    assert_eq!(state(&dom, handle), Session::CheckNeeded);
+    assert_eq!(state(&dom, handle), Session::CheckNeeded(None));
     assert!(html(&dom).contains(">Confirm with a passkey</button>"));
     assert_eq!(
         portal.0.borrow().waits.len(),
@@ -1064,7 +1064,7 @@ fn a_probe_that_fails_asks_again_and_never_guesses() {
     portal.0.borrow_mut().session = Some(Err(check_needed()));
     portal.fire_last();
     settle(&mut dom);
-    assert_eq!(state(&dom, handle), Session::CheckNeeded);
+    assert_eq!(state(&dom, handle), Session::CheckNeeded(None));
 }
 
 /// The page shown again (a tab brought back, a page from the back-forward
@@ -1074,7 +1074,7 @@ fn a_probe_that_fails_asks_again_and_never_guesses() {
 fn being_shown_again_asks_the_server() {
     let portal = FakePortal::check_needed();
     let (mut dom, handle) = line(portal.clone());
-    assert_eq!(state(&dom, handle), Session::CheckNeeded);
+    assert_eq!(state(&dom, handle), Session::CheckNeeded(None));
     portal.0.borrow_mut().session = Some(Ok(bootstrap(true)));
     portal.show_again();
     settle(&mut dom);
@@ -1088,7 +1088,7 @@ fn being_shown_again_asks_the_server() {
     settle(&mut dom);
     assert_eq!(
         state(&dom, handle),
-        Session::CheckNeeded,
+        Session::CheckNeeded(None),
         "ended while hidden"
     );
 }
@@ -1140,4 +1140,89 @@ fn a_late_refusal_from_before_a_tap_doesnt_close_the_new_window() {
         FollowUp::Refresh
     );
     assert!(can_write(&now), "still open: {now:?}");
+}
+
+/// The probe is timed from the server's clock: a browser clock a day off
+/// sets the same wait
+#[test]
+fn the_probe_is_timed_by_the_servers_clock() {
+    let portal = FakePortal::signed_in(true);
+    portal.0.borrow_mut().now =
+        Some(bootstrap(true).window.now + TimeDelta::days(1));
+    let (_dom, _handle) = line(portal.clone());
+    let window = bootstrap(true).window;
+    let expected = (window.ends_at() + PROBE_AFTER_END - window.now)
+        .to_std()
+        .unwrap();
+    assert_eq!(portal.0.borrow().waits[0].0, expected);
+}
+
+/// Why there is no window, said truly for each reason the server gives;
+/// with none, only what is true in every case
+#[test]
+fn the_reason_for_no_window_is_said() {
+    use crate::enums::CheckWindowEnd;
+    let line = |why| check_needed_line(why);
+    assert!(
+        line(None).contains("there is no passkey check open for this page")
+    );
+    assert!(!line(None).contains("ended"), "no claim it ended");
+    assert!(
+        line(Some(NoWindow::NeverOpened))
+            .contains("hasn't had a passkey check yet")
+    );
+    for (ended, words) in [
+        (CheckWindowEnd::Idle, "ended after a while unused"),
+        (CheckWindowEnd::Absolute, "reached its time limit"),
+        (CheckWindowEnd::Address, "because your network changed"),
+        (
+            CheckWindowEnd::Suspended,
+            "your other passkeys can still confirm",
+        ),
+        (
+            CheckWindowEnd::Frozen,
+            "the passkeys the freeze left in effect can still confirm",
+        ),
+        (CheckWindowEnd::SignedOut, "signed out"),
+        (CheckWindowEnd::Clock, "ahead of Agora's clock"),
+    ] {
+        let said = line(Some(NoWindow::Ended { ended }));
+        assert!(said.contains(words), "{ended:?}: {said}");
+    }
+    assert!(line(Some(NoWindow::AddressUnusable)).contains("public address"),);
+    // Read from the server's refusal
+    let refusal = ApiError::refused(
+        403,
+        crate::errors::CheckNeeded::new(
+            "x",
+            NoWindow::Ended {
+                ended: CheckWindowEnd::Suspended,
+            },
+        )
+        .into(),
+    );
+    let s = Session::from_bootstrap(Err(refusal));
+    assert_eq!(
+        s,
+        Session::CheckNeeded(Some(NoWindow::Ended {
+            ended: CheckWindowEnd::Suspended
+        }))
+    );
+    let page = draw_check_needed(s);
+    assert!(
+        page.contains("your other passkeys can still confirm"),
+        "{page}"
+    );
+}
+
+fn draw_check_needed(session: Session) -> String {
+    #[component]
+    fn Drawn(session: Session) -> Element {
+        rsx! {
+            SessionStatusView { session, return_to: None, on_retry: |_| {} }
+        }
+    }
+    let mut dom = VirtualDom::new_with_props(Drawn, DrawnProps { session });
+    dom.rebuild_in_place();
+    dioxus_ssr::render(&dom)
 }
