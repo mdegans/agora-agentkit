@@ -1420,14 +1420,42 @@ async fn the_heartbeat_finds_a_sleep() {
     portal.0.borrow_mut().session =
         Some(Err(crate::ui::test_portal::check_needed()));
     let asked = portal.0.borrow().status_calls;
+    // The answer held: hidden before it comes
+    let gate = portal.hold();
     portal.beat();
     let html = h.settle().await;
-    assert!(!html.contains("a private hello"), "{html}");
+    assert!(!html.contains("a private hello"), "hidden at once: {html}");
     assert!(
         portal.0.borrow().status_calls > asked,
         "asked after the beat"
     );
+    drop(gate);
+    let html = h.settle().await;
+    assert!(!html.contains("a private hello"), "{html}");
     assert!(html.contains(INBOX_CHECK_NEEDED), "{html}");
+}
+
+/// A slow answer to a probe that fired on time is not a sleep: a heartbeat
+/// while it is awaited leaves the inbox shown
+#[tokio::test]
+async fn a_slow_answer_is_not_a_sleep() {
+    let from_ada = fixtures::message(1, "ada", "a private hello", true);
+    let portal = with(vec![from_ada], ada());
+    let (mut h, _) = Harness::new(&portal).await;
+    let window = fixtures::portal_session(true).window;
+    let due =
+        window.now + (window.ends_at() - window.now) + session::PROBE_AFTER_END;
+    portal.0.borrow_mut().now = Some(due);
+    let gate = portal.hold();
+    portal.fire_last();
+    h.settle().await;
+    portal.0.borrow_mut().now = Some(due + chrono::TimeDelta::seconds(25));
+    portal.beat();
+    let html = h.settle().await;
+    assert!(html.contains("a private hello"), "still shown: {html}");
+    drop(gate);
+    let html = h.settle().await;
+    assert!(html.contains("a private hello"), "{html}");
 }
 
 /// A page that couldn't reach Agora comes back when it answers, even when

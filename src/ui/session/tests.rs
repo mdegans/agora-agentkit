@@ -1250,7 +1250,21 @@ fn each_reason_says_only_what_is_true() {
     }));
     assert!(clock.contains("Confirm again"), "{clock}");
     assert!(!clock.contains("fixes"), "{clock}");
+    assert!(!lan_until_then_dangles(), "Until then has its antecedent");
+    let page = draw_check_needed(Session::CheckNeeded(Some(NoWindow::Ended {
+        ended: CheckWindowEnd::SignedOut,
+    })));
+    assert!(page.contains(">Sign in</a>"), "{page}");
+    assert!(!page.contains("Confirm with a passkey"), "{page}");
     let lan = check_needed_line(Some(NoWindow::AddressUnusable));
+    assert!(
+        lan.contains("Until this tab reaches Agora that way"),
+        "{lan}"
+    );
     assert!(!lan.to_lowercase().contains("confirm"), "{lan}");
     assert!(lan.contains("Your drafts stay in this tab"), "{lan}");
+}
+
+fn lan_until_then_dangles() -> bool {
+    check_needed_line(Some(NoWindow::AddressUnusable)).contains("Until then")
 }

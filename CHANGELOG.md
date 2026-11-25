@@ -127,7 +127,7 @@ anyone to the sign-in page.
   at once when shown again (`Portal::shown_again`: `visibilitychange`,
   a `pageshow` from the back-forward cache). A page that slept past its
   probe's due time (by the browser's clock compared with itself,
-  `SLEPT_PAST`, 20 s; also checked by a `HEARTBEAT` every 45 s) hides
+  `SLEPT_PAST`, 20 s; also checked by a `HEARTBEAT` every 10 s) hides
   what is the operator's at once, then asks. Probes have their own
   generation, so a refresh never drops a probe's answer, and a page that
   couldn't reach Agora keeps asking after any unanswered refresh ("Try

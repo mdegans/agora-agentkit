@@ -456,14 +456,18 @@ impl Portal for FakePortal {
     ) -> LocalBoxFuture<'static, Result<CheckWindowStatus, ApiError>> {
         let mut fake = self.0.borrow_mut();
         fake.status_calls += 1;
+        let gate = fake.gate.clone();
         if let Some(answer) = fake.status_answers.pop_front() {
-            return ready(answer);
+            return gated(gate, answer);
         }
-        ready(match fake.session.clone() {
-            Some(Ok(session)) => Ok(session.window),
-            Some(Err(e)) => Err(e),
-            None => Err(ApiError::Network("offline".into())),
-        })
+        gated(
+            gate,
+            match fake.session.clone() {
+                Some(Ok(session)) => Ok(session.window),
+                Some(Err(e)) => Err(e),
+                None => Err(ApiError::Network("offline".into())),
+            },
+        )
     }
 
     fn window_tap(
@@ -516,7 +520,11 @@ impl Portal for FakePortal {
 
     fn after(&self, delay: Duration) -> LocalBoxFuture<'static, ()> {
         let (tx, rx) = oneshot::channel();
-        if delay == crate::ui::session::HEARTBEAT {
+        // The heartbeat's wait: its period, while no beat is pending (one
+        // loop, so one at a time). A probe's retry may wait as long
+        let beat = delay == crate::ui::session::HEARTBEAT
+            && !self.0.borrow().beats.iter().any(Option::is_some);
+        if beat {
             self.0.borrow_mut().beats.push(Some(tx));
         } else {
             self.0.borrow_mut().waits.push((delay, Some(tx)));

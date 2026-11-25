@@ -771,7 +771,7 @@ pub const SLEPT_PAST: TimeDelta = TimeDelta::seconds(20);
 /// How often the page compares the browser's clock with the probe's due
 /// time, for where a timer doesn't count suspended time or the page isn't
 /// reported hidden
-pub const HEARTBEAT: Duration = Duration::from_secs(45);
+pub const HEARTBEAT: Duration = Duration::from_secs(10);
 
 /// The shortest wait before a probe: a status whose window ended already
 /// is asked again a second on, not at once in a loop
@@ -949,10 +949,13 @@ impl SessionHandle {
     ///   again, never dropped ([`Self::probe_failed`])
     fn probe(self) {
         self.watch_returns();
+        // Asked: no probe is due until the next is set, so a slow answer
+        // is never read as a sleep
         let asked = {
             let mut probe = self.probe;
             let mut p = probe.write();
             p.asked += 1;
+            p.due = None;
             p.asked
         };
         let answer = self.portal().window_status();
@@ -1591,6 +1594,20 @@ pub fn SessionStatusView(
                 }
             }
         }
+        // Signed out: the sign-in, not a tap
+        Session::CheckNeeded(
+            why @ Some(NoWindow::Ended {
+                ended: crate::enums::CheckWindowEnd::SignedOut,
+            }),
+        ) => {
+            let href = sign_in_href(return_to.as_deref());
+            rsx! {
+                p { class: "post-meta", role: "status",
+                    "{check_needed_line(why)} "
+                    a { href: "{href}", "Sign in" }
+                }
+            }
+        }
         Session::CheckNeeded(why) => rsx! {
             p { class: "post-meta", role: "status", "{check_needed_line(why)}" }
             if let Some(check) = check {
@@ -1719,6 +1736,10 @@ pub fn check_needed_line(why: Option<NoWindow>) -> String {
             "{}. This page shows only what anyone can see. {next}",
             sentence(because)
         ),
+        Some(NoWindow::AddressUnusable) => format!(
+            "You're still signed in, but {because}. {next} Until this tab \
+             reaches Agora that way, this page shows only what anyone can see."
+        ),
         _ => format!(
             "You're still signed in, but {because}. Until then, this page shows \
              only what anyone can see. {next}"
@@ -1766,6 +1787,12 @@ pub fn WindowCheck() -> Element {
         // A tap from this connection would only be refused: the line says
         // why, and offers none
         Session::CheckNeeded(Some(NoWindow::AddressUnusable)) => {
+            return rsx! {};
+        }
+        // Signed out: the line offers the sign-in; a tap couldn't help
+        Session::CheckNeeded(Some(NoWindow::Ended {
+            ended: crate::enums::CheckWindowEnd::SignedOut,
+        })) => {
             return rsx! {};
         }
         Session::CheckNeeded(_) => {}
