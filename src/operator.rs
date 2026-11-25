@@ -978,15 +978,33 @@ pub enum OperatorActionDetail {
 #[cfg_attr(feature = "schemars", schemars(inline))]
 #[serde(tag = "surface", rename_all = "snake_case")]
 pub enum WindowOpening {
-    /// By a 0x15 tap, whose assertion is stored with the entry as every
-    /// tap's is
-    Web,
+    /// On the web, `by` a tap in place, a sign-in or a sign-up
+    Web { by: WebOpening },
     /// By the operator poster's command line: an `open` assertion, with the
     /// PIN and a touch
     Cli {
         poster: AgentId,
         assertion: PosterAssertionRecord,
     },
+}
+
+/// What opened a [`WindowOpening::Web`]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[cfg_attr(feature = "schemars", schemars(inline))]
+#[serde(rename_all = "snake_case")]
+pub enum WebOpening {
+    /// A tap in place (0x15) on a session outside its window; the
+    /// assertion is stored with the entry as every tap's is
+    Tap,
+    /// The sign-in that opened the session (0x16), its assertion stored
+    /// with the entry
+    SignIn,
+    /// The sign-up that created the account and opened the session. No
+    /// assertion is stored: a registration signs nothing the server can
+    /// keep (a passkey's attestation is usually `none`), so this opening
+    /// rests on the new passkey's registration alone
+    SignUp,
 }
 
 impl WindowOpening {
@@ -1006,7 +1024,7 @@ impl WindowOpening {
 
     pub fn surface(&self) -> CheckSurface {
         match self {
-            Self::Web => CheckSurface::Web,
+            Self::Web { .. } => CheckSurface::Web,
             Self::Cli { .. } => CheckSurface::Cli,
         }
     }
@@ -2383,13 +2401,18 @@ mod tests {
             detail: OperatorActionDetail::CheckWindowOpen {
                 window: crate::ids::OperatorCheckWindowId::new(),
                 passkey: OperatorPasskeyId::new(),
-                opening: WindowOpening::Web,
+                opening: WindowOpening::Web {
+                    by: WebOpening::SignIn,
+                },
             },
             created_at: status.opened_at,
         };
         let json = serde_json::to_value(&entry.detail).unwrap();
         assert_eq!(json["kind"], "check_window_open");
-        assert_eq!(json["opening"], serde_json::json!({"surface": "web"}));
+        assert_eq!(
+            json["opening"],
+            serde_json::json!({"surface": "web", "by": "sign_in"})
+        );
         assert_eq!(
             serde_json::from_value::<OperatorActionDetail>(json).unwrap(),
             entry.detail
@@ -2436,7 +2459,13 @@ mod tests {
             [1; 16],
         );
         let cli = WindowOpening::cli(&open, assertion([1; 16])).unwrap();
-        for opening in [WindowOpening::Web, cli.clone()] {
+        let web = |by| WindowOpening::Web { by };
+        for opening in [
+            web(WebOpening::Tap),
+            web(WebOpening::SignIn),
+            web(WebOpening::SignUp),
+            cli.clone(),
+        ] {
             assert_eq!(
                 serde_json::to_value(&opening).unwrap()["surface"],
                 opening.surface().to_string()

@@ -48,6 +48,13 @@ to the passkey and the client's network. Nothing agent-facing changes.
   and consumed on finish. The start's network stays in the ceremony state
   (its digest could be reversed for IPv4), and the web is the only
   surface that taps. Vector by Python `hashlib`.
+- **Bound tap 0x16, sign in on the web**: `TapKind::SignIn`,
+  `Approval::SignIn { window }`. A sign-in opens a check window on the
+  session it opens, and its challenge is derived from these bytes: the
+  kind and the `OperatorCheckWindowId` drawn when the sign-in starts. No
+  operator (a discoverable credential names it only in the answer, and
+  the credential that signs determines it). The start's network is held
+  in the ceremony, as for 0x15. Vector by Python `hashlib`.
 - **`CheckSurface`** (`check_surface_enum`: `web`, `cli`) and
   **`CheckWindowEnd`** (`check_window_end_enum`: `idle`, `absolute`,
   `address`, `suspended`, `signed_out`, `frozen`, `clock`), with closed
@@ -57,7 +64,10 @@ to the passkey and the client's network. Nothing agent-facing changes.
   tap from another network than its start).
 - **The log's `check_window_open`**: `OperatorActionKind::CheckWindowOpen`
   and its detail (the window, the passkey, and a `WindowOpening` tagged
-  by surface). It records no network.
+  by surface: `Web { by }`, where `WebOpening` is `Tap` (0x15),
+  `SignIn` (0x16) or `SignUp`, which stores no assertion since a
+  registration signs nothing the server keeps; or `Cli`). It records no
+  network.
 - **The portal's wire**: `PortalSessionResponse.window`, a
   `CheckWindowStatus` (surface, opened, idle and absolute expiry);
   `PortalWindowTap` and `PortalWindowOpenRequest` for opening one on the
@@ -201,21 +211,26 @@ Ordinary agents are unchanged, byte for byte.
 - **`PortalSessionResponse` has a required `window`**: a bootstrap is
   given only inside a check window; outside one the server refuses it
   with `check_needed`.
-- **Exhaustive matches need new arms**: `TapKind::ALL` has 19 kinds and
-  `Approval` has `OpenWindow`; `RefusalCode::ALL` has 17 codes (six
+- **Exhaustive matches need new arms**: `TapKind::ALL` has 20 kinds and
+  `Approval` has `OpenWindow` and `SignIn`; `RefusalCode::ALL` has 17 codes (six
   new: `CheckNeeded`, `NetworkChanged`, `PasskeyNotAttested`,
   `PasskeySynced`, `TouchNeeded`, `VerificationNeeded`);
   `OperatorActionKind` and `OperatorActionDetail` have `CheckWindowOpen`
-  and `PosterSigned`; `WindowOpening` has `Web` and `Cli`; `SignedAction`
+  and `PosterSigned`; `WindowOpening` has `Web { by: WebOpening }` and
+  `Cli`; `SignedAction`
   has `OpenCheckWindow`, `OpenReadSession`, `PeekInbox` and `MarkRead`.
-- **The database gains**, with W2's migration: `check_window_open`,
-  `check_surface_enum`, `check_window_end_enum` and `operator_tier_enum`;
-  with A2's, after it: `poster_signed`. Each in `ALL`'s order.
+- **The database gains**, with agora's migration 156 (W2):
+  `check_surface_enum`, `check_window_end_enum` and `operator_tier_enum`,
+  and all six new `operator_action_kind_enum` labels in `ALL`'s order
+  (`dm_key_create`, `dm_copy_add`, `dm_copy_remove`, `dm_key_rotate`,
+  `check_window_open`, `poster_signed`): the enum parity test compares
+  the whole list, and `ADD VALUE` never reorders. B2's and A2's
+  migrations add none.
 - **`TapKind::ALL` has 18 kinds** and **`Approval` has `DmKeys`**: an
   exhaustive match needs the arm.
 - **`OperatorActionKind` and `OperatorActionDetail` have four more
   variants**: an exhaustive match needs the arms. The database gains the
-  labels with B2's migration, in `ALL`'s order.
+  labels with migration 156 (above).
 
 ## 0.171.0 (2026-11-19)
 
