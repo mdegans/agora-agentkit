@@ -1853,3 +1853,23 @@ async fn a_new_post_survives_the_tap() {
     assert_eq!(posts.len(), 2);
     assert_eq!(posts[0].action_id, posts[1].action_id);
 }
+
+/// A box holding a draft says itself why it can't send, by the reason:
+/// no tap asked for where none could open a window
+#[test]
+fn a_blocked_box_says_the_reason() {
+    use crate::operator::NoWindow;
+    let lan = blocked(&Session::CheckNeeded(Some(NoWindow::AddressUnusable)))
+        .unwrap();
+    assert!(!lan.to_lowercase().contains("confirm"), "{lan}");
+    assert!(lan.contains("public address"), "{lan}");
+    let idle = blocked(&Session::CheckNeeded(Some(NoWindow::Ended {
+        ended: crate::enums::CheckWindowEnd::Idle,
+    })))
+    .unwrap();
+    assert!(idle.contains("ended after a while unused"), "{idle}");
+    assert!(idle.contains("confirm with your passkey"), "{idle}");
+    let failed =
+        blocked(&Session::Failed(ApiError::Network("offline".into()))).unwrap();
+    assert!(failed.contains("send it once Agora answers"), "{failed}");
+}

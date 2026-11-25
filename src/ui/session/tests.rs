@@ -369,7 +369,7 @@ fn draws_each_state() {
     );
     let failed = draw(Session::Failed(ApiError::Network("offline".into())));
     assert!(
-        failed.contains("Couldn&#39;t check who is signed in: Agora couldn&#39;t be reached (offline)"),
+        failed.contains("is hidden until it answers. Your drafts are kept in this tab. (Agora couldn&#39;t be reached (offline))"),
         "{failed}"
     );
     assert!(failed.contains(">Try again</button>"), "{failed}");
@@ -1166,11 +1166,11 @@ fn the_reason_for_no_window_is_said() {
         (CheckWindowEnd::Address, "because your network changed"),
         (
             CheckWindowEnd::Suspended,
-            "your other passkeys can still confirm",
+            "another passkey of yours, if you have one, can confirm",
         ),
         (
             CheckWindowEnd::Frozen,
-            "the passkeys the freeze left in effect can still confirm",
+            "a passkey the freeze left in effect, if you have one, can confirm",
         ),
         (CheckWindowEnd::SignedOut, "signed out"),
         (CheckWindowEnd::Clock, "as a precaution"),
@@ -1199,7 +1199,7 @@ fn the_reason_for_no_window_is_said() {
     );
     let page = draw_check_needed(s);
     assert!(
-        page.contains("your other passkeys can still confirm"),
+        page.contains("another passkey of yours, if you have one, can confirm"),
         "{page}"
     );
 }
@@ -1234,4 +1234,23 @@ fn no_tap_is_offered_where_one_would_be_refused() {
     assert!(page.contains("a tap from here would be refused"), "{page}");
     assert!(page.contains("public address"), "{page}");
     assert!(!page.contains("Confirm with a passkey</button>"), "{page}");
+}
+
+/// The wording each reason needs: signed out isn't "still signed in", a
+/// clock end promises nothing, an unusable address asks for no tap
+#[test]
+fn each_reason_says_only_what_is_true() {
+    use crate::enums::CheckWindowEnd;
+    let out = check_needed_line(Some(NoWindow::Ended {
+        ended: CheckWindowEnd::SignedOut,
+    }));
+    assert!(!out.contains("still signed in"), "{out}");
+    let clock = check_needed_line(Some(NoWindow::Ended {
+        ended: CheckWindowEnd::Clock,
+    }));
+    assert!(clock.contains("Confirm again"), "{clock}");
+    assert!(!clock.contains("fixes"), "{clock}");
+    let lan = check_needed_line(Some(NoWindow::AddressUnusable));
+    assert!(!lan.to_lowercase().contains("confirm"), "{lan}");
+    assert!(lan.contains("Your drafts stay in this tab"), "{lan}");
 }

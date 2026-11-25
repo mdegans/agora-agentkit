@@ -495,15 +495,25 @@ fn blocked(session: &Session) -> Option<String> {
              again in another tab, then press “I've signed in”."
                 .to_owned(),
         ),
-        Session::CheckNeeded(_) => Some(
-            "Agora needs a recent passkey check before this can be sent. \
-             Your text is kept here: confirm with your passkey, then send \
-             it."
-            .to_owned(),
-        ),
+        // The box says why itself: the reason, and what to do
+        Session::CheckNeeded(why) => Some(match why {
+            Some(crate::operator::NoWindow::AddressUnusable) => format!(
+                "This can't be sent from this connection: {}. Your text \
+                 stays in this tab; send it once this tab reaches Agora \
+                 through its public address.",
+                super::session::no_window_words(*why)
+            ),
+            _ => format!(
+                "Agora needs a recent passkey check before this can be sent: \
+                 {}. Your text is kept here: confirm with your passkey, then \
+                 send it.",
+                super::session::no_window_words(*why)
+            ),
+        }),
         Session::Loading => Some("Checking who is signed in…".to_owned()),
         Session::Failed(e) => Some(format!(
-            "Couldn't check who is signed in ({e}). Your text is kept here."
+            "Agora couldn't be reached ({e}), so this can't be sent now. Your \
+             text is kept here; send it once Agora answers."
         )),
     }
 }
@@ -1105,6 +1115,8 @@ fn use_drawn_here(drafts: Option<Drafts>, key: Option<DraftKey>) {
 /// no client provided the store (the server)
 #[component]
 pub fn UnsentDrafts() -> Element {
+    // Hooks first, whatever is drawn
+    let session = super::session::try_use_session();
     let Some(drafts) = try_use_context::<Drafts>() else {
         return rsx! {};
     };
@@ -1133,8 +1145,18 @@ pub fn UnsentDrafts() -> Element {
     let here = drafts.portal.peek().here().map(|here| {
         here.split(['?', '#']).next().unwrap_or_default().to_owned()
     });
-    let check_needed = super::session::try_use_session()
-        .is_some_and(|h| matches!(h.get(), Session::CheckNeeded(_)));
+    let state = session.map(|h| h.get());
+    let hidden_why = match state {
+        Some(Session::CheckNeeded(_)) => Some(
+            "Its box is on this page, hidden until you confirm with your passkey.",
+        ),
+        Some(Session::Failed(_)) | Some(Session::Loading) => Some(
+            "Its box is on this page, hidden until Agora answers; it opens again here as it was.",
+        ),
+        _ => None,
+    };
+    let hidden_words =
+        hidden_why.unwrap_or("Its box isn't shown on this page now.");
     rsx! {
         div { class: "ui-compose ui-drafts",
             details {
@@ -1152,11 +1174,7 @@ pub fn UnsentDrafts() -> Element {
                             div { class: "ui-actions",
                                 if here.as_deref() == Some(key.page().site_path().as_str()) {
                                     span { class: "ui-note",
-                                        if check_needed {
-                                            "Its box is on this page, hidden until you confirm with your passkey."
-                                        } else {
-                                            "Its box isn't shown on this page now."
-                                        }
+                                        "{hidden_words}"
                                     }
                                 } else {
                                     super::route::To {

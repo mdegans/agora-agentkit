@@ -761,6 +761,22 @@ pub enum WindowTap {
     Failed(String),
 }
 
+/// How far past a probe's due time, by the browser's clock, the page takes
+/// it that it was asleep (a laptop's lid closed, a phone's tab frozen):
+/// what is the operator's alone is hidden at once, before the server is
+/// asked. The browser's clock compared with itself: elapsed time, never
+/// when the window ends
+pub const SLEPT_PAST: TimeDelta = TimeDelta::seconds(20);
+
+/// How often the page compares the browser's clock with the probe's due
+/// time, for where a timer doesn't count suspended time or the page isn't
+/// reported hidden
+pub const HEARTBEAT: Duration = Duration::from_secs(45);
+
+/// The shortest wait before a probe: a status whose window ended already
+/// is asked again a second on, not at once in a loop
+const PROBE_MIN: Duration = Duration::from_secs(1);
+
 /// The probe of the window's end: which one is current, and since when
 /// probes have gone unanswered
 #[derive(Debug, Clone, Copy, Default)]
@@ -768,6 +784,13 @@ struct Probe {
     /// Bumped by each probe set; a probe that wakes to another number was
     /// replaced, and asks nothing
     generation: u64,
+    /// Bumped by each question the probe asks: an answer to an older one is
+    /// dropped. The probe's own count, so a refresh never drops a probe's
+    /// answer (nor the next probe it sets)
+    asked: u64,
+    /// When the current probe is due, by the browser's clock: compared
+    /// only with that clock ([`SLEPT_PAST`])
+    due: Option<DateTime<Utc>>,
     /// When the first of the probes that have gone unanswered since the
     /// last answer was made, by the browser's clock (only ever compared
     /// with that clock, for [`PROBE_UNKNOWN_FOR`])
@@ -886,16 +909,29 @@ impl SessionHandle {
             Ok(_) | Err(ApiError::SignedOut(_)) => true,
             Err(e) => e.code() == Some(RefusalCode::CheckNeeded),
         };
+        let failure = match &answer {
+            Err(e) if !answered => Some(e.clone()),
+            _ => None,
+        };
         let mut next = self.state.peek().clone();
         next.after_refresh(answer);
         let window = match &next {
             Session::SignedIn(s) => Some(*s.window()),
             _ => None,
         };
+        let unreachable = matches!(next, Session::Failed(_));
         self.replace(next);
         match (answered, window) {
             (true, Some(window)) => self.set_probe(window),
             (true, None) => self.cancel_probe(),
+            // A page that couldn't reach Agora keeps asking, whatever
+            // started this refresh (a probe's, "Try again"), so it never
+            // stays hidden once Agora answers
+            (false, _) if unreachable => {
+                if let Some(e) = failure {
+                    self.probe_failed(e);
+                }
+            }
             (false, _) => {}
         }
     }
@@ -913,11 +949,16 @@ impl SessionHandle {
     ///   again, never dropped ([`Self::probe_failed`])
     fn probe(self) {
         self.watch_returns();
-        let generation = self.begin_refresh();
+        let asked = {
+            let mut probe = self.probe;
+            let mut p = probe.write();
+            p.asked += 1;
+            p.asked
+        };
         let answer = self.portal().window_status();
         dioxus::core::spawn_forever(async move {
             let answer = answer.await;
-            if *self.generation.peek() != generation {
+            if self.probe.peek().asked != asked {
                 return;
             }
             match answer {
@@ -970,9 +1011,15 @@ impl SessionHandle {
             p.failures = p.failures.saturating_add(1);
             (since, p.failures)
         };
-        if now - since >= PROBE_UNKNOWN_FOR
-            && matches!(*self.state.peek(), Session::SignedIn(_))
-        {
+        // A page woken from sleep (already hidden, `Loading`) says at once
+        // that Agora couldn't be reached; one that was showing a window
+        // after the bound
+        let hide = match *self.state.peek() {
+            Session::Loading => true,
+            Session::SignedIn(_) => now - since >= PROBE_UNKNOWN_FOR,
+            _ => false,
+        };
+        if hide {
             self.inbox.forget_reads();
             self.replace(Session::Failed(e));
         }
@@ -994,7 +1041,8 @@ impl SessionHandle {
     fn set_probe(self, window: CheckWindowStatus) {
         let wait = (window.ends_at() + PROBE_AFTER_END - window.now)
             .to_std()
-            .unwrap_or(Duration::ZERO);
+            .unwrap_or(Duration::ZERO)
+            .max(PROBE_MIN);
         self.set_probe_in(wait);
     }
 
@@ -1002,8 +1050,17 @@ impl SessionHandle {
     /// replaces this one
     fn set_probe_in(self, wait: Duration) {
         self.cancel_probe();
-        let generation = self.probe.peek().generation;
-        let woken = self.portal().after(wait.min(PROBE_MAX));
+        let wait = wait.min(PROBE_MAX);
+        let portal = self.portal();
+        let due = portal.now()
+            + TimeDelta::from_std(wait).unwrap_or(TimeDelta::zero());
+        let generation = {
+            let mut probe = self.probe;
+            let mut p = probe.write();
+            p.due = Some(due);
+            p.generation
+        };
+        let woken = portal.after(wait);
         dioxus::core::spawn_forever(async move {
             woken.await;
             self.probe_now(generation);
@@ -1017,12 +1074,44 @@ impl SessionHandle {
         if self.probe.peek().generation != generation
             || !matches!(
                 *self.state.peek(),
-                Session::SignedIn(_) | Session::Failed(_)
+                Session::SignedIn(_) | Session::Failed(_) | Session::Loading
             )
         {
             return;
         }
+        self.hide_if_slept();
         self.probe();
+    }
+
+    /// Whether the page slept past its probe's due time
+    /// ([`SLEPT_PAST`]); if so, and it shows a window as open, what is the
+    /// operator's alone is hidden at once (the state is `Loading` until
+    /// the server answers), before anything is asked. True when it slept
+    fn hide_if_slept(self) -> bool {
+        let Some(due) = self.probe.peek().due else {
+            return false;
+        };
+        if self.portal().now() <= due + SLEPT_PAST {
+            return false;
+        }
+        if matches!(*self.state.peek(), Session::SignedIn(_)) {
+            self.inbox.forget_reads();
+            self.replace(Session::Loading);
+        }
+        true
+    }
+
+    /// The heartbeat: a page that slept past its probe's due time, without
+    /// its timer or a visibility event saying so, hides and asks
+    fn beat(self) {
+        if matches!(*self.tap.peek(), WindowTap::Asking | WindowTap::Opening) {
+            return;
+        }
+        if matches!(*self.state.peek(), Session::SignedIn(_))
+            && self.hide_if_slept()
+        {
+            self.probe();
+        }
     }
 
     /// The page is shown again (a tab brought back, a page restored from
@@ -1037,6 +1126,7 @@ impl SessionHandle {
             *self.state.peek(),
             Session::SignedIn(_) | Session::CheckNeeded(_) | Session::Failed(_)
         ) {
+            self.hide_if_slept();
             self.probe();
         }
     }
@@ -1053,10 +1143,17 @@ impl SessionHandle {
             p.watching = true;
         }
         let portal = self.portal();
+        let beats = portal.clone();
         dioxus::core::spawn_forever(async move {
             loop {
                 portal.shown_again().await;
                 self.check_now();
+            }
+        });
+        dioxus::core::spawn_forever(async move {
+            loop {
+                beats.after(HEARTBEAT).await;
+                self.beat();
             }
         });
     }
@@ -1088,15 +1185,15 @@ impl SessionHandle {
             return;
         }
         self.set_tap(WindowTap::Asking);
-        // The status (never a use): a later fetch wins over it
-        let generation = self.begin_refresh();
+        // The status (never a use). A probe in flight is superseded: this
+        // question answers for it
+        {
+            let mut probe = self.probe;
+            probe.write().asked += 1;
+        }
         let status = self.portal().window_status();
         dioxus::core::spawn_forever(async move {
             let status = status.await;
-            if *self.generation.peek() != generation {
-                self.set_tap(WindowTap::Idle);
-                return;
-            }
             match status {
                 // Open already (another tab): the bootstrap, and on
                 Ok(_) => {
@@ -1187,6 +1284,12 @@ impl SessionHandle {
             return;
         }
         self.set_tap(WindowTap::Opening);
+        // A probe asked before the tap answers for a window that may not
+        // be the one now: dropped
+        {
+            let mut probe = self.probe;
+            probe.write().asked += 1;
+        }
         let generation = self.begin_refresh();
         let answer = self.portal().session();
         dioxus::core::spawn_forever(async move {
@@ -1496,7 +1599,7 @@ pub fn SessionStatusView(
         },
         Session::Failed(e) => rsx! {
             p { class: "post-meta", role: "status",
-                "Couldn't check who is signed in: {e} "
+                "{UNREACHABLE_LINE} ({e}) "
                 button {
                     class: "pill pill-btn",
                     r#type: "button",
@@ -1510,8 +1613,8 @@ pub fn SessionStatusView(
 }
 
 /// Why there is no passkey check open for this page, in a clause for a
-/// person, by what the server said ([`NoWindow`]); with no reason, what is
-/// true in every case
+/// person, by what the server said ([`NoWindow`], matched exhaustively);
+/// with no reason, what is true in every case
 pub fn no_window_words(why: Option<NoWindow>) -> &'static str {
     use crate::enums::CheckWindowEnd;
     match why {
@@ -1533,50 +1636,107 @@ pub fn no_window_words(why: Option<NoWindow>) -> &'static str {
             }
             CheckWindowEnd::Suspended => {
                 "the passkey check for this session ended because the passkey \
-                 that opened it was suspended; your other passkeys can still \
-                 confirm"
+                 that opened it was suspended; another passkey of yours, if you \
+                 have one, can confirm"
             }
             CheckWindowEnd::Frozen => {
                 "the passkey check for this session ended because your account \
-                 was frozen; the passkeys the freeze left in effect can still \
-                 confirm"
+                 was frozen; a passkey the freeze left in effect, if you have \
+                 one, can confirm"
             }
             CheckWindowEnd::SignedOut => {
                 "the passkey check for this session ended when the session was \
                  signed out"
             }
             CheckWindowEnd::Clock => {
-                "Agora ended the passkey check for this session as a \
-                 precaution (its stored times were ahead of Agora's clock); \
-                 a fresh check fixes it"
+                "Agora ended the passkey check for this session as a precaution \
+                 (its stored times were ahead of Agora's clock)"
             }
         },
         Some(NoWindow::AddressUnusable) => {
             "this connection doesn't tell Agora which network you're on, so no \
              passkey check can be opened or used over it, and a tap from here \
-             would be refused: reach Agora through its public address (not \
-             straight over the local network), and confirm from there"
+             would be refused"
         }
     }
 }
 
-/// What the session line says outside a check window: still signed in,
-/// why there is no check ([`no_window_words`]), what that means here, what
-/// is kept, and what to do
+/// What the page says to do about it, after [`no_window_words`]
+pub fn no_window_next(why: Option<NoWindow>) -> &'static str {
+    use crate::enums::CheckWindowEnd;
+    match why {
+        Some(NoWindow::AddressUnusable) => {
+            "Your drafts stay in this tab, and it carries on once this tab \
+             reaches Agora through its public address (not straight over the \
+             local network)."
+        }
+        Some(NoWindow::Ended {
+            ended: CheckWindowEnd::Clock,
+        }) => {
+            "Confirm again with your passkey to carry on here; your drafts \
+               are kept."
+        }
+        Some(NoWindow::Ended {
+            ended: CheckWindowEnd::SignedOut,
+        }) => "Sign in again to carry on; your drafts are kept in this tab.",
+        None
+        | Some(NoWindow::NeverOpened)
+        | Some(NoWindow::Ended {
+            ended:
+                CheckWindowEnd::Idle
+                | CheckWindowEnd::Absolute
+                | CheckWindowEnd::Address
+                | CheckWindowEnd::Suspended
+                | CheckWindowEnd::Frozen,
+        }) => {
+            "Confirm with your passkey to carry on here; your drafts are \
+               kept."
+        }
+    }
+}
+
+/// `clause` with its first letter capital, for the start of a sentence
+pub(crate) fn sentence(clause: &str) -> String {
+    let mut out = clause.to_owned();
+    if let Some(first) = out.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    out
+}
+
+/// What the session line says outside a check window: whether still
+/// signed in, why there is no check ([`no_window_words`]), what that means
+/// here, what is kept, and what to do ([`no_window_next`])
 pub fn check_needed_line(why: Option<NoWindow>) -> String {
-    format!(
-        "You're still signed in, but {}. Until you confirm, this page shows \
-         only what anyone can see. Confirm with your passkey to carry on \
-         here; your drafts are kept.",
-        no_window_words(why)
-    )
+    use crate::enums::CheckWindowEnd;
+    let because = no_window_words(why);
+    let next = no_window_next(why);
+    match why {
+        // Not "still signed in": the session was signed out
+        Some(NoWindow::Ended {
+            ended: CheckWindowEnd::SignedOut,
+        }) => format!(
+            "{}. This page shows only what anyone can see. {next}",
+            sentence(because)
+        ),
+        _ => format!(
+            "You're still signed in, but {because}. Until then, this page shows \
+             only what anyone can see. {next}"
+        ),
+    }
 }
 
 /// [`check_needed_line`] with no reason: true however the page got there
 pub const CHECK_NEEDED_LINE: &str = "You're still signed in, but there is no \
-     passkey check open for this page. Until you confirm, this page shows only \
-     what anyone can see. Confirm with your passkey to carry on here; your \
-     drafts are kept.";
+     passkey check open for this page. Until then, this page shows only what \
+     anyone can see. Confirm with your passkey to carry on here; your drafts \
+     are kept.";
+
+/// What the session line says when Agora couldn't be reached: what is
+/// hidden, until when, and that the drafts are kept
+pub const UNREACHABLE_LINE: &str = "Agora couldn't be reached, so what is \
+     yours (your inbox, posting) is hidden until it answers. Your drafts are \
+     kept in this tab.";
 
 /// When the check window ends, in words: when it ends if unused, and at
 /// the latest (one time when they are the same)

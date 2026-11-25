@@ -1389,3 +1389,100 @@ async fn an_unreachable_probe_hides_the_inbox() {
     assert!(html.contains("a private hello"), "{html}");
     assert!(portal.0.borrow().inbox_calls > reads, "read again");
 }
+
+/// Woken hours after the window's end, offline: the private messages go at
+/// once (the page slept past its probe), before any answer, and the page
+/// says Agora couldn't be reached
+#[tokio::test]
+async fn woken_long_after_the_end_hides_at_once() {
+    let from_ada = fixtures::message(1, "ada", "a private hello", true);
+    let portal = with(vec![from_ada], ada());
+    let (mut h, html) = Harness::new(&portal).await;
+    assert!(html.contains("a private hello"), "{html}");
+    let end = fixtures::portal_session(true).window.ends_at();
+    portal.0.borrow_mut().now = Some(end + chrono::TimeDelta::hours(3));
+    portal.0.borrow_mut().session =
+        Some(Err(ApiError::Network("asleep".into())));
+    portal.fire_last();
+    let html = h.settle().await;
+    assert!(!html.contains("a private hello"), "{html}");
+    assert!(html.contains(INBOX_UNREACHABLE), "{html}");
+}
+
+/// The heartbeat finds a sleep no timer reported: hidden, then asked
+#[tokio::test]
+async fn the_heartbeat_finds_a_sleep() {
+    let from_ada = fixtures::message(1, "ada", "a private hello", true);
+    let portal = with(vec![from_ada], ada());
+    let (mut h, _) = Harness::new(&portal).await;
+    let end = fixtures::portal_session(true).window.ends_at();
+    portal.0.borrow_mut().now = Some(end + chrono::TimeDelta::hours(3));
+    portal.0.borrow_mut().session =
+        Some(Err(crate::ui::test_portal::check_needed()));
+    let asked = portal.0.borrow().status_calls;
+    portal.beat();
+    let html = h.settle().await;
+    assert!(!html.contains("a private hello"), "{html}");
+    assert!(
+        portal.0.borrow().status_calls > asked,
+        "asked after the beat"
+    );
+    assert!(html.contains(INBOX_CHECK_NEEDED), "{html}");
+}
+
+/// A page that couldn't reach Agora comes back when it answers, even when
+/// the status answers before the bootstrap does, and when "Try again" is
+/// pressed while a retry is in flight
+#[tokio::test]
+async fn an_unreachable_page_comes_back_when_agora_answers() {
+    let from_ada = fixtures::message(1, "ada", "a private hello", true);
+    let portal = with(vec![from_ada], ada());
+    let (mut h, _) = Harness::new(&portal).await;
+    let end = fixtures::portal_session(true).window.ends_at();
+    portal.0.borrow_mut().now = Some(end + chrono::TimeDelta::hours(3));
+    portal.0.borrow_mut().session =
+        Some(Err(ApiError::Network("asleep".into())));
+    portal.fire_last();
+    h.settle().await;
+    // The status is back, the bootstrap not yet: still asking
+    portal
+        .0
+        .borrow_mut()
+        .status_answers
+        .push_back(Ok(fixtures::portal_session(true).window));
+    let waits = portal.0.borrow().waits.len();
+    portal.fire_last();
+    let html = h.settle().await;
+    assert!(html.contains(INBOX_UNREACHABLE), "{html}");
+    assert!(portal.0.borrow().waits.len() > waits, "a next question set");
+    // "Try again" while that retry waits: still failing, still asking
+    let handle = h.act(consume_context::<session::SessionHandle>);
+    h.act(|| handle.refresh());
+    h.settle().await;
+    // Agora answers
+    portal.0.borrow_mut().session = Some(Ok(fixtures::portal_session(true)));
+    portal.fire_last();
+    let html = h.settle().await;
+    assert!(html.contains("a private hello"), "{html}");
+}
+
+/// A connection that can't hold a window: the inbox, the session line and
+/// a compose box say why and what will bring it back, and none asks for a
+/// confirmation it can't give
+#[tokio::test]
+async fn an_unusable_address_never_asks_to_confirm() {
+    let portal = with(vec![], ada());
+    portal.0.borrow_mut().session = Some(Err(ApiError::refused(
+        403,
+        crate::errors::CheckNeeded::new(
+            "x",
+            crate::operator::NoWindow::AddressUnusable,
+        )
+        .into(),
+    )));
+    let (_h, html) = Harness::new(&portal).await;
+    let html = html.replace("&#39;", "'");
+    assert!(html.contains("public address"), "{html}");
+    assert!(!html.to_lowercase().contains("confirm"), "{html}");
+    assert!(html.contains("Your drafts stay in this tab"), "{html}");
+}

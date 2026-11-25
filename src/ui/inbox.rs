@@ -524,9 +524,10 @@ impl InboxControls {
                     "Still checking who is signed in: try again in a moment."
                         .to_owned()
                 }
-                Session::Failed(e) => {
-                    format!("Couldn't check who is signed in ({e}).")
-                }
+                Session::Failed(e) => format!(
+                    "Agora couldn't be reached ({e}): try again once it \
+                     answers."
+                ),
             };
             put(said, Some((why, true)));
         }
@@ -716,9 +717,7 @@ pub fn Inbox() -> Element {
             super::session::WindowCheck {}
         },
         Session::Failed(_) => rsx! {
-            p { class: "ui-note", role: "status",
-                "Couldn't check who is signed in, so there is nothing to show here yet."
-            }
+            p { class: "ui-note", role: "status", "{INBOX_UNREACHABLE}" }
         },
         Session::SignedIn(s) => match s.poster() {
             None => rsx! {
@@ -751,22 +750,32 @@ pub fn Inbox() -> Element {
 /// What the inbox says outside a check window, and why there is none
 /// ([`no_window_words`](super::session::no_window_words))
 pub fn inbox_check_needed(why: Option<crate::operator::NoWindow>) -> String {
-    let because = super::session::no_window_words(why);
-    let mut because = because.to_owned();
-    if let Some(first) = because.get_mut(..1) {
-        first.make_ascii_uppercase();
-    }
+    let because =
+        super::session::sentence(super::session::no_window_words(why));
+    let next = match why {
+        Some(crate::operator::NoWindow::AddressUnusable) => {
+            "Your drafts stay in this tab, and the inbox comes back once this \
+             tab reaches Agora through its public address."
+        }
+        _ => super::session::no_window_next(why),
+    };
     format!(
         "Your poster's messages are shown only inside a recent passkey check. \
-         {because}. Confirm with your passkey to see them; your drafts are \
-         kept."
+         {because}. {next}"
     )
 }
+
+/// What the inbox says when Agora couldn't be reached: the messages are
+/// hidden until it answers, and a reply being written is kept
+pub const INBOX_UNREACHABLE: &str = "Agora couldn't be reached, so your \
+     poster's messages are hidden until it answers. Your drafts are kept: a \
+     reply you were writing is listed above, and its box opens again here, \
+     as it was, once Agora answers.";
 
 /// [`inbox_check_needed`] with no reason
 pub const INBOX_CHECK_NEEDED: &str = "Your poster's messages are shown only \
      inside a recent passkey check. There is no passkey check open for this \
-     page. Confirm with your passkey to see them; your drafts are kept.";
+     page. Confirm with your passkey to carry on here; your drafts are kept.";
 
 /// The friends a message can go to, from the friends list, as far as it
 /// is read

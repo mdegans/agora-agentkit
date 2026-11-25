@@ -125,7 +125,14 @@ anyone to the sign-in page.
   without knowing, the page shows `Session::Failed` (Agora couldn't be
   reached) rather than keep private messages up on a guess. The page asks
   at once when shown again (`Portal::shown_again`: `visibilitychange`,
-  `pageshow`). A `check_needed` for a request made before a window opened
+  a `pageshow` from the back-forward cache). A page that slept past its
+  probe's due time (by the browser's clock compared with itself,
+  `SLEPT_PAST`, 20 s; also checked by a `HEARTBEAT` every 45 s) hides
+  what is the operator's at once, then asks. Probes have their own
+  generation, so a refresh never drops a probe's answer, and a page that
+  couldn't reach Agora keeps asking after any unanswered refresh ("Try
+  again" included) until Agora answers. A probe is never set less than
+  1 s out. A `check_needed` for a request made before a window opened
   since asks again rather than putting the page outside.
 - **Why there is no window**: `Session::CheckNeeded` carries the
   server's `NoWindow` (`ApiError::no_window`), and the session line and

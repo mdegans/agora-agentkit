@@ -41,6 +41,12 @@ pub struct Fake {
     /// How many times the window's status was asked for (it answers as the
     /// bootstrap does: its window, or its refusal)
     pub status_calls: usize,
+    /// The status's answers, in order, before it answers as the bootstrap
+    /// does: so a test can script the status and the bootstrap apart
+    pub status_answers: VecDeque<Result<CheckWindowStatus, ApiError>>,
+    /// The heartbeat's waits ([`crate::ui::session::HEARTBEAT`]), kept
+    /// apart from the probes'
+    pub beats: Vec<Option<oneshot::Sender<()>>>,
     /// Answers to posts, in order; a post past them gets a 201 for
     /// [`created_post`]
     pub post_answers: VecDeque<Result<PostCreated, ApiError>>,
@@ -203,6 +209,18 @@ impl FakePortal {
     pub fn fire_last(&self) {
         let n = self.0.borrow().waits.len() - 1;
         self.fire(n);
+    }
+
+    /// The heartbeat beats once
+    pub fn beat(&self) {
+        let sender = self
+            .0
+            .borrow_mut()
+            .beats
+            .iter_mut()
+            .rev()
+            .find_map(Option::take);
+        sender.expect("the page beats").send(()).unwrap();
     }
 
     /// The page is shown again (a tab brought back)
@@ -438,6 +456,9 @@ impl Portal for FakePortal {
     ) -> LocalBoxFuture<'static, Result<CheckWindowStatus, ApiError>> {
         let mut fake = self.0.borrow_mut();
         fake.status_calls += 1;
+        if let Some(answer) = fake.status_answers.pop_front() {
+            return ready(answer);
+        }
         ready(match fake.session.clone() {
             Some(Ok(session)) => Ok(session.window),
             Some(Err(e)) => Err(e),
@@ -479,7 +500,7 @@ impl Portal for FakePortal {
         self.0
             .borrow()
             .now
-            .unwrap_or(crate::fixtures::portal_session(true).window.opened_at)
+            .unwrap_or(crate::fixtures::portal_session(true).window.now)
     }
 
     fn shown_again(&self) -> LocalBoxFuture<'static, ()> {
@@ -495,7 +516,11 @@ impl Portal for FakePortal {
 
     fn after(&self, delay: Duration) -> LocalBoxFuture<'static, ()> {
         let (tx, rx) = oneshot::channel();
-        self.0.borrow_mut().waits.push((delay, Some(tx)));
+        if delay == crate::ui::session::HEARTBEAT {
+            self.0.borrow_mut().beats.push(Some(tx));
+        } else {
+            self.0.borrow_mut().waits.push((delay, Some(tx)));
+        }
         async move {
             // Dropped unfired (the fake gone): the wait never ends
             if rx.await.is_err() {
