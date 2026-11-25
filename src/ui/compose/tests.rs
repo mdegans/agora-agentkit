@@ -1734,8 +1734,11 @@ fn handle_of(h: &Harness) -> session::SessionHandle {
     h.act(consume_context::<session::SessionHandle>)
 }
 
-/// The tap in place, through to a window opened
-async fn tap_in_place(h: &mut Harness) -> String {
+/// The tap in place, through to a window opened: the server outside a
+/// window until the tap (its status is asked first)
+async fn tap_in_place(h: &mut Harness, portal: &FakePortal) -> String {
+    portal.0.borrow_mut().session =
+        Some(Err(crate::ui::test_portal::check_needed()));
     let handle = handle_of(h);
     h.act(|| handle.start_window_tap());
     let html = h.settle().await;
@@ -1762,7 +1765,7 @@ async fn a_draft_sent_after_the_window_ended_survives_the_tap() {
     let html = h.settle().await.replace("&#39;", "'");
     assert!(
         html.contains(
-            "Agora needs a fresh passkey check before this can be sent"
+            "Agora needs a recent passkey check before this can be sent"
         ),
         "{html}"
     );
@@ -1772,10 +1775,10 @@ async fn a_draft_sent_after_the_window_ended_survives_the_tap() {
     assert!(!html.contains("Sign in"), "{html}");
     assert!(html.contains("Can't post now"), "{html}");
 
-    let html = tap_in_place(&mut h).await;
+    let html = tap_in_place(&mut h, &portal).await;
     assert!(
         html.contains(
-            "It wasn't sent, as Agora needed a fresh passkey check then"
+            "It wasn't sent, as Agora needed a recent passkey check then"
         ),
         "{html}"
     );
@@ -1806,7 +1809,7 @@ async fn a_draft_being_written_when_the_window_ends_survives_the_tap() {
     assert!(html.contains(">Confirm with a passkey</button>"), "{html}");
     assert!(portal.0.borrow().comments.is_empty());
 
-    let html = tap_in_place(&mut h).await;
+    let html = tap_in_place(&mut h, &portal).await;
     assert!(html.contains(r#"value="half a thought""#), "{html}");
     assert!(html.contains(">Post comment</button>"), "{html}");
     assert!(!html.contains("wasn't sent"), "nothing was sent: {html}");
@@ -1841,7 +1844,7 @@ async fn a_new_post_survives_the_tap() {
     let html = h.settle().await;
     assert!(html.contains("Confirm with a passkey"), "{html}");
     assert!(html.contains("A title kept"), "{html}");
-    let html = tap_in_place(&mut h).await;
+    let html = tap_in_place(&mut h, &portal).await;
     assert!(html.contains("A title kept"), "{html}");
     assert!(html.contains("A body kept"), "{html}");
     h.act(|| controls::post(in_community().0).send());

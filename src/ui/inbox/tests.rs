@@ -45,8 +45,19 @@ async fn settle(dom: &mut VirtualDom) -> String {
 
 fn slots() -> ClientSlots {
     ClientSlots::new()
-        .with(ClientSlot::Session, InboxLink)
+        .with(ClientSlot::Session, SessionLine)
         .with(ClientSlot::Inbox, Inbox)
+}
+
+/// The session slot as agora-web draws it: who is signed in, the inbox's
+/// link, and the drafts no box on the page draws
+#[allow(non_snake_case)]
+fn SessionLine() -> Element {
+    rsx! {
+        session::SessionStatus {}
+        InboxLink {}
+        crate::ui::compose::UnsentDrafts {}
+    }
 }
 
 #[allow(non_snake_case)]
@@ -61,6 +72,7 @@ struct Harness {
 
 impl Harness {
     async fn new(portal: &FakePortal) -> (Self, String) {
+        portal.0.borrow_mut().here = Some("/agora/inbox".into());
         let mut dom = VirtualDom::new(Root);
         dom.provide_root_context(slots());
         session::provide(&dom, portal.clone());
@@ -1197,14 +1209,18 @@ async fn a_reply_being_written_survives_the_windows_end() {
     let html = h.settle().await;
     assert!(html.contains(INBOX_CHECK_NEEDED), "{html}");
     assert!(html.contains(">Confirm with a passkey</button>"), "{html}");
-    for private in [
-        "a private hello",
-        "a reply in progress",
-        "ui-inbox-list",
-        "dee",
-    ] {
+    for private in ["a private hello", "ui-inbox-list", "dee"] {
         assert!(!html.contains(private), "{private}: {html}");
     }
+    // The operator's own text stays reachable, read-only, in the list of
+    // drafts: its box is on this page, hidden, so no link to this page
+    assert_eq!(html.matches("a reply in progress").count(), 1, "{html}");
+    assert!(html.contains("readonly=true"), "{html}");
+    assert!(
+        html.contains("Its box is on this page, hidden until you confirm with your passkey."),
+        "{html}"
+    );
+    assert!(!html.contains("Open its page"), "{html}");
     assert!(!html.contains("Sign in"), "{html}");
     assert!(!html.contains("login"), "{html}");
 
@@ -1258,11 +1274,118 @@ async fn a_message_refused_check_needed_keeps_its_draft() {
     assert!(html.contains("kept for later"), "{html}");
     assert!(
         html.contains(
-            "It wasn't sent, as Agora needed a fresh passkey check then"
+            "It wasn't sent, as Agora needed a recent passkey check then"
         ),
         "{html}"
     );
     h.act(|| controls::message(MessageTo::New).send());
     let html = h.settle().await;
     assert!(html.contains("Tap your passkey to send"), "{html}");
+}
+
+/// The tap in place, with the server outside a window until it
+async fn tap_in_place(h: &mut Harness, portal: &FakePortal) -> String {
+    portal.0.borrow_mut().session =
+        Some(Err(crate::ui::test_portal::check_needed()));
+    let handle = h.act(consume_context::<session::SessionHandle>);
+    h.act(|| handle.start_window_tap());
+    h.settle().await;
+    h.act(|| handle.confirm_window_tap());
+    h.settle().await
+}
+
+/// A mark and a friendship action refused because the window ended keep
+/// their notice through the tap: it wasn't done, and to press it again
+#[tokio::test]
+async fn a_refused_mark_or_friendship_says_so_after_the_tap() {
+    let from_ada = fixtures::message(1, "ada", "one", true);
+    let portal = with(vec![from_ada.clone()], ada());
+    {
+        let mut fake = portal.0.borrow_mut();
+        fake.mark_answers
+            .push_back(Err(crate::ui::test_portal::check_needed()));
+    }
+    let (mut h, _) = Harness::new(&portal).await;
+    h.act(|| page_controls().mark(vec![from_ada.id]));
+    let html = h.settle().await;
+    assert!(html.contains(INBOX_CHECK_NEEDED), "{html}");
+    let html = tap_in_place(&mut h, &portal).await;
+    assert!(
+        html.contains("Not marked: Agora needed a recent passkey check first."),
+        "{html}"
+    );
+    assert!(html.contains("press it again"), "{html}");
+
+    portal
+        .0
+        .borrow_mut()
+        .friendship_answers
+        .push_back(Err(crate::ui::test_portal::check_needed()));
+    h.act(|| page_controls().friend(FriendshipAction::Request, name("dee")));
+    h.settle().await;
+    let html = tap_in_place(&mut h, &portal).await;
+    assert!(
+        html.contains("Not done: Agora needed a recent passkey check first."),
+        "{html}"
+    );
+}
+
+/// A message's 0x13 tap asked for before the window ended is kept through
+/// the lapse: after the window's tap, "Tap your passkey to send" is still
+/// there, and sends
+#[tokio::test]
+async fn a_pending_message_tap_survives_the_lapse() {
+    let portal = with(vec![], ada());
+    let (mut h, _) = Harness::new(&portal).await;
+    new_message(&mut h, "hello ada").await;
+    h.act(|| controls::message(MessageTo::New).send());
+    let html = h.settle().await;
+    assert!(html.contains("Tap your passkey to send"), "{html}");
+    portal.0.borrow_mut().session =
+        Some(Err(crate::ui::test_portal::check_needed()));
+    portal.fire_last();
+    let html = h.settle().await;
+    assert!(html.contains(INBOX_CHECK_NEEDED), "{html}");
+    let html = tap_in_place(&mut h, &portal).await;
+    assert!(html.contains("Tap your passkey to send"), "{html}");
+    assert!(html.contains("hello ada"), "{html}");
+    h.act(|| controls::message(MessageTo::New).confirm());
+    let html = h.settle().await;
+    assert!(html.contains("Sent to ada."), "{html}");
+    let fake = portal.0.borrow();
+    assert_eq!(fake.messages.len(), 1);
+    assert_eq!(fake.messages[0].payload.body, "hello ada");
+    assert!(fake.messages[0].assertion.is_some());
+}
+
+/// A probe that can't reach Agora for long enough takes the messages off
+/// the page (never kept up on a guess); the drafts stay, and the first
+/// answer brings the inbox back, read again
+#[tokio::test]
+async fn an_unreachable_probe_hides_the_inbox() {
+    let from_ada = fixtures::message(1, "ada", "a private hello", true);
+    let portal = with(vec![from_ada], ada());
+    let (mut h, html) = Harness::new(&portal).await;
+    assert!(html.contains("a private hello"), "{html}");
+    let start = fixtures::portal_session(true).window.ends_at();
+    portal.0.borrow_mut().now = Some(start);
+    portal.0.borrow_mut().session =
+        Some(Err(ApiError::Network("asleep".into())));
+    portal.fire_last();
+    let html = h.settle().await;
+    assert!(html.contains("a private hello"), "a moment's grace: {html}");
+    portal.0.borrow_mut().now = Some(start + session::PROBE_UNKNOWN_FOR);
+    portal.fire_last();
+    let html = h.settle().await;
+    assert!(!html.contains("a private hello"), "{html}");
+    assert!(
+        html.contains("Agora couldn't be reached (asleep)"),
+        "{html}"
+    );
+    let reads = portal.0.borrow().inbox_calls;
+    portal.0.borrow_mut().session = Some(Ok(fixtures::portal_session(true)));
+    portal.fire_last();
+    let html = h.settle().await;
+    assert!(html.contains("a private hello"), "{html}");
+    assert!(portal.0.borrow().inbox_calls > reads, "read again");
 }

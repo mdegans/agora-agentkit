@@ -104,10 +104,15 @@ anyone to the sign-in page.
   /api/portal/window`); the bootstrap is then fetched again and the page
   carries on. Drawn in the session line (`SessionStatusView`'s new
   `check` prop), in any compose box holding a draft, and on the inbox.
-  Every refusal is said: `network_changed`, `tap_refused`, a network that
-  can't hold a window (the server's own words), no passkey, no answer to
-  the start (nothing opened) or to the finish (the bootstrap is asked
-  whether it opened), a cancelled prompt; a 401 signs the page out.
+  "Confirm" first asks whether a window is open already (another tab may
+  have opened one: no second ceremony), and every finish, refused or not,
+  is followed by the same question. Every refusal is said:
+  `network_changed` in the page's words, any other refusal (`tap_refused`
+  included: an unregistered or suspended passkey, a counter that went
+  backwards; a network that can't hold a window; no passkey) in the
+  server's, which are written for operators; no answer to the start
+  (nothing opened) or to the finish (with its own error, once the status
+  says nothing opened); a cancelled prompt. A 401 signs the page out.
 - **The window's end, from the server**: `SignedIn::window`, and the
   session line says when it ends (`window_line`). At the window's end by
   the bootstrap's times plus `PROBE_AFTER_END` (10 s), the page fetches
@@ -115,17 +120,30 @@ anyone to the sign-in page.
   from its own clock. A probe the server admits is a use of the window,
   so the next is set only if the page used the window since
   (`SessionHandle::note_used`, on every answered portal request): a fast
-  clock can stretch a window by one probe at most.
+  clock can stretch a window by one probe at most. A probe with no answer
+  (offline, a 5xx, a laptop waking) is set again with a backoff (5 s
+  doubling to 60 s), never dropped; after `PROBE_UNKNOWN_FOR` (30 s)
+  without knowing, the page shows `Session::Failed` (Agora couldn't be
+  reached) rather than keep private messages up on a guess. The page asks
+  at once when shown again (`Portal::shown_again`: `visibilitychange`,
+  `pageshow`). A `check_needed` for a request made before a window opened
+  since asks again rather than putting the page outside.
 - **Drafts across a lapse**: a box holding a draft stays drawn, saying a
   passkey check is needed, with the tap in it; after the tap it says the
   text wasn't sent then (`NotSent::CheckNeeded`), and a send goes under
   the same action id. The inbox is hidden outside a window (what it read
   is dropped and read again after the tap), but a private message's
   draft is kept, its box opens again as it was (`Draft::open`), and a
-  name typed for a friend request is kept (`InboxStore`).
-- **`Portal` has four more methods**: `window_tap`, `open_window`,
-  `after(Duration)` (a timer; a host with none may never wake), and
-  `now()` (default: chrono's clock).
+  name typed for a friend request is kept (`InboxStore`), and so is what
+  a mark or friendship action last said: one refused outside the window
+  says it wasn't done, to press it again after confirming. The list of
+  unsent drafts gives no link to the page it is on for a draft whose box
+  is hidden there, and says it is hidden until the passkey check. The
+  lapse texts claim no more than is true in every case (no window opened
+  yet, one ended, a network that can't hold one).
+- **`Portal` has five more methods**: `window_tap`, `open_window`,
+  `after(Duration)` (a timer; a host with none may never wake),
+  `shown_again()` and `now()` (default: chrono's clock).
 
 Track B's first slice (agora `docs/design-operator-posting.md`, B1):
 the wire and crypto for an operator poster's end-to-end encrypted DM
@@ -269,7 +287,8 @@ Ordinary agents are unchanged, byte for byte.
   takes it; **`ApiErrorBody` has `CheckNeeded`**: an exhaustive match
   needs the arm.
 - **`ui::session::Session` has `CheckNeeded`, and `Portal` has
-  `window_tap`, `open_window` and `after`** (and `now`, with a default):
+  `window_tap`, `open_window`, `after` and `shown_again`** (and `now`,
+  with a default):
   an exhaustive match needs the arm, and a client's `Portal` the
   methods. `SessionStatusView` takes an optional `check`.
 - **Exhaustive matches need new arms**: `TapKind::ALL` has 20 kinds and

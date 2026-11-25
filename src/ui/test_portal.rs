@@ -84,6 +84,10 @@ pub struct Fake {
     pub now: Option<DateTime<Utc>>,
     /// Each wait asked for, in order, with the sender that ends it
     pub waits: Vec<(Duration, Option<oneshot::Sender<()>>)>,
+    /// The page's listeners for being shown again, in order
+    pub shown: Vec<Option<oneshot::Sender<()>>>,
+    /// The page's own path; `/agora/feed` when `None`
+    pub here: Option<String>,
 }
 
 impl FakePortal {
@@ -192,6 +196,24 @@ impl FakePortal {
         sender.expect("not fired before").send(()).unwrap();
     }
 
+    /// Fires the newest wait asked for (the current probe's timer)
+    pub fn fire_last(&self) {
+        let n = self.0.borrow().waits.len() - 1;
+        self.fire(n);
+    }
+
+    /// The page is shown again (a tab brought back)
+    pub fn show_again(&self) {
+        let sender = self
+            .0
+            .borrow_mut()
+            .shown
+            .iter_mut()
+            .rev()
+            .find_map(Option::take);
+        sender.expect("the page listens").send(()).unwrap();
+    }
+
     /// No one is signed in
     pub fn signed_out() -> Self {
         let fake = Self::default();
@@ -290,7 +312,13 @@ impl Portal for FakePortal {
     }
 
     fn here(&self) -> Option<String> {
-        Some("/agora/feed".into())
+        Some(
+            self.0
+                .borrow()
+                .here
+                .clone()
+                .unwrap_or_else(|| "/agora/feed".into()),
+        )
     }
 
     fn drafts_unsent(&self, unsent: bool) {
@@ -437,6 +465,17 @@ impl Portal for FakePortal {
             .borrow()
             .now
             .unwrap_or(crate::fixtures::portal_session(true).window.opened_at)
+    }
+
+    fn shown_again(&self) -> LocalBoxFuture<'static, ()> {
+        let (tx, rx) = oneshot::channel();
+        self.0.borrow_mut().shown.push(Some(tx));
+        async move {
+            if rx.await.is_err() {
+                futures::future::pending::<()>().await;
+            }
+        }
+        .boxed_local()
     }
 
     fn after(&self, delay: Duration) -> LocalBoxFuture<'static, ()> {

@@ -496,10 +496,10 @@ fn blocked(session: &Session) -> Option<String> {
                 .to_owned(),
         ),
         Session::CheckNeeded => Some(
-            "Agora needs a fresh passkey check before this can be sent: the \
-             last one ended. Your text is kept here: confirm with your \
-             passkey, then send it."
-                .to_owned(),
+            "Agora needs a recent passkey check before this can be sent. \
+             Your text is kept here: confirm with your passkey, then send \
+             it."
+            .to_owned(),
         ),
         Session::Loading => Some("Checking who is signed in…".to_owned()),
         Session::Failed(e) => Some(format!(
@@ -581,7 +581,7 @@ impl NotSent {
                  another tab."
             }
             Self::CheckNeeded => {
-                "It wasn't sent, as Agora needed a fresh passkey check then. \
+                "It wasn't sent, as Agora needed a recent passkey check then. \
                  You can send it now."
             }
         }
@@ -1127,25 +1127,43 @@ pub fn UnsentDrafts() -> Element {
         1 => "1 unsent draft isn't shown on this page".to_owned(),
         n => format!("{n} unsent drafts aren't shown on this page"),
     };
+    // A draft whose box belongs on this very page (the inbox, hidden for a
+    // passkey check, or a message gone since): no link to the page it is
+    // on, and why its box isn't drawn
+    let here = drafts.portal.peek().here().map(|here| {
+        here.split(['?', '#']).next().unwrap_or_default().to_owned()
+    });
+    let check_needed = super::session::try_use_session()
+        .is_some_and(|h| matches!(h.get(), Session::CheckNeeded));
     rsx! {
         div { class: "ui-compose ui-drafts",
             details {
                 summary { class: "post-meta", "{summary}" }
                 p { class: "ui-note",
-                    "Kept in this tab only. A draft is listed here when its box isn't on this \
-                     page: it was started on another page (open that page to send it), or its \
-                     thread was locked or its comment removed since (then it can't be sent; \
-                     copy its text from here if you want it)."
+                    "Kept in this tab only. A draft is listed here when its box isn't drawn: it \
+                     was started on another page (open that page to send it), its box is hidden \
+                     until a passkey check, or its thread was locked or its comment removed \
+                     since (then it can't be sent; copy its text from here if you want it)."
                 }
                 ul { class: "ui-drafts-list",
                     for (key , text , sending) in listed {
                         li { key: "{key.page().site_path()} {key.what()}", class: "ui-drafts-item",
                             span { class: "ui-field-label", "{key.what()}" }
                             div { class: "ui-actions",
-                                super::route::To {
-                                    link: key.page(),
-                                    class: "ui-pill ui-pill-action",
-                                    "Open its page"
+                                if here.as_deref() == Some(key.page().site_path().as_str()) {
+                                    span { class: "ui-note",
+                                        if check_needed {
+                                            "Its box is on this page, hidden until you confirm with your passkey."
+                                        } else {
+                                            "Its box isn't shown on this page now."
+                                        }
+                                    }
+                                } else {
+                                    super::route::To {
+                                        link: key.page(),
+                                        class: "ui-pill ui-pill-action",
+                                        "Open its page"
+                                    }
                                 }
                                 if sending {
                                     span { class: "ui-note", role: "status", "Sending…" }
@@ -2433,7 +2451,7 @@ fn refusal_reason(e: &ApiError) -> String {
         }
         _ => match e.code() {
             Some(RefusalCode::CheckNeeded) => {
-                "Agora needed a fresh passkey check (confirm with your \
+                "Agora needed a recent passkey check (confirm with your \
                  passkey on this page, then send it)."
                     .to_owned()
             }

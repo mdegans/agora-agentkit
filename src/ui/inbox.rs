@@ -170,6 +170,17 @@ pub struct InboxStore {
     /// The name typed for a friend request: kept while the inbox is hidden
     /// for a passkey check, cleared with the owner
     asked_name: Signal<String>,
+    /// A mark in flight, and what the last one said (with whether it was a
+    /// failure): kept while the inbox is hidden for a passkey check, so a
+    /// mark refused outside the window still says so after the tap
+    marking: Signal<bool>,
+    marked: Signal<Option<(String, bool)>>,
+    /// The same for a friendship action
+    befriending: Signal<bool>,
+    friend_said: Signal<Option<(String, bool)>>,
+    /// Bumped whenever the owner changes: a mark's or friendship's answer
+    /// for an earlier owner writes nothing of the new one's page
+    epoch: CopyValue<u64>,
 }
 
 impl PartialEq for InboxStore {
@@ -202,6 +213,11 @@ impl InboxStore {
             friends_asked: CopyValue::new_in_scope(0, ScopeId::ROOT),
             owner: CopyValue::new_in_scope(None, ScopeId::ROOT),
             asked_name: Signal::new_in_scope(String::new(), ScopeId::ROOT),
+            marking: Signal::new_in_scope(false, ScopeId::ROOT),
+            marked: Signal::new_in_scope(None, ScopeId::ROOT),
+            befriending: Signal::new_in_scope(false, ScopeId::ROOT),
+            friend_said: Signal::new_in_scope(None, ScopeId::ROOT),
+            epoch: CopyValue::new_in_scope(0, ScopeId::ROOT),
         }
     }
 
@@ -225,14 +241,20 @@ impl InboxStore {
             return;
         }
         owner.set(now);
+        let mut epoch = self.epoch;
+        *epoch.write() += 1;
         self.forget_reads();
         if !self.asked_name.peek().is_empty() {
             put(self.asked_name, String::new());
         }
+        put(self.marking, false);
+        put(self.marked, None);
+        put(self.befriending, false);
+        put(self.friend_said, None);
     }
 
     /// Drops what was read, and any answer still on its way
-    fn forget_reads(&self) {
+    pub(crate) fn forget_reads(&self) {
         let (mut inbox_asked, mut friends_asked) =
             (self.inbox_asked, self.friends_asked);
         *inbox_asked.write() += 1;
@@ -380,6 +402,12 @@ fn write_failed(e: &ApiError, what: &str) -> String {
         ApiError::SignedOut(_) => "You're no longer signed in: sign in \
              again, in another tab, then refresh."
             .to_owned(),
+        _ if e.code() == Some(crate::errors::RefusalCode::CheckNeeded) => {
+            format!(
+                "Not {what}: Agora needed a recent passkey check first. Once \
+                 you have confirmed with your passkey, press it again."
+            )
+        }
         ApiError::Forbidden(body) => body.human_message(),
         ApiError::Status { message, .. } => {
             format!("Agora refused it: {message}")
@@ -489,7 +517,7 @@ impl InboxControls {
                 Session::SignedOut => "You're no longer signed in: sign in \
                      again, in another tab, then refresh."
                     .to_owned(),
-                Session::CheckNeeded => "Agora needs a fresh passkey check: \
+                Session::CheckNeeded => "Agora needs a recent passkey check: \
                      confirm with your passkey on this page, then try again."
                     .to_owned(),
                 Session::Loading => {
@@ -523,7 +551,11 @@ impl InboxControls {
         }
         put(self.marking, true);
         put(self.marked, None);
+        let epoch = *self.store.epoch.peek();
         self.handle.mark_read(signed_in, request, move |answer| {
+            if *self.store.epoch.peek() != epoch {
+                return;
+            }
             put(self.marking, false);
             match answer {
                 Ok(answer) => {
@@ -583,7 +615,11 @@ impl InboxControls {
         };
         put(self.befriending, true);
         put(self.friend_said, None);
+        let epoch = *self.store.epoch.peek();
         self.handle.friendship(signed_in, request, move |answer| {
+            if *self.store.epoch.peek() != epoch {
+                return;
+            }
             put(self.befriending, false);
             match answer {
                 Ok(answer) => {
@@ -714,9 +750,8 @@ pub fn Inbox() -> Element {
 
 /// What the inbox says outside a check window
 pub const INBOX_CHECK_NEEDED: &str = "Your poster's messages are shown only \
-     after a recent passkey check, and the last one ended (it ran out, or \
-     your network changed). Confirm with your passkey to see them again. \
-     Your drafts are kept; nothing you sent since was done.";
+     inside a recent passkey check, and none is open for this page. Confirm \
+     with your passkey to see them; your drafts are kept.";
 
 /// The friends a message can go to, from the friends list, as far as it
 /// is read
@@ -747,10 +782,10 @@ fn InboxBody(
     let controls = InboxControls {
         handle,
         store,
-        marking: use_signal(|| false),
-        marked: use_signal(|| None),
-        befriending: use_signal(|| false),
-        friend_said: use_signal(|| None),
+        marking: store.marking,
+        marked: store.marked,
+        befriending: store.befriending,
+        friend_said: store.friend_said,
         asked_name: store.asked_name,
     };
     #[cfg(all(test, feature = "dioxus-ssr"))]
