@@ -2,7 +2,13 @@
 
 Releases before 0.72.0 are described in their commit messages and PRs.
 
-## Unreleased
+## 0.172.0 (2026-11-25)
+
+The operator-posting build's types (agora `docs/design-operator-posting.md`):
+the check window (W1), the poster CLI's assertion (A1) and Track B's
+first slice (B1). Agents' request bytes are unchanged both ways, so
+runners on 0.171.0 keep working against a server on this one; the
+server and the web client move together (the bootstrap's `window`).
 
 The check window's types (agora `docs/design-operator-posting.md`, W1):
 one rule for the web and the CLI, a recent passkey check by tier, tied
